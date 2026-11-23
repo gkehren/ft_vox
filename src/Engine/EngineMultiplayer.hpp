@@ -29,21 +29,24 @@ struct Engine::RemoteSession
 		bool fresh(Clock::time_point now) const;
 	};
 
-	RemoteSession(net::udp::Address address, std::optional<uint32_t> expected, const net::wire::PlayerKey &key);
+	RemoteSession(net::udp::Address address, std::optional<uint32_t> expected,
+		const net::wire::PlayerKey &key, std::string namedProfile = {});
+	void startMotionTrace();
 	const net::wire::PlayerState *localPlayer() const;
 	bool ready() const;
+	bool canReconnect() const;
 	void submit(net::wire::Action action);
 	void submitSlots(net::wire::ActionKind operation, int slot, int other = 0);
 	ui::MultiplayerStatus connectionStatus(Clock::time_point now) const;
 	void disconnect() noexcept;
 
 	net::udp::ClientTransport transport;
-	const std::string endpoint;
+	const net::udp::Address address;
+	const std::string endpoint, namedProfile;
 	const std::optional<uint32_t> expectedSeed;
 	std::optional<net::wire::SessionScope> scope;
 	std::optional<net::wire::Welcome> welcome;
 	std::unique_ptr<net::udp::ClientWorld> projection;
-	uint64_t renderEpoch{};
 	SnapshotClock players, items, mobs;
 	net::udp::ClientTickScheduler inputTiming;
 	net::udp::ClientPrediction prediction;

@@ -23,6 +23,8 @@
 
 #include "TestMain.hpp"
 
+int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
+
 namespace
 {
 std::string uniqueSuffix()
@@ -43,7 +45,7 @@ struct TempDirGuard
 };
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
 	constexpr const char *kWorldName = "engine-reload";
 
@@ -62,6 +64,12 @@ int main()
 
 	try
 	{
+		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")
+		{
+			engine->setSavesRootForTests(argv[4]);
+			return runEngineJoinSmoke(*engine, argv[2], argv[3]);
+		}
+
 		// Unique temp saves root (issue #180 review round 4, item 5): the
 		// test must never write repository/saves.
 		const std::filesystem::path repoSaves = std::filesystem::path("saves");

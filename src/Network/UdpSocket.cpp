@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -91,6 +92,12 @@ Address parseAddress(std::string_view ipv4, uint16_t port)
 	    inet_pton(AF_INET, std::string(ipv4).c_str(), &address) != 1)
 		throw std::invalid_argument("expected a numeric IPv4 address");
 	return {ntohl(address.s_addr), port};
+}
+
+void Socket::swap(Socket &other) noexcept
+{
+	std::swap(m_handle, other.m_handle);
+	std::swap(m_address, other.m_address);
 }
 
 namespace

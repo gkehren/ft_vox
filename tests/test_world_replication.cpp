@@ -392,6 +392,9 @@ void testReplication(const fs::path &root)
 
 	const auto firstScope = *first.scope();
 	first.disconnect(now);
+	require(first.status() == udp::ClientStatus::Leaving && first.scope() == firstScope &&
+		first.chunks().empty() && !first.inventory() && !first.latestPlayerSnapshot(),
+		"leaving keeps the reliable link while retiring its gameplay data");
 	until([&] { return first.status() == udp::ClientStatus::Disconnected; }, 2s, "first client could not leave");
 	TerrainGate gate(server::ServerHostProbe::workers(host));
 	server::ServerHostProbe::generationBudget(host, 8);

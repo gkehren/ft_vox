@@ -171,6 +171,44 @@ void testLifecycle()
 	require(loop.owner.players.empty(), "shutdown leaked players");
 }
 
+void testProfileSwitchOnFullEndpoint()
+{
+	Loop loop(1);
+	const auto address = loop.server.address();
+	udp::ClientTransport first(address), replacement(address);
+	first.connect(loop.now);
+	first.poll(loop.now);
+	loop.step();
+	first.poll(loop.now);
+	require(first.scope() && first.welcome(), "initial profile did not join");
+	const auto oldScope = first.scope();
+	const auto oldPlayer = first.welcome()->player;
+
+	first.disconnect(loop.now);
+	first.poll(loop.now);
+	loop.server.poll(loop.now); // Acknowledge leaving before the tick owner can release the slot.
+	first.poll(loop.now);
+	require(first.status() == udp::ClientStatus::Disconnected && loop.owner.players.size() == 1,
+		"fixture did not hold the closing slot");
+	replacement.reuseDepartedSocket(first);
+	replacement.connect(loop.now);
+	replacement.poll(loop.now);
+	loop.server.poll(loop.now);
+	replacement.poll(loop.now);
+	require(replacement.status() == udp::ClientStatus::Connecting && !replacement.scope(),
+		"switch was refused while the old transport slot was closing");
+
+	loop.step();
+	loop.step(500ms);
+	replacement.poll(loop.now);
+	loop.step();
+	replacement.poll(loop.now);
+	require(replacement.status() == udp::ClientStatus::Connected && replacement.scope() != oldScope &&
+		replacement.welcome()->player != oldPlayer && loop.owner.players.size() == 1,
+		"replacement did not establish a fresh scope after the old owner left");
+	loop.server.stop(loop.owner);
+}
+
 void testAdmission()
 {
 	Loop loop(2);
@@ -300,8 +338,10 @@ void testThreadedShutdown()
 	server.stop(owner);
 	server.rethrowIoError();
 	client.poll(Clock::now());
-	require(owner.players.empty() && client.status() == udp::ClientStatus::Disconnected,
+	require(owner.players.empty() && client.status() == udp::ClientStatus::Disconnected && client.serverShutDown(),
 		"threaded shutdown failed to send final control or retire players");
+	client.connect(Clock::now());
+	require(!client.serverShutDown(), "shutdown reason survived the next join");
 }
 
 void testMovementAdmission()
@@ -386,6 +426,7 @@ int main()
 	try
 	{
 		testLifecycle();
+		testProfileSwitchOnFullEndpoint();
 		testAdmission();
 		testMovementAdmission();
 		testThreadedShutdown();

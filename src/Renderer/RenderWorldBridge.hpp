@@ -324,6 +324,9 @@ public:
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
 							 ImmediateCommands &imm, MeshArenas &arenas);
+	/// Restore a nearby view after attaching to an already-resident paused world.
+	void meshResidentArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
+		ImmediateCommands &imm, MeshArenas &arenas);
 
 	/// Shared synchronous generation contract (issue #112): prepares voxel
 	/// storage on the calling thread immediately before generateTerrain().
@@ -352,12 +355,16 @@ public:
 	}
 	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
 	bool flushWorld();
+	/// Publish in-flight render/world work before capturing a solo checkpoint.
+	void drainAsyncJobsForPersistence();
 	bool isWorldOpen() const { return m_world->isWorldOpen(); }
 	/// For UI/status; may be null (no world open). Const-correct pair.
 	WorldPersistence *worldPersistence() { return m_world->worldPersistence(); }
 	const WorldPersistence *worldPersistence() const { return m_world->worldPersistence(); }
 
 private:
+	void buildBootstrapMeshes(const glm::vec3 &center, const std::vector<glm::ivec3> &positions,
+		VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas);
 	void ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
 						 telemetry::Family telemetryFamily = telemetry::MeshFamily);
 	/// Light-aware cross-chunk invalidation (issue #141 review fix): when a
@@ -414,8 +421,6 @@ private:
 	/// (issue #128), with acquire/release hysteresis (issue #172).
 	void updateEntityLightCacheIntent(Chunk &chunk, float distSq);
 
-	/// Combined render+world quiesce for the persistence durability barrier.
-	void drainAsyncJobsForPersistence();
 	bool renderJobsBusy() const;
 
 	// Testing hooks (issue #114 review): expose render internals to the

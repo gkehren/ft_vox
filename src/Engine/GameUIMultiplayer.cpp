@@ -22,6 +22,34 @@ void networkMetric(const char *label, std::optional<T> value, const char *format
 }
 
 using Milliseconds = std::chrono::duration<double, std::milli>;
+
+template<size_t N>
+void setJoinField(std::array<char, N> &field, std::string_view text)
+{
+	const auto count = std::min(text.size(), N - 1);
+	std::copy_n(text.begin(), count, field.begin());
+	field[count] = '\0';
+}
+
+void endpointChoices(const char *label, const std::vector<net::udp::Address> &endpoints,
+	std::array<char, 64> &field)
+{
+	if (endpoints.empty())
+		return;
+	ImGui::SetNextItemWidth(-1.f);
+	ImGui::PushID(label);
+	if (ImGui::BeginCombo("##endpoints", label, ImGuiComboFlags_HeightSmall))
+	{
+		for (auto address : endpoints)
+		{
+			const auto endpoint = client::formatEndpoint(address);
+			if (ImGui::Selectable(endpoint.c_str(), endpoint == field.data()))
+				setJoinField(field, endpoint);
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::PopID();
+}
 }
 
 void ui::drawMultiplayerNetworkStats(const NetworkStats &stats)
@@ -73,22 +101,7 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 	}
 
 	if (ImGui::CollapsingHeader("Join", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		const auto &status = *frame.multiplayerStatus;
-		ImGui::TextWrapped("%s", status.label);
-		if (status.detail)
-			ImGui::TextWrapped("%s", status.detail);
-		ImGui::TextWrapped("Server endpoint: %.*s", static_cast<int>(frame.multiplayerEndpoint.size()),
-			frame.multiplayerEndpoint.data());
-		ImGui::TextWrapped("Choose a server with --connect at launch.");
-
-		const bool reconnect = static_cast<bool>(frame.joinServer);
-		const auto &action = reconnect ? frame.joinServer : frame.leaveServer;
-		ImGui::BeginDisabled(!action);
-		if (ImGui::Button(reconnect ? "Reconnect" : "Disconnect") && action)
-			action();
-		ImGui::EndDisabled();
-	}
+		drawJoinPanel(frame);
 	if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen))
 		ui::drawMultiplayerNetworkStats(frame.networkStats);
 	if (ImGui::CollapsingHeader("Host"))
@@ -98,4 +111,87 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 	if (ImGui::CollapsingHeader("Administration"))
 		ImGui::TextWrapped("Server controls are unavailable.");
 	ImGui::End();
+}
+
+void GameUI::drawJoinPanel(const GameUIFrame &frame)
+{
+	const auto &prefs = *frame.joinPreferences;
+	if (!m_joinDraftInitialized)
+	{
+		if (!frame.multiplayerEndpoint.empty())
+			setJoinField(m_joinEndpoint, frame.multiplayerEndpoint);
+		else if (!prefs.recent.empty())
+			setJoinField(m_joinEndpoint, client::formatEndpoint(prefs.recent.front()));
+		else
+			setJoinField(m_joinEndpoint, "127.0.0.1:7777");
+		setJoinField(m_profileName, prefs.selectedProfile);
+		m_joinDraftInitialized = true;
+	}
+	if (frame.multiplayerStatus)
+	{
+		const auto &status = *frame.multiplayerStatus;
+		ImGui::TextWrapped("%s", status.label);
+		if (status.detail)
+			ImGui::TextWrapped("%s", status.detail);
+		ImGui::TextWrapped("Server endpoint: %.*s", static_cast<int>(frame.multiplayerEndpoint.size()),
+			frame.multiplayerEndpoint.data());
+		ImGui::TextWrapped("Session profile: %.*s", static_cast<int>(frame.multiplayerProfile.size()),
+			frame.multiplayerProfile.data());
+		if (ImGui::Button("Copy endpoint"))
+			ImGui::SetClipboardText(std::string(frame.multiplayerEndpoint).c_str());
+		if (frame.leaveServer && ImGui::Button("Disconnect"))
+			frame.leaveServer();
+		if (frame.joinServer && ImGui::Button("Reconnect"))
+			frame.joinServer();
+		if (frame.returnToSolo && ImGui::Button("Return to solo"))
+			frame.returnToSolo();
+	}
+	else
+		ImGui::TextUnformatted("Disconnected");
+	if (frame.switchingSession)
+		ImGui::TextWrapped("Finishing the previous session.");
+
+	ImGui::Separator();
+	ImGui::BeginDisabled(frame.switchingSession);
+	endpointChoices("Favorite servers", prefs.favorites, m_joinEndpoint);
+	endpointChoices("Recent servers", prefs.recent, m_joinEndpoint);
+	ImGui::TextUnformatted("Server address and port");
+	ImGui::SetNextItemWidth(-1.f);
+	ImGui::InputTextWithHint("##endpoint", "127.0.0.1:7777", m_joinEndpoint.data(), m_joinEndpoint.size());
+	if (ImGui::Button("Toggle favorite"))
+		frame.toggleFavorite(m_joinEndpoint.data());
+	ImGui::SetItemTooltip("Add or remove this address in Favorite servers.");
+	ImGui::TextUnformatted("Expected world seed (optional)");
+	ImGui::SetNextItemWidth(-1.f);
+	ImGui::InputText("##seed", m_joinSeed.data(), m_joinSeed.size());
+
+	if (!frame.joinProfiles.empty())
+	{
+		ImGui::SetNextItemWidth(-1.f);
+		if (ImGui::BeginCombo("##profiles", "Saved profiles", ImGuiComboFlags_HeightSmall))
+		{
+			for (const std::string &profile : frame.joinProfiles)
+			{
+				if (ImGui::Selectable(profile.c_str(), profile == m_profileName.data()))
+				{
+					setJoinField(m_profileName, profile);
+					frame.selectJoinProfile(profile);
+				}
+			}
+			ImGui::EndCombo();
+		}
+	}
+	ImGui::TextUnformatted("Local profile name");
+	ImGui::SetNextItemWidth(-1.f);
+	ImGui::InputText("##profile", m_profileName.data(), m_profileName.size());
+	if (ImGui::Button("Create profile"))
+		frame.createJoinProfile(m_profileName.data());
+	ImGui::SetItemTooltip("Create an identity for a new name. Reuse that name to resume the same player.");
+	if (ImGui::Button(frame.leaveServer ? "Switch server or profile" : "Connect"))
+		frame.connectServer({m_joinEndpoint.data(), m_profileName.data(), m_joinSeed.data()});
+	ImGui::EndDisabled();
+	if (!frame.joinError.empty())
+		ImGui::TextWrapped("%s", frame.joinError.c_str());
+	if (!frame.joinPreferencesError.empty())
+		ImGui::TextWrapped("%s", frame.joinPreferencesError.c_str());
 }

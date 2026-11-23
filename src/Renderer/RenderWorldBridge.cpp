@@ -1519,24 +1519,50 @@ void RenderWorldBridge::generateInitialArea(const glm::vec3 &center, int radiusC
 
 	// Authoritative voxel bootstrap (world-owned), then render binding.
 	const std::vector<glm::ivec3> created = m_world->generateInitialAreaVoxels(center, radiusChunks);
+	buildBootstrapMeshes(center, created, allocator, imm, arenas);
+}
+
+void RenderWorldBridge::meshResidentArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
+	ImmediateCommands &imm, MeshArenas &arenas)
+{
+	if (!m_chunkPool || !allocator)
+		return;
+	std::vector<glm::ivec3> resident;
+	const auto origin = worldToChunkCoord(center);
+	for (int z = -radiusChunks; z <= radiusChunks; ++z)
+		for (int x = -radiusChunks; x <= radiusChunks; ++x)
+		{
+			const auto pos = origin + glm::ivec3(x, 0, z);
+			const auto *record = m_world->getChunk(pos);
+			if (record && record->getState() >= ChunkState::GENERATED)
+				resident.push_back(pos);
+		}
+	buildBootstrapMeshes(center, resident, allocator, imm, arenas);
+}
+
+void RenderWorldBridge::buildBootstrapMeshes(const glm::vec3 &center,
+	const std::vector<glm::ivec3> &positions, VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas)
+{
 	std::vector<std::pair<glm::ivec3, Chunk *>> bound;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (const glm::ivec3 &pos : created)
+		for (const glm::ivec3 &pos : positions)
 		{
-			if (m_chunks.find(pos) != m_chunks.end())
-				continue;
-			WorldChunk *record = m_world->getChunk(pos);
-			if (!record)
-				continue;
-			Chunk *chunk = bindRecord(pos, record);
+			const auto found = m_chunks.find(pos);
+			Chunk *chunk = found != m_chunks.end() ? found->second : nullptr;
 			if (!chunk)
 			{
-				// Grow once more and retry (should be rare if ensureCapacity above is correct).
-				m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
+				WorldChunk *record = m_world->getChunk(pos);
+				if (!record)
+					continue;
 				chunk = bindRecord(pos, record);
 				if (!chunk)
-					continue;
+				{
+					m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
+					chunk = bindRecord(pos, record);
+					if (!chunk)
+						continue;
+				}
 			}
 			const glm::vec3 p = chunk->getPosition();
 			const float dx = p.x - center.x;

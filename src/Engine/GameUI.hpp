@@ -20,6 +20,7 @@
 #include <Engine/GameUIBiomeMap.hpp>
 #include <Engine/InventoryUi.hpp>
 #include <Engine/MultiplayerUi.hpp>
+#include <Engine/MultiplayerJoin.hpp>
 #include <Sim/GameSimulation.hpp>
 
 #include <future>
@@ -31,6 +32,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <span>
 
 class StagingRing;
 
@@ -181,9 +183,17 @@ struct GameUIFrame
 	std::optional<ui::MultiplayerStatus> multiplayerStatus;
 	const char *multiplayerAction{nullptr};
 	std::string_view multiplayerEndpoint;
+	std::string_view multiplayerProfile;
 	ui::NetworkStats networkStats;
 	std::function<void()> joinServer;
 	std::function<void()> leaveServer;
+	std::function<void()> returnToSolo;
+	const client::JoinPreferences *joinPreferences{};
+	std::span<const std::string> joinProfiles;
+	std::string joinError, joinPreferencesError;
+	std::function<void(client::JoinRequest)> connectServer;
+	std::function<void(std::string_view)> selectJoinProfile, createJoinProfile, toggleFavorite;
+	bool switchingSession{};
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
 	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
@@ -410,6 +420,7 @@ private:
 	void drawStatusOverlay(GameUIFrame &frame);
 	void drawPlayerPanel(GameUIFrame &frame);
 	void drawMultiplayerPanel(const GameUIFrame &frame);
+	void drawJoinPanel(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
@@ -453,6 +464,10 @@ private:
 	/// the next H. Never written while the layout is hidden — manual panel
 	/// opens abandon the snapshot via leaveLayoutTilesHidden() instead.
 	ui::LayoutTilesSnapshot m_savedTilesState{};
+	std::array<char, 64> m_joinEndpoint{};
+	std::array<char, 128> m_profileName{};
+	std::array<char, 16> m_joinSeed{};
+	bool m_joinDraftInitialized{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};
