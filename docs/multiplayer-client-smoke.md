@@ -101,13 +101,14 @@ and resuming at the same position after relaunching the client with the
 same profile. Their earlier interactive test confirmed remote-player
 visibility, shared break/place and item drops.
 
-The remaining #277 checks include contested pickup, rearranging stacks
-in both inventories, cursor capture and focus transitions, walking out
-of and back into interest, and an interactive solo comparison. The menu
-reconnect check uses **C** to release the cursor, then **Multiplayer →
-Disconnect** followed by **Multiplayer → Reconnect** in the same running
-client window. The startup and graceful server restart evidence above
-covers separate Release client processes.
+The maintainer also confirmed **Multiplayer → Disconnect** followed by
+**Multiplayer → Reconnect** in the same running client window.
+
+The remaining interactive #277 checks cover remote avatar motion and
+walking collision, contested pickup, rearranging stacks in both
+inventories, cursor capture and focus transitions, walking out of and
+back into interest, and a solo comparison. The startup and graceful
+server restart evidence above covers separate Release client processes.
 
 ## Wire v4 profile restart
 
