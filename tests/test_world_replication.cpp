@@ -1169,6 +1169,24 @@ void testClientTickMath()
 		"clock correction jammed the sent tick cursor");
 
 	scheduler.reset();
+	scheduler.observeRoundTrip(32ms);
+	scheduler.observeSnapshot(100, now);
+	scheduler.send(now, {}, emit);
+	require(sent.back().intendedTick == 103, "unexpected initial lead");
+	const auto afterAcquire = scheduler.schedule(now + 40ms);
+	require(afterAcquire.firstTick == 104 && afterAcquire.count == 3,
+		"late render frame skipped an input tick that could still be admitted");
+
+	scheduler.reset();
+	scheduler.observeRoundTrip(32ms);
+	scheduler.observeSnapshot(100, now);
+	const auto beforeLatePoll = scheduler.schedule(now + 65ms);
+	scheduler.observeSnapshot(103, now + 65ms);
+	const auto afterLatePoll = scheduler.schedule(now + 65ms);
+	require(beforeLatePoll.firstTick + beforeLatePoll.count == afterLatePoll.firstTick + afterLatePoll.count,
+		"late polling of a snapshot stalled the running input clock");
+
+	scheduler.reset();
 	require(!scheduler.roundTripEstimate() && scheduler.schedule(now).count == 0, "session timing survived reset");
 	scheduler.observeSnapshot(UINT64_MAX - 2, Time::min());
 	require(scheduler.schedule(Time::max()).count == 0, "extreme clock endpoints overflowed");

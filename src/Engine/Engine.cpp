@@ -1918,9 +1918,6 @@ void Engine::run()
 	while (running)
 	{
 		GetProfiler().beginFrame();
-		// Keep pumping even without a drawable swapchain or local focus.
-		if (m_remote)
-			pollRemote();
 
 		// (1) Events: SDL -> UI routing + simulation commands.
 		{
@@ -1940,6 +1937,8 @@ void Engine::run()
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
 		if (pixelW == 0 || pixelH == 0 || (m_remote && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
 		{
+			if (m_remote)
+				pollRemote();
 			GetProfiler().endFrame();
 			SDL_Delay(16);
 			resetFrameClock();
@@ -1971,6 +1970,8 @@ void Engine::run()
 			if (!frameCtx->beginFrame(*swapchain, imageIndex))
 			{
 				requestSwapchainRecreate();
+				if (m_remote)
+					pollRemote();
 				GetProfiler().endFrame();
 				resetFrameClock();
 				continue;
@@ -1993,6 +1994,11 @@ void Engine::run()
 			static_cast<double>(m_displayRefreshRate));
 
 		updateWindowTitle(currentFrame);
+
+		// WSI can wait for another refresh. Drain snapshots after that wait
+		// so the input scheduler samples the network close to its send.
+		if (m_remote)
+			pollRemote();
 
 		// (5) Benchmark policy (may reload the world through the epoch
 		// barrier), then (6) the authoritative player step, then (7) the

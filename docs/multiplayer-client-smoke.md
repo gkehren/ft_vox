@@ -42,6 +42,34 @@ The Computer Use plugin could not connect to the native Windows pipe.
 The corrected build still needs the interactive comparison with solo
 and the remaining keyboard, mouse and menu checks in #277.
 
+### Rollbacks on live Windows loopback
+
+The maintainer still felt frequent rollback after camera interpolation
+was added. A temporary Release diagnostic drove held walk input on a
+flat strip with two graphical clients and a separate dedicated server.
+It recorded scheduled inputs, authoritative snapshots, prediction
+corrections and per-frame camera positions during the steady section of
+the walk. This exercised the normal swapchain and UDP threads.
+
+The frame loop polled snapshots before the swapchain wait. The scheduler
+then estimated input arrival from an older observation and skipped ticks
+that could still have been accepted. Each missing tick applied neutral
+controls at the authority. A delayed snapshot also shifted the estimate
+abruptly. The client now polls immediately before gameplay input after
+the swapchain wait, adjusts the running clock gradually, and fills short
+gaps with consecutive commands. Large gaps retain the bounded resume path.
+
+| Windows loopback, steady walk | Camera interpolation alone | With input scheduling fix |
+| --- | ---: | ---: |
+| Skipped target ticks | 29 of 442 | 0 of 424 |
+| Prediction corrections | 12 | 0 |
+| Per-frame camera speed | 0–12.21 blocks/s | 4.04–4.52 blocks/s |
+
+The ideal walking speed is 4.5 blocks/s. The deterministic scheduler
+regression covers late snapshot polling and a single delayed render
+frame. The temporary diagnostic input and logs are outside the shipped
+client.
+
 ## Wire v4 profile restart
 
 Two Windows Release clients created distinct profiles with

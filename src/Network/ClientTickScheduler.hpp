@@ -36,7 +36,17 @@ public:
 	{
 		if (m_snapshot && (tick <= m_snapshot->tick || receivedAt < m_snapshot->receivedAt))
 			return;
-		m_snapshot = Snapshot{tick, receivedAt};
+		double phase = 0.0;
+		if (hasFreshClock(receivedAt))
+		{
+			// A render frame can poll a snapshot late, or drain several at
+			// once. Keep the running clock through ordinary delivery jitter.
+			const double error = m_snapshot->phase + age(receivedAt).count() * wire::kTickRate -
+				double(tick - m_snapshot->tick);
+			if (std::abs(error) <= kMaxBatch)
+				phase = error - std::clamp(error, -0.25, 0.25);
+		}
+		m_snapshot = Snapshot{tick, receivedAt, phase};
 	}
 
 	void observeRoundTrip(Seconds rtt)
@@ -61,9 +71,10 @@ public:
 		if (!hasFreshClock(now))
 			return {};
 
-		const double oneWay = m_rtt.value_or(kFallbackRtt).count() / 2.0; // approximate symmetry
-		const double serverNowOffset = (age(now).count() + oneWay) * wire::kTickRate;
-		const uint64_t arrivalOffset = static_cast<uint64_t>(serverNowOffset + oneWay * wire::kTickRate);
+		// Budget a round trip from the snapshot timestamp to input arrival.
+		const double arrivalTicks = (age(now) + m_rtt.value_or(kFallbackRtt)).count() * wire::kTickRate +
+			m_snapshot->phase;
+		const uint64_t arrivalOffset = static_cast<uint64_t>(std::max(0.0, arrivalTicks));
 		const uint64_t targetOffset = arrivalOffset + m_safetyTicks;
 		constexpr auto maxTick = std::numeric_limits<uint64_t>::max();
 		if (m_snapshot->tick > maxTick - targetOffset)
@@ -72,9 +83,12 @@ public:
 		if (target <= m_lastSentTick)
 			return {};
 
-		// The window is relative to estimated arrival. Skip all intervening
-		// historical ticks when the clock catches up after a frame stall.
-		const uint64_t first = std::max(m_lastSentTick + 1, m_snapshot->tick + arrivalOffset + 1);
+		// During normal play, send intervening ticks even if the arrival
+		// estimate moved past them. The server's clock decides if they are
+		// still open. For a join or larger jump, send only the newest batch.
+		const bool consecutive = m_lastSentTick > 0 && target - m_lastSentTick <= kMaxBatch;
+		const uint64_t earliest = m_snapshot->tick + (consecutive ? 1 : arrivalOffset + 1);
+		const uint64_t first = std::max(m_lastSentTick + 1, earliest);
 		return {first, static_cast<unsigned>(target - first + 1)};
 	}
 
@@ -106,6 +120,7 @@ private:
 	{
 		uint64_t tick;
 		Clock::time_point receivedAt;
+		double phase;
 	};
 
 	Seconds age(Clock::time_point now) const

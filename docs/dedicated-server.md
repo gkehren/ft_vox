@@ -105,9 +105,13 @@ updates from Action acknowledgments when the action was sent once.
 The estimate includes pump and server scheduling time. It assumes
 roughly symmetric paths and uses a 50 ms fallback RTT until a usable
 measurement arrives. The client targets two ticks beyond estimated
-arrival, emits at most three fresh inputs per frame, and waits for a new
-snapshot after a prolonged gap. The server still admits only the next
-six ticks at its receive boundary. The HUD reports degraded input timing
+arrival and polls snapshots after swapchain acquisition, close to the
+input send. Snapshot delivery jitter adjusts the running estimate
+gradually. When a frame falls behind by up to three input ticks, the
+client sends those consecutive ticks so the server can admit any that
+are still open. A larger gap starts a new batch near the estimated
+arrival. The server still admits only the next six ticks at its receive
+boundary. The HUD reports degraded input timing
 if snapshots become too old or processed input stops advancing while
 the client is sending. A large path change between RTT observations can
 still interrupt movement. The reliable sender waits for an ACK before the
