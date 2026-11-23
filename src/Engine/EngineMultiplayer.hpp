@@ -34,10 +34,11 @@ struct Engine::RemoteSession
 	bool ready() const;
 	void submit(net::wire::Action action);
 	void submitSlots(net::wire::ActionKind operation, int slot, int other = 0);
-	const char *connectionStatus() const;
+	ui::MultiplayerStatus connectionStatus(Clock::time_point now) const;
 	void disconnect() noexcept;
 
 	net::udp::ClientTransport transport;
+	const std::string endpoint;
 	const std::optional<uint32_t> expectedSeed;
 	std::optional<net::wire::SessionScope> scope;
 	std::optional<net::wire::Welcome> welcome;
@@ -60,7 +61,8 @@ struct Engine::RemoteSession
 	bool hasCameraPose{};
 	net::udp::ClientTraffic lastTraffic;
 	Clock::time_point trafficAt{}, firstPlayerAt{};
-	double receiveKiB{}, sendKiB{};
+	std::optional<Clock::time_point> roundTripAt;
+	std::optional<ui::NetworkStats::Traffic> trafficRates;
 	Clock::time_point jumpQueuedAt{};
 	bool joinRequested{}, leaveRequested{}, seedMismatch{};
 	bool actionPending{};

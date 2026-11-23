@@ -70,11 +70,18 @@ const char *actionFeedback(wire::ActionCode code)
 	}
 	return "Action unavailable";
 }
+std::string endpointLabel(net::udp::Address address)
+{
+	return std::to_string(address.ipv4 >> 24) + "." +
+		std::to_string((address.ipv4 >> 16) & 255) + "." +
+		std::to_string((address.ipv4 >> 8) & 255) + "." +
+		std::to_string(address.ipv4 & 255) + ":" + std::to_string(address.port);
+}
 }
 
 Engine::RemoteSession::RemoteSession(net::udp::Address address, std::optional<uint32_t> expected,
 									 const net::wire::PlayerKey &key)
-	: transport(address, key), expectedSeed(expected)
+	: transport(address, key), endpoint(endpointLabel(address)), expectedSeed(expected)
 {
 	transport.connect(Clock::now());
 	if (const char *path = std::getenv("FT_VOX_MOTION_TRACE"); path && *path)
@@ -125,37 +132,14 @@ bool Engine::RemoteSession::ready() const
 		projection->observedVersion(glm::ivec3(glm::floor(playerFeet(*player)))).has_value();
 }
 
-const char *Engine::RemoteSession::connectionStatus() const
+ui::MultiplayerStatus Engine::RemoteSession::connectionStatus(Clock::time_point now) const
 {
-	if (seedMismatch)
-		return "World seed mismatch";
-	switch (transport.status())
-	{
-	case ClientStatus::Disconnected: return "Disconnected";
-	case ClientStatus::Connecting: return "Joining server";
-	case ClientStatus::Connected:
-		if (prediction.waitingForTerrain() || (localPlayer() && !hasCameraPose))
-			return "Waiting for synchronized player terrain";
-		if (!ready())
-			return "Waiting for server terrain and inventory";
-		if (const auto now = Clock::now(); !inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now))
-			return "Connected · input timing degraded";
-		return "Connected";
-	case ClientStatus::Leaving: return "Disconnecting";
-	case ClientStatus::Resyncing: return "Resynchronizing world";
-	case ClientStatus::TimedOut: return "Server unavailable or connection timed out";
-	case ClientStatus::Rejected:
-		switch (transport.rejection().value_or(wire::RejectReason::Unavailable))
-		{
-		case wire::RejectReason::Version: return "Protocol version mismatch";
-		case wire::RejectReason::Content: return "World generator or content mismatch";
-		case wire::RejectReason::Full: return "Server is full";
-		case wire::RejectReason::Unavailable: return "Server refused the connection";
-		case wire::RejectReason::IdentityInUse: return "Player profile is already connected";
-		case wire::RejectReason::ProfileLimit: return "Server has reached its saved player limit";
-		}
-	}
-	return "Disconnected";
+	const auto status = transport.status();
+	const bool connected = status == ClientStatus::Connected;
+	const bool timingDegraded = connected && firstPlayerAt != Clock::time_point{} &&
+		(!inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now));
+	return ui::multiplayerStatus(status, transport.rejection(), seedMismatch,
+		connected && ready(), timingDegraded);
 }
 
 void Engine::RemoteSession::disconnect() noexcept
@@ -258,7 +242,8 @@ void Engine::pollRemote()
 		remote.lastTraffic = transport.traffic();
 		remote.trafficAt = now;
 		remote.firstPlayerAt = {};
-		remote.receiveKiB = remote.sendKiB = 0.0;
+		remote.roundTripAt.reset();
+		remote.trafficRates.reset();
 		remote.jumpQueuedAt = {};
 		remote.actionPending = false;
 		remote.feedback = nullptr;
@@ -274,8 +259,8 @@ void Engine::pollRemote()
 	}
 	if (next)
 	{
-		if (const auto sample = transport.takeRoundTripSample())
-			remote.inputTiming.observeRoundTrip(*sample);
+		if (const auto sample = transport.takeRoundTripSample(); sample && remote.inputTiming.observeRoundTrip(*sample))
+			remote.roundTripAt = now;
 		if (const auto *player = remote.localPlayer())
 		{
 			const net::udp::ClientWorld::CollisionView collision(*remote.projection, transport.chunks(), &remote.terrain);
@@ -297,17 +282,22 @@ void Engine::pollRemote()
 		{
 			const auto traffic = transport.traffic();
 			const double elapsed = std::chrono::duration<double>(now - remote.trafficAt).count();
-			remote.receiveKiB = double(traffic.receivedBytes - remote.lastTraffic.receivedBytes) / (1024.0 * elapsed);
-			remote.sendKiB = double(traffic.sentBytes - remote.lastTraffic.sentBytes) / (1024.0 * elapsed);
+			remote.trafficRates = ui::NetworkStats::Traffic{
+				double(traffic.receivedBytes - remote.lastTraffic.receivedBytes) / (1024.0 * elapsed),
+				double(traffic.sentBytes - remote.lastTraffic.sentBytes) / (1024.0 * elapsed)};
 			remote.lastTraffic = traffic;
 			remote.trafficAt = now;
 		}
 	}
-	const char *status = remote.connectionStatus();
-	if (remote.lastConnectionStatus != status)
+	const auto status = remote.connectionStatus(Clock::now());
+	const char *message = status.detail ? status.detail : status.label;
+	if (remote.lastConnectionStatus != message)
 	{
-		remote.lastConnectionStatus = status;
-		std::cout << "[multiplayer] " << status << std::endl;
+		remote.lastConnectionStatus = message;
+		std::cout << "[multiplayer] " << status.label;
+		if (status.detail)
+			std::cout << " - " << status.detail;
+		std::cout << std::endl;
 	}
 	if (!next)
 		return;
@@ -573,24 +563,27 @@ void Engine::dropSelectedItem()
 void Engine::populateRemoteUi(GameUIFrame &frame)
 {
 	auto &remote = *m_remote;
-	frame.multiplayerStatus = remote.connectionStatus();
+	const auto now = Clock::now();
+	frame.multiplayerStatus = remote.connectionStatus(now);
+	frame.multiplayerEndpoint = remote.endpoint;
 	frame.multiplayerAction = remote.actionPending ? "Action pending" :
-		RemoteSession::Clock::now() < remote.feedbackUntil ? remote.feedback : nullptr;
+		now < remote.feedbackUntil ? remote.feedback : nullptr;
 	const auto status = remote.transport.status();
-	if (remote.firstPlayerAt != Clock::time_point{})
+	if (ui::hasLiveNetworkStats(frame.multiplayerStatus->state))
 	{
-		const auto now = Clock::now();
-		const double seconds = std::chrono::duration<double>(now - remote.firstPlayerAt).count();
+		auto &network = frame.networkStats;
 		const auto rtt = remote.inputTiming.roundTripEstimate();
-		const auto &stats = remote.prediction.stats();
-		frame.networkStats = GameUIFrame::NetworkStats{
-			.rttMs = rtt ? std::optional{1000.0 * rtt->count()} : std::nullopt,
-			.snapshotAgeMs = std::chrono::duration<double, std::milli>(now - remote.players.arrived).count(),
-			.snapshotLoss = remote.remotePlayers.missingFraction(),
-			.correctionsPerSecond = double(stats.corrections) / std::max(seconds, 1.0),
-			.lastCorrection = stats.lastCorrection, .maxCorrection = stats.maxCorrection,
-			.receiveKiB = remote.receiveKiB, .sendKiB = remote.sendKiB,
-			.pendingInputs = remote.prediction.backlog(), .hardResets = stats.hardResets};
+		if (rtt && remote.roundTripAt)
+			network.ping = ui::NetworkStats::Ping{*rtt, now - *remote.roundTripAt};
+		network.traffic = remote.trafficRates;
+		if (remote.firstPlayerAt != Clock::time_point{})
+		{
+			network.snapshot = ui::NetworkStats::Snapshot{
+				now - remote.players.arrived, now - remote.firstPlayerAt, remote.remotePlayers.missingFraction()};
+			const auto &stats = remote.prediction.stats();
+			network.prediction = ui::NetworkStats::Prediction{
+				remote.prediction.backlog(), stats.corrections, stats.hardResets, stats.lastCorrection, stats.maxCorrection};
+		}
 	}
 	if (status == ClientStatus::Disconnected || status == ClientStatus::TimedOut || status == ClientStatus::Rejected)
 		frame.joinServer = [&remote] { remote.joinRequested = true; };

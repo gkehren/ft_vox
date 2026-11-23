@@ -1550,12 +1550,14 @@ void testRemoteInterpolation()
 	auto &remote = sample.players[1];
 	remote = {{3}, {0.0, 2.0, 0.0}};
 	players.observe(sample, start);
+	require(!players.missingFraction(), "one snapshot cannot measure loss");
 	for (unsigned i = 1; i <= 4; ++i)
 	{
 		sample.tick += 3;
 		remote.feet[0] = double(i);
 		players.observe(sample, start + i * 50ms);
 	}
+	require(players.missingFraction() == 0.0, "consecutive snapshots should measure zero loss");
 	const auto between = players.present(remote.player, start + 225ms);
 	require(between && std::abs(between->x - 2.5) < 1e-8,
 		"remote position was not interpolated on the delayed tick clock");
@@ -1803,7 +1805,7 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 		milliseconds(*predictedOnset) << '/' << milliseconds(*authorityOnset)
 		<< " corrections=" << stats.corrections << " max_m=" << stats.maxCorrection
 		<< " resets=" << stats.hardResets << " max_pending=" << peakBacklog
-		<< " snapshot_missing=" << remotePlayers.missingFraction()
+		<< " snapshot_missing=" << remotePlayers.missingFraction().value_or(-1.0)
 		<< " walking_view_mps(min/max)=" << leastViewSpeed << '/' << mostViewSpeed
 		<< " final_error_m=" << glm::length(final - prediction.feet())
 		<< " udp_bytes(rx/tx)=" << traffic.receivedBytes << '/' << traffic.sentBytes << '\n';

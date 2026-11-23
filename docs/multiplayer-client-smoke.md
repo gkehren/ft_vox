@@ -1,10 +1,68 @@
 # Graphical multiplayer smoke
 
 The [issue #260 closure report](multiplayer-closure.md#physical-gpu-and-remaining-work)
-records the latest physical-GPU dual-client startup, restart and strict
+records the closure's physical-GPU dual-client startup, restart and strict
 visual results. The [interactive retest below](#interactive-movement-retest)
 records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
+
+## Multiplayer panel (#283)
+
+Use the [two-client setup](dedicated-server.md#connect-two-graphical-clients)
+with two ordinary profiles and matching Release builds. Use separate
+working directories to keep each client's ImGui settings independent.
+
+1. Release the cursor with **C** and choose **Multiplayer → Show panel**
+   on each client. Check that **Join** shows the endpoint and transitions
+   through connection and terrain sync to **Connected**. Expand **Host**,
+   **Players**, and **Administration** to verify that they offer no actions.
+2. Watch **Network** while walking, then change the hotbar slot to refresh
+   the ping sample. Snapshot age, traffic, and pending inputs should
+   update independently on the two clients. Zero corrections and hard
+   resets are valid measurements. Last and largest correction stay
+   **Unavailable** until the client observes a correction.
+3. Click **Disconnect** in the panel. The endpoint stays visible and the
+   previous session's metrics become **Unavailable**. Use the fast menu's
+   **Reconnect** to start a fresh session. Stop the server to check
+   **Timed out**, or try a second client using an active profile directory
+   to check **Rejected**. Restart with the ordinary profiles to continue.
+4. Drag the Multiplayer title bar onto a dock target. Use **H** twice to
+   hide and restore the tile, close it, and reopen it through the menu.
+   **View → Reset layout** undocks it and **View → Apply default developer
+   layout** places it in the bottom dock. Relaunch and reopen the panel to
+   check the saved docking. Repeat with a narrow window and **View → UI
+   scale → 200%**, scrolling to the last metric. Recapture the mouse with
+   **C** and verify that the player can walk and look around.
+5. Launch a solo client. Check the existing UI, HUD and cursor shortcuts.
+
+The CPU relay exercises the same telemetry sources while moving under loss,
+delay, duplication and reordering:
+
+```sh
+ctest --test-dir build-cpu -C Release -V -R '^(MultiplayerUi|WorldReplicationClientTick)$'
+```
+
+In the Windows Release run at 60 Hz, clean loopback reported 17 ms RTT,
+0% estimated snapshot loss, a peak of six pending inputs, and zero
+corrections and hard resets. With 40 ms delay each way and simulated
+loss and reordering, the client reported 100 ms RTT, 20.7% estimated
+missing snapshots, a peak of 16 pending inputs, 38 corrections and one
+hard reset. RTT includes client and server pump cadence. These
+observations come from the CPU relay. Use the steps above for the
+physical-GPU interaction check.
+
+### Physical-GPU startup and recovery
+
+Two Windows Release clients joined on an RTX 4070 Ti with Vulkan validation
+enabled. Their motion traces recorded 42.1 ms estimated RTT on direct
+loopback and 129.9 ms through a loopback relay with 40 ms each way and
+every fifth player snapshot dropped. A brief snapshot blackout raised
+**Degraded network**, followed by **Connected** when snapshots resumed.
+Blocking relay traffic then caused **Resyncing** and **Timed out**. The
+direct client returned to **Disconnected** after a graceful server stop.
+Both processes reported the known swapchain/image-view VUIDs documented
+below. The Windows computer-use pipe was unavailable, so docking, scale,
+and cursor interactions remain on the manual checklist above.
 
 ## Local camera cadence for #277
 

@@ -109,7 +109,7 @@ public:
 
 	void observe(const wire::PlayerSnapshot &snapshot, Clock::time_point receivedAt);
 	std::optional<glm::dvec3> present(sim::PlayerId player, Clock::time_point now) const;
-	double missingFraction() const;
+	std::optional<double> missingFraction() const;
 
 private:
 	std::array<wire::PlayerSnapshot, kHistory> m_samples{};

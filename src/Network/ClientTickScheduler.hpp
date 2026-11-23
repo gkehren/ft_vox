@@ -63,14 +63,15 @@ public:
 		m_clockCount = std::min(m_clockCount + 1, m_clockSamples.size());
 	}
 
-	void observeRoundTrip(Seconds rtt)
+	bool observeRoundTrip(Seconds rtt)
 	{
 		if (!std::isfinite(rtt.count()) || rtt < Seconds::zero() || rtt > kMaxRtt)
-			return;
+			return false;
 		// Limit one sample's influence to 16 ms while allowing repeated
 		// observations to follow a sustained increase or decrease.
 		constexpr Seconds maxChange = std::chrono::milliseconds(64);
 		m_rtt = m_rtt ? *m_rtt + std::clamp(rtt - *m_rtt, -maxChange, maxChange) / 4.0 : rtt;
+		return true;
 	}
 
 	std::optional<Seconds> roundTripEstimate() const { return m_rtt; }

@@ -391,9 +391,11 @@ std::optional<glm::dvec3> RemotePlayers::present(sim::PlayerId player, Clock::ti
 	return playerFeet(*newer);
 }
 
-double RemotePlayers::missingFraction() const
+std::optional<double> RemotePlayers::missingFraction() const
 {
-	return m_received ? double(m_missing) / (double(m_missing) + double(m_received)) : 0.0;
+	if (m_received < 2)
+		return std::nullopt;
+	return double(m_missing) / (double(m_missing) + double(m_received));
 }
 
 } // namespace net::udp

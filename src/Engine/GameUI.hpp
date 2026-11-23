@@ -19,6 +19,7 @@
 #include <Engine/UiShell.hpp>
 #include <Engine/GameUIBiomeMap.hpp>
 #include <Engine/InventoryUi.hpp>
+#include <Engine/MultiplayerUi.hpp>
 #include <Sim/GameSimulation.hpp>
 
 #include <future>
@@ -29,6 +30,7 @@
 #include <functional>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 class StagingRing;
 
@@ -176,17 +178,10 @@ struct GameUIFrame
 	std::function<void(bool)> setMobsEnabled;
 	size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
-	const char *multiplayerStatus{nullptr};
+	std::optional<ui::MultiplayerStatus> multiplayerStatus;
 	const char *multiplayerAction{nullptr};
-	struct NetworkStats
-	{
-		std::optional<double> rttMs;
-		double snapshotAgeMs{}, snapshotLoss{}, correctionsPerSecond{};
-		double lastCorrection{}, maxCorrection{}, receiveKiB{}, sendKiB{};
-		size_t pendingInputs{};
-		uint64_t hardResets{};
-	};
-	std::optional<NetworkStats> networkStats;
+	std::string_view multiplayerEndpoint;
+	ui::NetworkStats networkStats;
 	std::function<void()> joinServer;
 	std::function<void()> leaveServer;
 
@@ -414,6 +409,7 @@ private:
 
 	void drawStatusOverlay(GameUIFrame &frame);
 	void drawPlayerPanel(GameUIFrame &frame);
+	void drawMultiplayerPanel(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);

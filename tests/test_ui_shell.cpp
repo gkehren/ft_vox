@@ -298,7 +298,7 @@ static void checkLayoutTiles()
 		ui::restoreLayoutTiles(panels, snapshot);
 		CHECK(panels.rendering && panels.streaming && panels.performance,
 			  "second H restores the three open panels exactly");
-		CHECK(!panels.world && !panels.help && !panels.overview && !panels.playerPanel &&
+		CHECK(!panels.world && !panels.help && !panels.overview && !panels.playerPanel && !panels.multiplayer &&
 				  !panels.playerDiagnostics && !panels.chunkInspector && !panels.memory &&
 				  !panels.renderDebug && !panels.benchmark,
 			  "closed panels stay closed after restore");
@@ -307,12 +307,13 @@ static void checkLayoutTiles()
 	// Case 2: a single open panel round-trips identically.
 	{
 		PanelState panels{};
-		panels.chunkInspector = true;
+		panels.multiplayer = true;
+		CHECK(ui::anyLayoutTileVisible(panels), "Multiplayer counts as a visible tile");
 		const ui::LayoutTilesSnapshot snapshot = ui::captureLayoutTiles(panels);
 		ui::setAllLayoutTiles(panels, false);
 		CHECK(!ui::anyLayoutTileVisible(panels), "single-panel layout hides to nothing");
 		ui::restoreLayoutTiles(panels, snapshot);
-		CHECK(panels.chunkInspector && ui::anyLayoutTileVisible(panels) &&
+		CHECK(panels.multiplayer && ui::anyLayoutTileVisible(panels) &&
 				  !panels.rendering && !panels.performance,
 			  "single-panel layout restores exactly");
 	}
