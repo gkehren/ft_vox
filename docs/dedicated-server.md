@@ -81,11 +81,13 @@ Start `ft_vox` normally, release the cursor with **C**, and choose
 
 1. Enter the server's numeric IPv4 address and port, such as
    `127.0.0.1:7777`. An optional expected seed checks that you reached
-   the intended world configuration.
+   the intended world configuration. Choosing a different endpoint from
+   Favorites or Recents clears the expected seed.
 2. Choose a **Saved profile**, type an existing name, or enter a new name
    and click **Create profile**. Names are case-insensitive and use up to
    32 ASCII letters, digits, dashes, or underscores, starting with a
-   letter or digit.
+   letter or digit. **Saved profiles** shows the first 32 names in
+   alphabetical order. You can type a name to select any other profile.
 3. Select **Connect**. Once terrain is synchronized, release text focus
    and use **C** to capture the cursor for gameplay.
 4. Use **Disconnect** and **Reconnect** for the current endpoint and
@@ -367,7 +369,7 @@ and one complete traffic window for throughput. Missing measurements read
 measurements. See the [panel smoke steps](multiplayer-client-smoke.md#multiplayer-panel-283)
 for layout checks and a repeatable impaired-network fixture.
 
-For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a fresh CSV
+For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a CSV
 path before launching the graphical client. The server uses its normal
 command. In PowerShell, for example:
 
@@ -377,7 +379,12 @@ $env:FT_VOX_MOTION_TRACE = Join-Path $PWD ("motion-alice-{0:yyyyMMdd-HHmmss}.csv
 ```
 
 After connecting, stand still briefly, then walk where the problem occurs
-and quit normally. The client records at most 60 seconds or 12,000 frames.
+and quit normally. The first connection uses the configured filename if
+it is free. A new join or a server or profile switch creates a separate
+file, such as `motion.session-2.csv`. The client skips names already on
+disk, including trace files from earlier runs. The fast Reconnect action
+and automatic resync keep the same file while tracing is active. Each file records at
+most 60 seconds or 12,000 frames.
 The CSV links frame timings and camera positions to input ticks, server
 acknowledgments, predicted poses, terrain waits and correction counters.
 It contains gameplay telemetry and omits profile keys and session

@@ -464,9 +464,7 @@ private:
 	/// the next H. Never written while the layout is hidden — manual panel
 	/// opens abandon the snapshot via leaveLayoutTilesHidden() instead.
 	ui::LayoutTilesSnapshot m_savedTilesState{};
-	std::array<char, 64> m_joinEndpoint{};
-	std::array<char, 128> m_profileName{};
-	std::array<char, 16> m_joinSeed{};
+	client::JoinDraft m_joinDraft;
 	bool m_joinDraftInitialized{};
 
 	/// One-shot: Help window opens with the requested tab selected.

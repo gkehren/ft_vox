@@ -72,6 +72,10 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 			m_joinProfiles = client::listProfiles(directory);
 			persistJoinPreferences();
 		}
+		catch (const client::ProfileCreationError &error)
+		{
+			m_joinError = error.what();
+		}
 		catch (const std::exception &)
 		{
 			m_joinError = "Could not create that profile. Choose a new name or check the local profile folder.";
@@ -208,8 +212,6 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 		if (m_remote && m_remote->address == remote->address)
 			remote->transport.reuseDepartedSocket(m_remote->transport);
 		remote->transport.connect(RemoteSession::Clock::now());
-		if (!m_startedRemote)
-			remote->startMotionTrace();
 	}
 	catch (...)
 	{
@@ -217,8 +219,9 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 			resumeSolo();
 		throw;
 	}
-	m_startedRemote = true;
+	// Replacing the session closes its trace before opening the next one.
 	m_remote = std::move(remote);
+	m_remote->startMotionTrace(m_nextMotionTraceFile);
 	camera.setMode(CameraMode::PERSPECTIVE);
 	camera.setPosition({0.f, 100.f, 0.f});
 	camera.setYawPitch(-90.f, 0.f);

@@ -20,6 +20,15 @@ bool parseUnsigned(std::string_view text, Integer &value)
 
 constexpr std::string_view kSettingsVersion = "FTVOX-JOIN-1";
 constexpr size_t kMaxSettingsBytes = 1024;
+constexpr size_t kMaxListedProfiles = 32;
+
+template<size_t N>
+void setField(std::array<char, N> &field, std::string_view text)
+{
+	const auto count = std::min(text.size(), N - 1);
+	std::ranges::copy_n(text.begin(), count, field.begin());
+	field[count] = '\0';
+}
 }
 
 std::optional<net::udp::Address> parseEndpoint(std::string_view text)
@@ -70,17 +79,44 @@ std::optional<std::string> profileName(std::string_view text)
 std::vector<std::string> listProfiles(const std::filesystem::path &directory)
 {
 	std::vector<std::string> names;
+	names.reserve(kMaxListedProfiles);
 	std::error_code ec;
 	std::filesystem::directory_iterator it(directory, ec), end;
-	for (; !ec && it != end && names.size() < 32; it.increment(ec))
+	for (; !ec && it != end; it.increment(ec))
 	{
-		const std::string name = it->path().filename().generic_string();
+		const auto filename = it->path().filename();
+		if (!std::ranges::all_of(filename.native(), [](auto c) { return static_cast<unsigned>(c) <= 127; }))
+			continue;
+		const std::string name = filename.generic_string();
 		std::error_code typeError;
-		if (profileName(name) == name && it->symlink_status(typeError).type() == std::filesystem::file_type::directory)
-			names.push_back(name);
+		if (profileName(name) != name || it->symlink_status(typeError).type() != std::filesystem::file_type::directory)
+			continue;
+		if (names.size() == kMaxListedProfiles)
+		{
+			if (name >= names.back())
+				continue;
+			names.pop_back();
+		}
+		names.insert(std::ranges::lower_bound(names, name), name);
 	}
-	std::ranges::sort(names);
 	return names;
+}
+
+void JoinDraft::setEndpoint(std::string_view text) { setField(endpoint, text); }
+void JoinDraft::setProfile(std::string_view text) { setField(profile, text); }
+
+bool JoinDraft::selectSavedEndpoint(net::udp::Address address)
+{
+	if (parseEndpoint(endpoint.data()) == address)
+		return false;
+	setEndpoint(formatEndpoint(address));
+	expectedSeed.front() = '\0';
+	return true;
+}
+
+JoinRequest JoinDraft::request() const
+{
+	return {endpoint.data(), profile.data(), expectedSeed.data()};
 }
 
 std::optional<JoinTarget> validateJoin(std::string_view endpoint, std::string_view seed, std::string &error)

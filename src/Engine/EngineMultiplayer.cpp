@@ -1,5 +1,6 @@
 #include "EngineMultiplayer.hpp"
 
+#include <Engine/ExclusiveFile.hpp>
 #include <Engine/Profiler.hpp>
 #include <Items/ItemRegistry.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -79,29 +80,53 @@ Engine::RemoteSession::RemoteSession(net::udp::Address server, std::optional<uin
 {
 }
 
-void Engine::RemoteSession::startMotionTrace()
+void Engine::RemoteSession::startMotionTrace(uint64_t &nextFile) noexcept
 {
-	if (const char *path = std::getenv("FT_VOX_MOTION_TRACE"); path && *path)
+	const char *configured = std::getenv("FT_VOX_MOTION_TRACE");
+	if (!configured || !*configured)
+		return;
+
+	try
 	{
-		auto &trace = motionTrace.emplace();
-		trace.file.open(path);
-		if (!trace.file)
+		const std::filesystem::path base(configured);
+		while (nextFile != 0)
 		{
-			std::cerr << "[multiplayer] Could not open motion trace: " << path << '\n';
-			motionTrace.reset();
+			auto path = base;
+			if (nextFile > 1)
+			{
+				path = base.parent_path() / base.stem();
+				path += ".session-" + std::to_string(nextFile);
+				path += base.extension();
+			}
+			const auto result = client::reserveFile(path);
+			if (result == client::FileReservation::Failed)
+				break;
+			++nextFile;
+			if (result == client::FileReservation::Exists)
+				continue;
+
+			auto &trace = motionTrace.emplace();
+			trace.file.open(path, std::ios::app);
+			if (!trace.file)
+				break;
+			trace.start = trace.lastFlush = Clock::now();
+			trace.file.imbue(std::locale::classic());
+			trace.file << std::fixed << std::setprecision(6)
+				<< "time_ms,frame_ms,acquire_ms,present_ms,projection,focused,mouse_captured,ready,vsync,"
+				   "move_x,move_z,input_flags,inputs_sent,inputs_failed,first_input_tick,last_input_tick,last_input_seq,"
+				   "snapshot_tick,ack_seq,rtt_ms,snapshot_age_ms,backlog,corrections,last_correction,"
+				   "hard_resets,reset_reason,blocked_camera_sweeps,waiting_terrain,player_flags,motion_reset,"
+				   "server_x,server_y,server_z,server_vx,server_vy,server_vz,predicted_x,predicted_y,predicted_z,"
+				   "camera_valid,camera_time_ms,camera_x,camera_y,camera_z,yaw,pitch\n";
+			if (!trace.file)
+				break;
+			std::cout << "[multiplayer] Motion trace: " << path.string() << '\n';
 			return;
 		}
-		trace.start = trace.lastFlush = Clock::now();
-		trace.file.imbue(std::locale::classic());
-		trace.file << std::fixed << std::setprecision(6)
-			<< "time_ms,frame_ms,acquire_ms,present_ms,projection,focused,mouse_captured,ready,vsync,"
-			   "move_x,move_z,input_flags,inputs_sent,inputs_failed,first_input_tick,last_input_tick,last_input_seq,"
-			   "snapshot_tick,ack_seq,rtt_ms,snapshot_age_ms,backlog,corrections,last_correction,"
-			   "hard_resets,reset_reason,blocked_camera_sweeps,waiting_terrain,player_flags,motion_reset,"
-			   "server_x,server_y,server_z,server_vx,server_vy,server_vz,predicted_x,predicted_y,predicted_z,"
-			   "camera_valid,camera_time_ms,camera_x,camera_y,camera_z,yaw,pitch\n";
-		std::cout << "[multiplayer] Motion trace: " << path << '\n';
 	}
+	catch (const std::exception &) {}
+	motionTrace.reset();
+	std::cerr << "[multiplayer] Could not open motion trace: " << configured << '\n';
 }
 
 double Engine::RemoteSession::SnapshotClock::alpha(uint64_t previousTick, Clock::time_point now) const

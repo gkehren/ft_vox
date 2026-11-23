@@ -27,8 +27,16 @@ struct EngineJoinProbe
 		engine.applySessionRequests();
 		if (engine.m_remote)
 		{
+			if (const auto &trace = engine.m_remote->motionTrace; trace && trace->frames == 0)
+			{
+				CHECK(trace->sent == 0 && trace->failed == 0 && trace->lastInputSequence == 0 &&
+					trace->start == trace->lastFlush && trace->cameraAt == Clock::time_point{},
+					"a replacement trace starts with fresh counters and timestamps");
+			}
 			engine.pollRemote();
 			engine.tickStreaming(1.0 / 120.0);
+			if (engine.m_remote->motionTrace)
+				engine.traceRemoteMotion(1.0 / 120.0);
 		}
 	}
 

@@ -367,7 +367,8 @@ private:
 	std::unique_ptr<RemoteSession> m_remote;
 	std::unique_ptr<RemoteSession> m_nextRemote;
 	uint64_t m_remoteRenderEpoch{};
-	bool m_startedRemote{}, m_returnToSolo{};
+	uint64_t m_nextMotionTraceFile{1};
+	bool m_returnToSolo{};
 	std::optional<client::JoinRequest> m_joinRequest;
 	client::JoinPreferences m_joinPreferences;
 	std::vector<std::string> m_joinProfiles;

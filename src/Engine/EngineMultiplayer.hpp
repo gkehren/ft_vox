@@ -31,7 +31,7 @@ struct Engine::RemoteSession
 
 	RemoteSession(net::udp::Address address, std::optional<uint32_t> expected,
 		const net::wire::PlayerKey &key, std::string namedProfile = {});
-	void startMotionTrace();
+	void startMotionTrace(uint64_t &nextFile) noexcept;
 	const net::wire::PlayerState *localPlayer() const;
 	bool ready() const;
 	bool canReconnect() const;

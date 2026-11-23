@@ -23,19 +23,12 @@ void networkMetric(const char *label, std::optional<T> value, const char *format
 
 using Milliseconds = std::chrono::duration<double, std::milli>;
 
-template<size_t N>
-void setJoinField(std::array<char, N> &field, std::string_view text)
-{
-	const auto count = std::min(text.size(), N - 1);
-	std::copy_n(text.begin(), count, field.begin());
-	field[count] = '\0';
-}
-
-void endpointChoices(const char *label, const std::vector<net::udp::Address> &endpoints,
-	std::array<char, 64> &field)
+bool endpointChoices(const char *label, const std::vector<net::udp::Address> &endpoints,
+	client::JoinDraft &draft)
 {
 	if (endpoints.empty())
-		return;
+		return false;
+	bool changed = false;
 	ImGui::SetNextItemWidth(-1.f);
 	ImGui::PushID(label);
 	if (ImGui::BeginCombo("##endpoints", label, ImGuiComboFlags_HeightSmall))
@@ -43,12 +36,13 @@ void endpointChoices(const char *label, const std::vector<net::udp::Address> &en
 		for (auto address : endpoints)
 		{
 			const auto endpoint = client::formatEndpoint(address);
-			if (ImGui::Selectable(endpoint.c_str(), endpoint == field.data()))
-				setJoinField(field, endpoint);
+			if (ImGui::Selectable(endpoint.c_str(), endpoint == draft.endpoint.data()))
+				changed = draft.selectSavedEndpoint(address);
 		}
 		ImGui::EndCombo();
 	}
 	ImGui::PopID();
+	return changed;
 }
 }
 
@@ -119,12 +113,12 @@ void GameUI::drawJoinPanel(const GameUIFrame &frame)
 	if (!m_joinDraftInitialized)
 	{
 		if (!frame.multiplayerEndpoint.empty())
-			setJoinField(m_joinEndpoint, frame.multiplayerEndpoint);
+			m_joinDraft.setEndpoint(frame.multiplayerEndpoint);
 		else if (!prefs.recent.empty())
-			setJoinField(m_joinEndpoint, client::formatEndpoint(prefs.recent.front()));
+			m_joinDraft.setEndpoint(client::formatEndpoint(prefs.recent.front()));
 		else
-			setJoinField(m_joinEndpoint, "127.0.0.1:7777");
-		setJoinField(m_profileName, prefs.selectedProfile);
+			m_joinDraft.setEndpoint("127.0.0.1:7777");
+		m_joinDraft.setProfile(prefs.selectedProfile);
 		m_joinDraftInitialized = true;
 	}
 	if (frame.multiplayerStatus)
@@ -153,17 +147,17 @@ void GameUI::drawJoinPanel(const GameUIFrame &frame)
 
 	ImGui::Separator();
 	ImGui::BeginDisabled(frame.switchingSession);
-	endpointChoices("Favorite servers", prefs.favorites, m_joinEndpoint);
-	endpointChoices("Recent servers", prefs.recent, m_joinEndpoint);
+	endpointChoices("Favorite servers", prefs.favorites, m_joinDraft);
+	endpointChoices("Recent servers", prefs.recent, m_joinDraft);
 	ImGui::TextUnformatted("Server address and port");
 	ImGui::SetNextItemWidth(-1.f);
-	ImGui::InputTextWithHint("##endpoint", "127.0.0.1:7777", m_joinEndpoint.data(), m_joinEndpoint.size());
+	ImGui::InputTextWithHint("##endpoint", "127.0.0.1:7777", m_joinDraft.endpoint.data(), m_joinDraft.endpoint.size());
 	if (ImGui::Button("Toggle favorite"))
-		frame.toggleFavorite(m_joinEndpoint.data());
+		frame.toggleFavorite(m_joinDraft.endpoint.data());
 	ImGui::SetItemTooltip("Add or remove this address in Favorite servers.");
 	ImGui::TextUnformatted("Expected world seed (optional)");
 	ImGui::SetNextItemWidth(-1.f);
-	ImGui::InputText("##seed", m_joinSeed.data(), m_joinSeed.size());
+	ImGui::InputText("##seed", m_joinDraft.expectedSeed.data(), m_joinDraft.expectedSeed.size());
 
 	if (!frame.joinProfiles.empty())
 	{
@@ -172,9 +166,9 @@ void GameUI::drawJoinPanel(const GameUIFrame &frame)
 		{
 			for (const std::string &profile : frame.joinProfiles)
 			{
-				if (ImGui::Selectable(profile.c_str(), profile == m_profileName.data()))
+				if (ImGui::Selectable(profile.c_str(), profile == m_joinDraft.profile.data()))
 				{
-					setJoinField(m_profileName, profile);
+					m_joinDraft.setProfile(profile);
 					frame.selectJoinProfile(profile);
 				}
 			}
@@ -183,12 +177,12 @@ void GameUI::drawJoinPanel(const GameUIFrame &frame)
 	}
 	ImGui::TextUnformatted("Local profile name");
 	ImGui::SetNextItemWidth(-1.f);
-	ImGui::InputText("##profile", m_profileName.data(), m_profileName.size());
+	ImGui::InputText("##profile", m_joinDraft.profile.data(), m_joinDraft.profile.size());
 	if (ImGui::Button("Create profile"))
-		frame.createJoinProfile(m_profileName.data());
+		frame.createJoinProfile(m_joinDraft.profile.data());
 	ImGui::SetItemTooltip("Create an identity for a new name. Reuse that name to resume the same player.");
 	if (ImGui::Button(frame.leaveServer ? "Switch server or profile" : "Connect"))
-		frame.connectServer({m_joinEndpoint.data(), m_profileName.data(), m_joinSeed.data()});
+		frame.connectServer(m_joinDraft.request());
 	ImGui::EndDisabled();
 	if (!frame.joinError.empty())
 		ImGui::TextWrapped("%s", frame.joinError.c_str());

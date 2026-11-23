@@ -48,7 +48,17 @@ test uses isolated saves and ephemeral loopback ports.
 
 The Windows Release run passed all 19 native checks on an RTX 4070 Ti,
 including a profile switch on a server with a single remote seat. The
-Windows desktop control pipe was unavailable for the manual click-through.
+maintainer also verified the Join panel in-game. The manual checks covered
+profile creation and selection, solo-to-server join, disconnect and
+reconnect, server and profile switching, restored solo inventory, camera
+and terrain, editing after a failed connection, recent and favorite
+endpoint persistence after restart, and keyboard and mouse capture
+while editing the form.
+
+The opt-in native smoke also checks separate motion traces across
+session switches and process restarts. It verifies that existing trace
+files survive filename collisions, tracing stays off when disabled, and
+the client continues joining when the configured trace cannot be opened.
 
 ## Multiplayer panel (#283)
 

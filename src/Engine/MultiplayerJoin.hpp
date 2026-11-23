@@ -2,6 +2,7 @@
 
 #include <Network/UdpSocket.hpp>
 
+#include <array>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -25,6 +26,18 @@ struct JoinTarget
 struct JoinRequest
 {
 	std::string endpoint, profile, expectedSeed;
+};
+
+struct JoinDraft
+{
+	std::array<char, 64> endpoint{};
+	std::array<char, 128> profile{};
+	std::array<char, 16> expectedSeed{};
+
+	void setEndpoint(std::string_view text);
+	void setProfile(std::string_view text);
+	bool selectSavedEndpoint(net::udp::Address address);
+	JoinRequest request() const;
 };
 
 std::optional<JoinTarget> validateJoin(std::string_view endpoint, std::string_view seed, std::string &error);

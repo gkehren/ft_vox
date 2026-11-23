@@ -5,6 +5,9 @@
 
 #include <fstream>
 #include <iterator>
+#include <random>
+#include <stdexcept>
+#include <utility>
 
 namespace
 {
@@ -26,6 +29,101 @@ bool rejectsProfile(const fs::path &path, ProfileAccess access)
 	try { (void)client::playerKey(path, access); }
 	catch (const std::exception &) { return true; }
 	return false;
+}
+
+std::string creationFailure(const fs::path &path, ProfileAccess access, client::ProfileKeyWriter writer)
+{
+	try { (void)client::playerKey(path, access, writer); }
+	catch (const client::ProfileCreationError &error) { return error.what(); }
+	return {};
+}
+
+void checkProfileRollback(const fs::path &root)
+{
+	const auto profile = root / "retry";
+	const auto failAfterWrite = [](const fs::path &path, const net::wire::PlayerKey &) {
+		std::ofstream(path.string() + ".tmp", std::ios::app) << "partial key";
+		return false;
+	};
+	const auto throwDuringWrite = [](const fs::path &, const net::wire::PlayerKey &) -> bool {
+		throw std::runtime_error("injected write error");
+	};
+	CHECK(creationFailure(profile, ProfileAccess::Create, failAfterWrite).find("retry the same name") !=
+		std::string::npos && !fs::exists(profile), "failed initial write removes its temporary file and empty folder");
+	CHECK(creationFailure(profile, ProfileAccess::LoadOrCreate, throwDuringWrite).find("retry the same name") !=
+		std::string::npos && !fs::exists(profile), "throwing writer also rolls back a new CLI profile");
+	const auto key = client::playerKey(profile, ProfileAccess::Create);
+	CHECK(client::playerKey(profile, ProfileAccess::Load) == key, "the same profile name succeeds after rollback");
+	CHECK(!creationFailure(profile, ProfileAccess::Create, failAfterWrite).empty() &&
+		client::playerKey(profile, ProfileAccess::Load) == key, "a failed creation attempt leaves an existing key intact");
+
+	const auto occupied = root / "occupied";
+	const auto failWithUnrelatedFile = [](const fs::path &path, const net::wire::PlayerKey &) {
+		std::ofstream(path.parent_path() / "keep.txt") << "unrelated";
+		return false;
+	};
+	CHECK(creationFailure(occupied, ProfileAccess::Create, failWithUnrelatedFile).find("Inspect it") !=
+		std::string::npos, "rollback blocked by unknown contents reports how to recover");
+	CHECK(fs::is_regular_file(occupied / "keep.txt") && !fs::exists(occupied / "player.key.tmp") &&
+		rejectsProfile(occupied, ProfileAccess::LoadOrCreate) && !fs::exists(occupied / "player.key"),
+		"only the owned temporary file is removed and the existing directory stays protected");
+}
+
+void checkProfileDiscovery(const fs::path &root)
+{
+	const auto first = root / "discovery-a";
+	const auto second = root / "discovery-b";
+	CHECK(client::listProfiles(first).empty(), "missing profile directory is empty");
+	fs::create_directories(first);
+	fs::create_directories(second);
+	CHECK(client::listProfiles(second).empty(), "empty profile directory is empty");
+
+	std::vector<std::string> names;
+	for (int i = 100; i < 149; ++i)
+		names.push_back("profile-" + std::to_string(i));
+	const std::vector<std::string> expected(names.begin(), names.begin() + 32);
+	std::mt19937 random(284);
+	for (const auto &directory : {first, second})
+	{
+		std::shuffle(names.begin(), names.end(), random);
+		for (const auto &name : names)
+			fs::create_directory(directory / name);
+		fs::create_directory(directory / "_invalid");
+		fs::create_directory(directory / "UPPERCASE");
+		fs::create_directory(directory / fs::path(u8"caf\u00e9"));
+		std::ofstream(directory / "aaa-file") << "regular file";
+		std::error_code error;
+		fs::create_directory_symlink(directory / expected.front(), directory / "aaa-link", error);
+		CHECK(client::listProfiles(directory) == expected,
+			"discovery returns the same sorted 32 profiles and excludes invalid entries");
+	}
+}
+
+void checkEndpointSelection()
+{
+	client::JoinPreferences prefs;
+	prefs.toggleFavorite({0x7f000001, 8001});
+	prefs.recordRecent({0x7f000001, 8002});
+	client::JoinDraft draft;
+	draft.setEndpoint("127.0.0.1:7777");
+	draft.expectedSeed = {'4', '2'};
+	CHECK(draft.selectSavedEndpoint(prefs.favorites.front()) &&
+		draft.request().endpoint == "127.0.0.1:8001" && draft.request().expectedSeed.empty(),
+		"choosing a different favorite clears the seed");
+	draft.expectedSeed = {'4', '3'};
+	CHECK(draft.selectSavedEndpoint(prefs.recent.front()) &&
+		draft.request().endpoint == "127.0.0.1:8002" && draft.request().expectedSeed.empty(),
+		"choosing a different recent server clears the seed");
+	draft.expectedSeed = {'4', '4'};
+	draft.setEndpoint("127.0.0.1:08002");
+	CHECK(!draft.selectSavedEndpoint(prefs.recent.front()) && draft.request().expectedSeed == "44",
+		"reselecting the same numeric endpoint preserves the seed");
+	draft.setProfile("another-profile");
+	const auto request = draft.request();
+	std::string error;
+	const auto target = client::validateJoin(request.endpoint, request.expectedSeed, error);
+	CHECK(request.profile == "another-profile" && target && target->expectedSeed == 44u && error.empty(),
+		"profile changes preserve the manually entered seed for validation");
 }
 
 void checkInputs()
@@ -70,7 +168,9 @@ void checkProfilesAndPreferences(const fs::path &root)
 		rejectsProfile(bob, ProfileAccess::LoadOrCreate) && !fs::exists(bob / "player.key"),
 		"missing existing key is never regenerated");
 	std::ofstream(bob / "player.key") << "truncated";
-	CHECK(rejectsProfile(bob, ProfileAccess::Load), "corrupt credentials cannot silently change identity");
+	CHECK(rejectsProfile(bob, ProfileAccess::Load) && rejectsProfile(bob, ProfileAccess::LoadOrCreate) &&
+		fs::file_size(bob / "player.key") == std::string_view("truncated").size(),
+		"corrupt credentials cannot silently change identity");
 
 	const auto settings = root / "join-settings.txt";
 	client::JoinPreferences prefs;
@@ -111,6 +211,9 @@ int main()
 {
 	checkInputs();
 	const TempDirectory root;
+	checkProfileRollback(root.path);
+	checkProfileDiscovery(root.path);
+	checkEndpointSelection();
 	checkProfilesAndPreferences(root.path);
 	return testmain::exitCode();
 }
