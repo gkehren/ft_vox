@@ -70,6 +70,28 @@ regression covers late snapshot polling and a single delayed render
 frame. The temporary diagnostic input and logs are outside the shipped
 client.
 
+### Late movement inputs after short action RTT samples
+
+A trace from the reported playthrough showed regular frame times around
+6 ms during the severe rollbacks. From roughly 45 seconds onward, server
+snapshots kept arriving while the processed-input acknowledgment advanced
+only in bursts. Earlier action acknowledgments had moved the RTT
+estimate from roughly 35 ms toward 9–12 ms. Command ticks were still
+being sent. The running server clock was following delayed snapshots
+and the reduced RTT left insufficient lead for those commands to reach
+the open input slots.
+
+The scheduler now keeps the least delayed observation in a two-second
+snapshot window and targets three ticks beyond estimated arrival. The
+server keeps its six-tick admission policy. The regression combines
+short action RTT samples with 6–56 ms snapshot delivery variation and
+models the server closing the next tick's inbox. It recorded 227 late
+inputs out of 240 before the fix and zero out of 241 after it.
+In a separate two-client Windows run, repeated hotbar-select actions
+produced an RTT estimate of 8.7–14.9 ms during steady walking. The
+walking client recorded zero prediction corrections, zero hard resets
+and no frame-to-frame reversal.
+
 ## Wire v4 profile restart
 
 Two Windows Release clients created distinct profiles with

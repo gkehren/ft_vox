@@ -27,7 +27,7 @@ public:
 	static constexpr auto kMaxRtt = std::chrono::milliseconds(500);
 	static_assert(kMaxBatch < wire::kInputLeadTicks);
 
-	explicit ClientTickScheduler(unsigned safetyTicks = 2)
+	explicit ClientTickScheduler(unsigned safetyTicks = 3)
 		: m_safetyTicks(std::clamp(safetyTicks, 1u, kMaxBatch)) {}
 
 	void reset() { *this = ClientTickScheduler(m_safetyTicks); }
@@ -36,17 +36,31 @@ public:
 	{
 		if (m_snapshot && (tick <= m_snapshot->tick || receivedAt < m_snapshot->receivedAt))
 			return;
-		double phase = 0.0;
-		if (hasFreshClock(receivedAt))
+		const bool fresh = hasFreshClock(receivedAt);
+		double lead = 0.0;
+		if (fresh)
 		{
-			// A render frame can poll a snapshot late, or drain several at
-			// once. Keep the running clock through ordinary delivery jitter.
-			const double error = m_snapshot->phase + age(receivedAt).count() * wire::kTickRate -
-				double(tick - m_snapshot->tick);
-			if (std::abs(error) <= kMaxBatch)
-				phase = error - std::clamp(error, -0.25, 0.25);
+			// A late delivery measures queueing delay, not a slower tick
+			// clock. Use the least delayed observation in the recent window.
+			for (const auto &sample : std::span(m_clockSamples).first(m_clockCount))
+			{
+				const auto elapsed = between(receivedAt, sample.receivedAt);
+				if (elapsed <= kClockWindow)
+					lead = std::max(lead, elapsed.count() * wire::kTickRate - double(tick - sample.tick));
+			}
 		}
-		m_snapshot = Snapshot{tick, receivedAt, phase};
+		// A prolonged gap or a clock more than five ticks behind its old
+		// cadence requires a fresh anchor, for example after a server stall.
+		if (!fresh || lead >= wire::kInputLeadTicks - 1)
+		{
+			m_clockCount = m_nextClockSample = 0;
+			lead = 0.0;
+		}
+		m_snapshot = Snapshot{tick, receivedAt};
+		m_clockLead = lead;
+		m_clockSamples[m_nextClockSample] = *m_snapshot;
+		m_nextClockSample = (m_nextClockSample + 1) % m_clockSamples.size();
+		m_clockCount = std::min(m_clockCount + 1, m_clockSamples.size());
 	}
 
 	void observeRoundTrip(Seconds rtt)
@@ -63,7 +77,7 @@ public:
 
 	bool hasFreshClock(Clock::time_point now) const
 	{
-		return m_snapshot && now >= m_snapshot->receivedAt && age(now) <= kMaxSnapshotAge;
+		return m_snapshot && now >= m_snapshot->receivedAt && between(now, m_snapshot->receivedAt) <= kMaxSnapshotAge;
 	}
 
 	InputSchedule schedule(Clock::time_point now) const
@@ -72,9 +86,9 @@ public:
 			return {};
 
 		// Budget a round trip from the snapshot timestamp to input arrival.
-		const double arrivalTicks = (age(now) + m_rtt.value_or(kFallbackRtt)).count() * wire::kTickRate +
-			m_snapshot->phase;
-		const uint64_t arrivalOffset = static_cast<uint64_t>(std::max(0.0, arrivalTicks));
+		const auto age = between(now, m_snapshot->receivedAt);
+		const double arrivalTicks = (age + m_rtt.value_or(kFallbackRtt)).count() * wire::kTickRate + m_clockLead;
+		const uint64_t arrivalOffset = static_cast<uint64_t>(arrivalTicks);
 		const uint64_t targetOffset = arrivalOffset + m_safetyTicks;
 		constexpr auto maxTick = std::numeric_limits<uint64_t>::max();
 		if (m_snapshot->tick > maxTick - targetOffset)
@@ -116,23 +130,29 @@ public:
 	}
 
 private:
+	static constexpr auto kClockWindow = std::chrono::seconds(2);
+	static constexpr size_t kClockSamples = kClockWindow.count() * wire::kTickRate /
+		wire::kPlayerSnapshotIntervalTicks;
+
 	struct Snapshot
 	{
 		uint64_t tick;
 		Clock::time_point receivedAt;
-		double phase;
 	};
 
-	Seconds age(Clock::time_point now) const
+	static Seconds between(Clock::time_point now, Clock::time_point then)
 	{
 		// Convert before subtracting to avoid signed duration overflow at
 		// the extremes of the steady-clock representation.
-		return Seconds(now.time_since_epoch()) - Seconds(m_snapshot->receivedAt.time_since_epoch());
+		return Seconds(now.time_since_epoch()) - Seconds(then.time_since_epoch());
 	}
 
 	unsigned m_safetyTicks;
 	uint64_t m_lastSentTick{};
 	std::optional<Snapshot> m_snapshot;
+	std::array<Snapshot, kClockSamples> m_clockSamples{};
+	size_t m_clockCount{}, m_nextClockSample{};
+	double m_clockLead{};
 	std::optional<Seconds> m_rtt;
 };
 

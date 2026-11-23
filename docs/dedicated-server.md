@@ -104,11 +104,12 @@ It starts with a matching single-attempt Hello/Welcome round trip and
 updates from Action acknowledgments when the action was sent once.
 The estimate includes pump and server scheduling time. It assumes
 roughly symmetric paths and uses a 50 ms fallback RTT until a usable
-measurement arrives. The client targets two ticks beyond estimated
+measurement arrives. The client targets three ticks beyond estimated
 arrival and polls snapshots after swapchain acquisition, close to the
-input send. Snapshot delivery jitter adjusts the running estimate
-gradually. When a frame falls behind by up to three input ticks, the
-client sends those consecutive ticks so the server can admit any that
+input send. Its server clock uses the least delayed snapshot observation
+from the last two seconds. A prolonged gap or a five-tick phase jump
+starts a fresh timing window. When a frame falls behind by up to three
+input ticks, the client sends those consecutive ticks so the server can admit any that
 are still open. A larger gap starts a new batch near the estimated
 arrival. The server still admits only the next six ticks at its receive
 boundary. The HUD reports degraded input timing

@@ -1120,7 +1120,7 @@ void testEntityReplication(const fs::path &root)
 void testClientTickMath()
 {
 	using Scheduler = udp::ClientTickScheduler;
-	Scheduler scheduler;
+	Scheduler scheduler(2);
 	const Time now{};
 	require(scheduler.schedule(now).count == 0, "scheduled without a snapshot");
 	scheduler.observeSnapshot(100, now);
@@ -1198,6 +1198,46 @@ void testClientTickMath()
 	scheduler.reset();
 	scheduler.observeSnapshot(0, now);
 	require(scheduler.schedule(now).firstTick < 10, "new epoch could not start from tick zero");
+}
+
+void testInputAdmissionAfterShortRtt()
+{
+	udp::ClientTickScheduler scheduler;
+	scheduler.observeRoundTrip(45ms);
+	std::multimap<std::chrono::milliseconds, uint64_t> deliveries;
+	for (uint64_t tick = 0; tick < 480; tick += wire::kPlayerSnapshotIntervalTicks)
+	{
+		// The client receives snapshots in a sawtooth pattern as the IO and
+		// render pumps beat against the server's 50 ms snapshot cadence.
+		const auto generated = 1ms * static_cast<int64_t>(tick * 1000 / wire::kTickRate);
+		const auto delay = 6ms + 10ms * static_cast<int64_t>((tick / wire::kPlayerSnapshotIntervalTicks) % 6);
+		deliveries.emplace(generated + delay, tick);
+	}
+	unsigned sent = 0, late = 0, early = 0;
+	for (auto frame = 0ms; frame < 8s; frame += 6ms)
+	{
+		Time now{frame};
+		while (!deliveries.empty() && deliveries.begin()->first <= frame)
+		{
+			scheduler.observeSnapshot(deliveries.begin()->second, now);
+			deliveries.erase(deliveries.begin());
+		}
+		if (frame >= 2s)
+			scheduler.observeRoundTrip(9ms);
+		scheduler.send(now, {}, [&](const wire::Input &input) {
+			if (frame >= 4s)
+			{
+				const uint64_t completed = (frame + 6ms) / 1ms * wire::kTickRate / 1000;
+				++sent;
+				late += input.intendedTick <= completed + 1;
+				early += input.intendedTick > completed + wire::kInputLeadTicks;
+			}
+			return true;
+		});
+	}
+	std::cout << "Short RTT admission: " << sent << " sent, " << late << " late, " << early << " early\n";
+	require(sent >= 230 && late == 0 && early == 0,
+		"short action RTT lost the usable movement input window");
 }
 
 void testClientTimingSamples()
@@ -2832,6 +2872,7 @@ int main(int argc, char **argv)
 		else if (argc == 2 && std::string_view(argv[1]) == "--input-timing")
 		{
 			testClientTickMath();
+			testInputAdmissionAfterShortRtt();
 			testClientTimingSamples();
 			testPredictionResets();
 			testLocalPresentationCadence();
