@@ -82,7 +82,7 @@ void UiShell::applyDefaultDeveloperLayout(ImGuiID dockspaceId)
 	ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->WorkSize);
 
 	// left: primary panels (tabbed) | right: developer tools + help |
-	// bottom: performance & benchmark | center: game view (empty passthru).
+	// bottom: performance, benchmark and multiplayer | center: game view (empty passthru).
 	ImGuiID dockLeft = 0, dockRest = 0;
 	ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.24f, &dockLeft, &dockRest);
 	ImGuiID dockRight = 0, dockCenter = 0;
@@ -104,6 +104,7 @@ void UiShell::applyDefaultDeveloperLayout(ImGuiID dockspaceId)
 
 	ImGui::DockBuilderDockWindow(windows::kPerformance, dockBottom);
 	ImGui::DockBuilderDockWindow(windows::kBenchmark, dockBottom);
+	ImGui::DockBuilderDockWindow(windows::kMultiplayer, dockBottom);
 
 	ImGui::DockBuilderFinish(dockspaceId);
 	ImGui::MarkIniSettingsDirty();
@@ -162,23 +163,18 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 
 	if (frame.multiplayerStatus && ImGui::BeginMenu("Multiplayer"))
 	{
-		ImGui::TextUnformatted(frame.multiplayerStatus);
-		if (const auto &stats = frame.networkStats)
-		{
-			if (stats->rttMs)
-				ImGui::Text("RTT %.0f ms", *stats->rttMs);
-			ImGui::Text("Snapshot age %.0f ms   Missing %.1f%%", stats->snapshotAgeMs, 100.0 * stats->snapshotLoss);
-			ImGui::Text("Pending inputs %zu   Resets %llu", stats->pendingInputs,
-				static_cast<unsigned long long>(stats->hardResets));
-			ImGui::Text("Corrections %.1f/s   Last %.3f m   Max %.3f m", stats->correctionsPerSecond,
-				stats->lastCorrection, stats->maxCorrection);
-			ImGui::Text("Receive %.1f KiB/s   Send %.1f KiB/s", stats->receiveKiB, stats->sendKiB);
-		}
+		layoutTileMenuItem("Show panel", nullptr, toggles.multiplayer);
 		ImGui::Separator();
 		if (frame.joinServer && ImGui::MenuItem("Reconnect"))
 			frame.joinServer();
 		if (frame.leaveServer && ImGui::MenuItem("Disconnect"))
 			frame.leaveServer();
+		ImGui::Separator();
+		ImGui::TextUnformatted(frame.multiplayerStatus->label);
+		if (frame.multiplayerStatus->detail)
+			ImGui::TextWrapped("%s", frame.multiplayerStatus->detail);
+		if (hasLiveNetworkStats(frame.multiplayerStatus->state))
+			drawMultiplayerNetworkStats(frame.networkStats);
 		ImGui::EndMenu();
 	}
 

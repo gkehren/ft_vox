@@ -248,6 +248,7 @@ void GameUI::draw(GameUIFrame &frame)
 
 	const ui::ShellToggles toggles{
 		&m_debug.panels.statusOverlay, &m_debug.panels.playerPanel,
+		&m_debug.panels.multiplayer,
 		&m_debug.panels.rendering, &m_debug.panels.streaming,
 		&m_debug.panels.world, &m_debug.panels.help, &m_debug.panels.overlayHints,
 		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.playerDiagnostics,
@@ -268,6 +269,8 @@ void GameUI::draw(GameUIFrame &frame)
 		drawStatusOverlay(frame);
 	if (m_debug.panels.playerPanel)
 		drawPlayerPanel(frame);
+	if (m_debug.panels.multiplayer && frame.multiplayerStatus)
+		drawMultiplayerPanel(frame);
 	debugui::drawOverview(m_debug, frame);
 	debugui::drawRendering(m_debug, frame);
 	debugui::drawRenderDebug(m_debug, frame);
@@ -307,7 +310,8 @@ void GameUI::draw(GameUIFrame &frame)
 			ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize))
 		{
-			ImGui::TextUnformatted(frame.multiplayerStatus);
+			const auto &status = *frame.multiplayerStatus;
+			ImGui::TextUnformatted(status.detail ? status.detail : status.label);
 			if (frame.multiplayerAction)
 				ImGui::TextUnformatted(frame.multiplayerAction);
 		}

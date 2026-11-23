@@ -208,6 +208,7 @@ struct PanelState
 	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Detailed};
 	/// Interactive Player / Gameplay panel (View menu).
 	bool playerPanel{false};
+	bool multiplayer{false};
 	bool overview{false};
 	bool rendering{false};	   // settings ("Graphics")
 	bool renderDebug{false};   // diagnostic views

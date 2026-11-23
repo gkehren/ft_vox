@@ -14,6 +14,9 @@ struct GameUIFrame;
 
 namespace ui
 {
+struct NetworkStats;
+void drawMultiplayerNetworkStats(const NetworkStats &stats);
+
 /// One-shot request for which Help tab to select the next time the Help
 /// window is drawn (menu entries open the window AND select their tab).
 enum class HelpTabRequest
@@ -41,6 +44,7 @@ inline constexpr const char *kBenchmarkReport = "Benchmark Report";
 inline constexpr const char *kWorld = "World";
 inline constexpr const char *kHelp = "Help";
 inline constexpr const char *kPlayer = "Player / Gameplay";
+inline constexpr const char *kMultiplayer = "Multiplayer";
 } // namespace windows
 
 /// Screen-space rectangle of the central game-view area. Used to anchor
@@ -60,6 +64,7 @@ struct ShellToggles
 	// GameUI-owned surfaces.
 	playerui::StatusOverlayDensity *statusOverlay;
 	bool *playerPanel; // interactive "Player / Gameplay" panel
+	bool *multiplayer;
 	bool *graphics;	  // DebugUI rendering panel ("Graphics", settings)
 	bool *streaming;
 	bool *world;
@@ -111,7 +116,7 @@ public:
 	/// without deleting imgui.ini).
 	void queueResetLayout() { m_resetLayoutQueued = true; }
 	/// Apply the default developer layout (left: Graphics/Streaming/World,
-	/// right: developer tools + Help, bottom: Performance/Benchmark, center:
+	/// right: developer tools + Help, bottom: Performance/Benchmark/Multiplayer, center:
 	/// game passthru).
 	void queueDefaultLayout() { m_defaultLayoutQueued = true; }
 

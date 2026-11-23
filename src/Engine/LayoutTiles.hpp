@@ -21,6 +21,7 @@ struct LayoutTilesSnapshot
 	bool streaming{false};
 	bool world{false};
 	bool playerPanel{false};
+	bool multiplayer{false};
 	bool help{false};
 	bool overview{false};
 	bool performance{false};
@@ -36,7 +37,7 @@ struct LayoutTilesSnapshot
 /// while every panel happens to be closed is still hidden).
 inline bool anyLayoutTileVisible(const debugui::PanelState &panels)
 {
-	return panels.rendering || panels.streaming || panels.world || panels.playerPanel ||
+	return panels.rendering || panels.streaming || panels.world || panels.playerPanel || panels.multiplayer ||
 		   panels.help || panels.overview || panels.performance || panels.playerDiagnostics ||
 		   panels.chunkInspector || panels.memory || panels.renderDebug || panels.benchmark;
 }
@@ -45,7 +46,7 @@ inline bool anyLayoutTileVisible(const debugui::PanelState &panels)
 inline LayoutTilesSnapshot captureLayoutTiles(const debugui::PanelState &panels)
 {
 	return {panels.rendering, panels.streaming,	   panels.world,
-			panels.playerPanel, panels.help,   panels.overview,
+			panels.playerPanel, panels.multiplayer, panels.help, panels.overview,
 			panels.performance, panels.playerDiagnostics, panels.chunkInspector,
 			panels.memory, panels.renderDebug, panels.benchmark};
 }
@@ -57,6 +58,7 @@ inline void setAllLayoutTiles(debugui::PanelState &panels, bool visible)
 	panels.streaming = visible;
 	panels.world = visible;
 	panels.playerPanel = visible;
+	panels.multiplayer = visible;
 	panels.help = visible;
 	panels.overview = visible;
 	panels.performance = visible;
@@ -74,6 +76,7 @@ inline void restoreLayoutTiles(debugui::PanelState &panels, const LayoutTilesSna
 	panels.streaming = snapshot.streaming;
 	panels.world = snapshot.world;
 	panels.playerPanel = snapshot.playerPanel;
+	panels.multiplayer = snapshot.multiplayer;
 	panels.help = snapshot.help;
 	panels.overview = snapshot.overview;
 	panels.performance = snapshot.performance;

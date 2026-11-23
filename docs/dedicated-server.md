@@ -309,12 +309,24 @@ teleports start a fresh path. Playback holds the last pose under loss
 with zero extrapolation and hides the avatar after 300 ms without a fresh
 snapshot.
 
-Release the mouse with **C** to open the **Multiplayer** menu. It shows RTT
-from unambiguous Hello/Welcome or Action/ACK exchanges, snapshot age since
-receipt, and an estimate of missing snapshots from gaps in the observed
-20 Hz stream. That estimate includes skipped server captures and client
-frame coalescing. The menu also shows pending inputs, hard resets, local
-correction magnitude and rate, and UDP payload throughput in each direction.
+Release the mouse with **C**, then choose **Multiplayer → Show panel**.
+The dockable window is available on every client launched with `--connect`.
+**Join** shows the configured server endpoint, connection state, and the
+same Disconnect/Reconnect actions as the menu. **Network** shows this
+client's ping estimate and sample age, snapshot age and estimated loss,
+receive/send throughput, pending predicted inputs, corrections, and hard
+resets. Hover a metric for its definition. Host, Players, and Administration
+are placeholders for future server features.
+
+Ping comes from unambiguous Hello/Welcome or Action/ACK exchanges. A hotbar
+selection or block action can refresh the estimate, and the sample age
+shows how long ago it was measured. Estimated snapshot loss comes from
+gaps in the observed 20 Hz stream and includes skipped server captures and
+client frame coalescing. The client needs two snapshots for a loss estimate
+and one complete traffic window for throughput. Missing measurements read
+**Unavailable**. Disconnect, timeout, and resync clear the session's
+measurements. See the [panel smoke steps](multiplayer-client-smoke.md#multiplayer-panel-283)
+for layout checks and a repeatable impaired-network fixture.
 
 For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a fresh CSV
 path before launching the graphical client. The server uses its normal
