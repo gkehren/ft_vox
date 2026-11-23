@@ -58,8 +58,8 @@ void require(bool success, const std::string &message)
 // endpoint, so all traffic still exercises the production codec and pumps.
 struct Relay
 {
-	Relay(udp::Address server, std::chrono::milliseconds delay)
-		: server(server), delay(delay) {}
+	Relay(udp::Address server, std::chrono::milliseconds delay, udp::Address bind = loopback)
+		: socket(bind), server(server), delay(delay) {}
 
 	void send(const wire::Packet &packet)
 	{
@@ -142,13 +142,16 @@ struct Relay
 			{
 				if (chunk->index == 0)
 					lastBegin = chunk->baseline;
-				if (chunk->index == 2 && std::exchange(dropFragment, false))
+				if (chunk->index == 0 && std::exchange(dropFragment, false))
 					continue;
-				if (chunk->index == 3 && std::exchange(duplicateFragment, false))
+				if (chunk->index == 0 && std::exchange(duplicateFragment, false))
 					pending.emplace(now + delay + 150ms, std::pair{to, frame});
-				if (chunk->index + 1u == wire::kFragmentsPerChunk && std::exchange(corruptFragment, false))
+				const auto encodedSize = chunk->baseline.encodedSize;
+				if (chunk->index + 1u == wire::fragmentCount(encodedSize) && std::exchange(corruptFragment, false))
 				{
-					chunk->materials[0] = chunk->materials[0] == wire::kAirMaterial ? static_cast<uint8_t>(STONE) : wire::kAirMaterial;
+					// The last byte is a material for either encoding.
+					auto &material = chunk->data[wire::fragmentSize(chunk->index, encodedSize) - 1];
+					material = material == wire::kAirMaterial ? static_cast<uint8_t>(STONE) : wire::kAirMaterial;
 					wire::Datagram corrupted;
 					require(wire::encode(wire::Endpoint::Server, packet, corrupted) == wire::CodecStatus::Ok,
 						"expected checksum-only corruption");
@@ -186,7 +189,7 @@ struct Relay
 		}
 	}
 
-	udp::Socket socket{loopback};
+	udp::Socket socket;
 	udp::Address server, client{};
 	std::chrono::milliseconds delay;
 	std::function<std::optional<std::chrono::milliseconds>(const wire::Packet &, bool, Time)> profile;
@@ -352,11 +355,6 @@ void testReplication(const fs::path &root)
 	}
 	cleanTime.report("loopback");
 	impairedTime.report("loopback 10ms each way with loss and reordered duplicates");
-	const auto &fragmentBudget = *wire::policy(wire::Kind::ChunkFragment);
-	const auto minimumInstallTime = 1000000us * static_cast<int>(wire::kFragmentsPerChunk - fragmentBudget.burst) /
-		fragmentBudget.messagesPerSecond;
-	require(*cleanTime.first - *cleanTime.welcome >= std::chrono::ceil<std::chrono::milliseconds>(minimumInstallTime),
-		"initial baseline bypassed fragment pacing");
 	require(editedAt && returned && impaired.oldEdit && impairedTime.traffic.retransmits >= 2,
 		"faults and teleport did not hit in-flight world updates");
 	require(matches(first, world, spawn) && matches(second, world, spawn), "overlapping spawn digests differ");
@@ -1341,8 +1339,7 @@ void testDelayedJoin(const fs::path &root)
 		client.poll(now);
 		if (client.chunks().contains(spawn) && client.inventory() && client.playerSnapshots().current)
 		{
-			require(now - start > wire::kChunkIdleTimeout && !relay.lastResync,
-				"cold join did not exercise a long, steadily progressing baseline");
+			require(now - start <= 2s && !relay.lastResync, "150 ms cold join missed its 2 s budget");
 			std::cout << "150 ms cold join ready in " << (now - start) / 1ms << " ms\n";
 			transport.stop(host);
 			require(host.stop(error), error);
@@ -2082,6 +2079,115 @@ struct ClosureLoop
 	}
 };
 
+void measureChunkDelivery(const fs::path &root, std::chrono::milliseconds rtt, size_t clientCount, bool loss,
+	bool enforceBudget = false)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "chunks-" + std::to_string(rtt.count()) + "-" +
+		std::to_string(clientCount) + (loss ? "-loss" : "-clean"), .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	const auto &world = *sim.world();
+	ClosureLoop loop(host, clientCount);
+	struct Peer
+	{
+		Peer(udp::Address server, std::chrono::milliseconds delay, size_t index, bool loss)
+			// Distinct loopback sources model independent hosts at discovery.
+			: relay(server, delay, udp::parseAddress("127.0.0." + std::to_string(index + 2), 0)),
+			  client(relay.socket.address()), fragmentAttempts(index), ackAttempts(index)
+		{
+			if (loss)
+				relay.profile = [this, delay](const wire::Packet &packet, bool fromServer, Time)
+					-> std::optional<std::chrono::milliseconds> {
+					// Drop one in ten transmissions independently in each
+					// direction. Retries go through the same schedule.
+					if ((fromServer && std::holds_alternative<wire::ChunkFragment>(packet.payload) &&
+					     fragmentAttempts++ % 10 == 0) ||
+					    (!fromServer && std::holds_alternative<wire::Ack>(packet.payload) &&
+					     ackAttempts++ % 10 == 0))
+						return std::nullopt;
+					return delay;
+				};
+		}
+		Relay relay;
+		udp::ClientTransport client;
+		size_t fragmentAttempts, ackAttempts;
+		std::optional<std::chrono::milliseconds> firstPlayable;
+	};
+	std::vector<std::unique_ptr<Peer>> peers;
+	for (size_t i = 0; i < clientCount; ++i)
+	{
+		auto &peer = *peers.emplace_back(std::make_unique<Peer>(loop.transport.address(), rtt / 2, i, loss));
+		loop.peers.emplace_back(&peer.relay, &peer.client);
+		peer.client.connect(loop.now);
+	}
+	const auto settled = [&](Coord center) {
+		return std::ranges::all_of(peers, [&](const auto &peer) {
+			const auto &chunks = peer->client.chunks();
+			return chunks.size() == 5 && std::ranges::all_of(VoxelWorld::playerInterestOffsets(1),
+				[&](const auto offset) { return chunks.contains({center.x + offset.x, center.z + offset.z}); });
+		});
+	};
+
+	const auto start = loop.now;
+	auto firstMin = std::chrono::milliseconds::max();
+	std::chrono::milliseconds firstMax{};
+	size_t peakTransfers{};
+	loop.until([&] {
+		peakTransfers = std::max(peakTransfers, loop.transport.worldSendQueue().baselines);
+		for (const auto &peer : peers)
+		{
+			if (peer->firstPlayable || !peer->client.chunks().contains(spawn) ||
+			    !peer->client.inventory() || !peer->client.latestPlayerSnapshot())
+				continue;
+			peer->firstPlayable = std::chrono::duration_cast<std::chrono::milliseconds>(loop.now - start - 5ms);
+			firstMin = std::min(firstMin, *peer->firstPlayable);
+			firstMax = std::max(firstMax, *peer->firstPlayable);
+		}
+		return settled(spawn) && std::ranges::all_of(peers, [](const auto &peer) { return peer->firstPlayable.has_value(); });
+	}, "clients did not settle the spawn neighborhood", 90s);
+	const auto coldMs = (loop.now - start - 5ms) / 1ms;
+	const auto cold = loop.transport.worldTraffic();
+	require(std::ranges::all_of(peers, [&](const auto &peer) { return matches(peer->client, world, spawn); }),
+		"spawn neighborhood differs from the authority");
+	constexpr Coord shifted{4, 0};
+	for (const auto &peer : peers)
+		sim.restorePlayerFlight(peer->client.welcome()->player, true, {72.5, 245, 8.5});
+	const auto shiftStart = loop.now;
+	loop.until([&] {
+		peakTransfers = std::max(peakTransfers, loop.transport.worldSendQueue().baselines);
+		return settled(shifted);
+	}, "clients did not sustain streaming after changing interest", 90s);
+	const auto shiftMs = (loop.now - shiftStart - 5ms) / 1ms;
+	const auto total = loop.transport.worldTraffic();
+	require(std::ranges::all_of(peers, [&](const auto &peer) {
+		return matches(peer->client, world, shifted) && !peer->relay.lastResync;
+	}), "shifted clients need a resync or differ from the authority");
+	require(peakTransfers > 0 && peakTransfers <= std::min(clientCount, udp::kMaxConcurrentChunkTransfers),
+		"cold chunk delivery exceeded its transfer slots");
+	require(total.resyncs == 0 && (!loss || (cold.retransmits > 0 && total.retransmits > cold.retransmits)),
+		"chunk delivery did not demonstrate retry recovery in both phases");
+	std::cout << "COLD_CHUNKS rtt_ms=" << rtt.count() << " clients=" << clientCount << " loss_pct=" << (loss ? 10 : 0)
+		<< " first_min_ms=" << firstMin.count() << " first_max_ms=" << firstMax.count()
+		<< " neighborhood_ms=" << coldMs << " cold_bytes=" << cold.bytes << " cold_retries=" << cold.retransmits
+		<< " shift_ms=" << shiftMs << " shift_bytes=" << total.bytes - cold.bytes
+		<< " shift_retries=" << total.retransmits - cold.retransmits << " peak_transfers=" << peakTransfers << '\n';
+	if (enforceBudget)
+	{
+		require(peakTransfers == udp::kMaxConcurrentChunkTransfers, "did not saturate the global transfer limit");
+		require(firstMax <= 4s && coldMs <= 12'000 && shiftMs <= 14'000,
+			"contended chunk delivery missed its timing budget");
+		require(cold.bytes <= clientCount * 128 * 1024 && total.bytes - cold.bytes <= clientCount * 128 * 1024,
+			"contended chunk delivery missed its traffic budget");
+	}
+	loop.transport.stop(host);
+	require(host.stop(error), error);
+}
+
 struct ClosureState
 {
 	std::vector<std::tuple<Coord, uint64_t, uint64_t, uint64_t>> chunks;
@@ -2613,7 +2719,7 @@ void testThreadedDelivery(const fs::path &root)
 	}
 	server.stop(host);
 	server.rethrowIoError();
-	require(client.chunks().contains(spawn) && server.worldTraffic().frames >= wire::kFragmentsPerChunk,
+	require(client.chunks().contains(spawn) && server.worldTraffic().frames > 0,
 		"worker did not deliver a complete baseline from the owner mailbox");
 	require(result && result->actionId == 1 && result->code == wire::ActionCode::OutOfReach && result->editId == 0,
 		"worker did not deliver the owner's action result");
@@ -2648,6 +2754,15 @@ int main(int argc, char **argv)
 				testDelayedInput(root, delay, false);
 			testDelayedInput(root, 40ms, true);
 		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--measure-chunks")
+		{
+			for (const auto rtt : {0ms, 30ms, 80ms, 150ms})
+				for (const auto clients : {1u, 2u, 8u})
+					for (const bool loss : {false, true})
+						measureChunkDelivery(root, rtt, clients, loss);
+		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--cold-chunks")
+			measureChunkDelivery(root, 150ms, udp::kMaxConcurrentChunkTransfers + 2, true, true);
 		else if (argc == 2 && std::string_view(argv[1]) == "--closure")
 		{
 			const auto sync = testClosure(root, 0);

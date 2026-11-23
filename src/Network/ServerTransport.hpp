@@ -23,6 +23,7 @@ struct SessionAdmission
 inline constexpr uint64_t kInputLeadTicks = wire::kInputLeadTicks;
 inline constexpr uint64_t kSnapshotIntervalTicks = wire::kPlayerSnapshotIntervalTicks;
 inline constexpr uint64_t kEntitySnapshotIntervalTicks = 6;
+// A peer reserves one fixed payload buffer until its last fragment is ACKed.
 inline constexpr size_t kMaxConcurrentChunkTransfers = 16;
 
 constexpr bool withinInputWindow(uint64_t intended, uint64_t completed)
@@ -48,7 +49,7 @@ struct SessionIntents
 struct ChunkTransfer
 {
 	wire::ChunkBaseline baseline;
-	std::array<uint8_t, wire::kChunkBytes> materials;
+	std::array<uint8_t, wire::kChunkBytes> payload;
 };
 
 using WorldUpdate = std::variant<std::unique_ptr<ChunkTransfer>, wire::WorldEdit, wire::ChunkRemove, wire::Resync>;

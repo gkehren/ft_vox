@@ -18,7 +18,7 @@ namespace net::wire
 
 // The authoritative protocol, separate from the test-only UDP v1 prototype.
 // See docs/adr/authoritative-wire-protocol.md for byte layouts and delivery.
-inline constexpr uint16_t kVersion = 4;
+inline constexpr uint16_t kVersion = 5;
 inline constexpr int kTickRate = 60;
 inline constexpr uint64_t kPlayerSnapshotIntervalTicks = 3;
 inline constexpr uint64_t kInputLeadTicks = 6;
@@ -33,7 +33,6 @@ inline constexpr int kEntityVelocityScale = 64;
 inline constexpr size_t kChunkBytes = 65536;
 inline constexpr size_t kMaxReplicatedChunks = 197; // radius-eight disk
 inline constexpr size_t kFragmentBytes = 1100;
-inline constexpr size_t kFragmentsPerChunk = (kChunkBytes + kFragmentBytes - 1) / kFragmentBytes;
 inline constexpr int32_t kHorizontalLimit = 1 << 23;
 inline constexpr uint8_t kAirMaterial = 255;
 inline constexpr uint64_t kMaxSequence = UINT64_MAX - 1;
@@ -41,14 +40,33 @@ inline constexpr size_t kReliableWindow = 64;
 inline constexpr auto kChunkIdleTimeout = std::chrono::seconds(5);
 inline constexpr auto kChunkTransferTimeout = std::chrono::seconds(20);
 
-constexpr size_t fragmentSize(uint8_t index)
+// Zero describes the full raw image. Nonzero sizes describe a smaller
+// run-length encoded payload.
+constexpr size_t chunkPayloadSize(uint16_t encodedSize)
 {
-    if (index >= kFragmentsPerChunk)
-        return 0;
-    return index + 1u == kFragmentsPerChunk
-        ? kChunkBytes - index * kFragmentBytes
-        : kFragmentBytes;
+    return encodedSize != 0 ? encodedSize : kChunkBytes;
 }
+
+constexpr size_t fragmentCount(uint16_t encodedSize)
+{
+    return (chunkPayloadSize(encodedSize) + kFragmentBytes - 1) / kFragmentBytes;
+}
+
+inline constexpr size_t kMaxFragmentsPerChunk = fragmentCount(0);
+static_assert(kChunkBytes == size_t{UINT16_MAX} + 1);
+static_assert(kMaxFragmentsPerChunk <= UINT8_MAX);
+
+constexpr size_t fragmentSize(uint8_t index, uint16_t encodedSize)
+{
+    const size_t offset = index * kFragmentBytes;
+    const size_t size = chunkPayloadSize(encodedSize);
+    return offset < size ? std::min(kFragmentBytes, size - offset) : 0;
+}
+
+// Write an authoritative material image to a separate, fixed-size payload
+// buffer. Return zero after copying raw bytes if encoding would not save space.
+uint16_t packChunk(std::span<const uint8_t, kChunkBytes> materials,
+                   std::span<uint8_t, kChunkBytes> payload) noexcept;
 
 enum class Kind : uint8_t
 {
@@ -302,6 +320,7 @@ struct ChunkBaseline
     ChunkCoord coord;
     ChunkVersion version;
     uint64_t nextEditId{}, checksum{};
+    uint16_t encodedSize{};
     bool operator==(const ChunkBaseline &) const = default;
 };
 
@@ -310,15 +329,15 @@ struct ChunkFragment
     static constexpr Kind kind = Kind::ChunkFragment;
     ChunkBaseline baseline;
     uint8_t index{};
-    std::array<uint8_t, kFragmentBytes> materials{};
+    std::array<uint8_t, kFragmentBytes> data{};
 
-    // The final fragment uses only the prefix defined by its index.
+    // The final fragment uses only the prefix defined by its index and payload size.
     constexpr bool operator==(const ChunkFragment &other) const noexcept
     {
-        const auto size = fragmentSize(index);
-        const auto active = size == 0 ? materials.size() : size;
+        const auto size = fragmentSize(index, baseline.encodedSize);
+        const auto active = size == 0 ? data.size() : size;
         return baseline == other.baseline && index == other.index &&
-               std::equal(materials.begin(), materials.begin() + active, other.materials.begin());
+               std::equal(data.begin(), data.begin() + active, other.data.begin());
     }
 };
 

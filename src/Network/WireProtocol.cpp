@@ -152,7 +152,7 @@ constexpr std::array kPolicies{
     Policy{Direction::ServerToClient, Lane::Reliable, 34, 16, 8},   // ActionResult
     Policy{Direction::ServerToClient, Lane::Reliable, 17 + 4 * items::kInventorySize, 10, 4},
     Policy{Direction::ServerToClient, Lane::Reliable, 34, 32, 16},  // WorldEdit
-    Policy{Direction::ServerToClient, Lane::Reliable, 49 + kFragmentBytes, 60, 16},
+    Policy{Direction::ServerToClient, Lane::Reliable, 51 + kFragmentBytes, 60, 16},
     Policy{Direction::ServerToClient, Lane::Reliable, 16, 16, 8},   // ChunkRemove
     Policy{Direction::Both, Lane::Reliable, 1, 1, 1},              // Resync
     Policy{Direction::Both, Lane::Ack, 8, 60, 16},                  // Ack
@@ -231,9 +231,39 @@ bool validBaseline(const ChunkBaseline &p)
 
 bool validFragment(const ChunkFragment &p)
 {
-    const auto size = fragmentSize(p.index);
+    const auto size = fragmentSize(p.index, p.baseline.encodedSize);
     return size != 0 && validBaseline(p.baseline) &&
-           std::all_of(p.materials.begin(), p.materials.begin() + size, validMaterial);
+           (p.baseline.encodedSize != 0 || std::ranges::all_of(std::span(p.data).first(size), validMaterial));
+}
+
+// Control byte: high bit selects a repeated material, and the other bits
+// give the run length minus one. Literal runs carry one byte per voxel.
+constexpr uint8_t kRepeat = 0x80;
+constexpr size_t kRunLimit = 128;
+
+bool unpackChunk(std::span<const uint8_t> payload, std::span<uint8_t, kChunkBytes> materials)
+{
+    size_t written = 0;
+    while (!payload.empty())
+    {
+        const uint8_t control = payload.front();
+        payload = payload.subspan(1);
+        const size_t count = (control & (kRepeat - 1)) + 1u;
+        const bool repeat = (control & kRepeat) != 0;
+        const size_t consumed = repeat ? 1 : count;
+        if (count > materials.size() - written || consumed > payload.size())
+            return false;
+        const auto values = payload.first(consumed);
+        if (!std::ranges::all_of(values, validMaterial))
+            return false;
+        if (repeat)
+            std::fill_n(materials.begin() + written, count, values.front());
+        else
+            std::ranges::copy(values, materials.begin() + written);
+        written += count;
+        payload = payload.subspan(consumed);
+    }
+    return written == materials.size();
 }
 
 template <class IO, class T>
@@ -332,10 +362,10 @@ bool encodeFields(IO &io, T &p)
     {
         if (!io.fields(p.baseline.transferId, p.baseline.coord.x, p.baseline.coord.z,
                        p.baseline.version.generation, p.baseline.version.revision,
-                       p.baseline.nextEditId, p.baseline.checksum, p.index) ||
-            fragmentSize(p.index) == 0)
+                       p.baseline.nextEditId, p.baseline.checksum, p.baseline.encodedSize, p.index) ||
+            fragmentSize(p.index, p.baseline.encodedSize) == 0)
             return false;
-        return io.raw(std::span(p.materials).first(fragmentSize(p.index))) && validFragment(p);
+        return io.raw(std::span(p.data).first(fragmentSize(p.index, p.baseline.encodedSize))) && validFragment(p);
     }
     else if constexpr (std::is_same_v<P, ChunkRemove>)
     {
@@ -589,11 +619,49 @@ ReceiveStatus ReceiveWindow::admit(const Packet &packet) noexcept
     return ReceiveStatus::Accepted;
 }
 
+uint16_t packChunk(std::span<const uint8_t, kChunkBytes> materials,
+                   std::span<uint8_t, kChunkBytes> payload) noexcept
+{
+    const auto startsRepeat = [materials](size_t offset) {
+        return offset + 2 < materials.size() && materials[offset] == materials[offset + 1] &&
+               materials[offset] == materials[offset + 2];
+    };
+    size_t written = 0;
+    for (size_t offset = 0; offset < materials.size();)
+    {
+        const bool repeat = startsRepeat(offset);
+        const size_t limit = std::min(offset + kRunLimit, materials.size());
+        size_t end = offset + 1;
+        if (repeat)
+        {
+            while (end < limit && materials[end] == materials[offset])
+                ++end;
+        }
+        else
+        {
+            while (end < limit && !startsRepeat(end))
+                ++end;
+        }
+        const size_t count = end - offset;
+        const size_t stored = repeat ? 1 : count;
+        if (written + 1 + stored >= payload.size())
+        {
+            std::ranges::copy(materials, payload.begin());
+            return 0;
+        }
+        payload[written++] = static_cast<uint8_t>((repeat ? kRepeat : 0) | (count - 1));
+        std::copy_n(materials.begin() + offset, stored, payload.begin() + written);
+        written += stored;
+        offset = end;
+    }
+    return static_cast<uint16_t>(written);
+}
+
 AssemblyStatus ChunkAssembler::accept(const ChunkFragment &fragment, Clock::time_point now) noexcept
 {
     if (expire(now))
         return AssemblyStatus::Expired;
-    if (nextIndex_ == kFragmentsPerChunk)
+    if (nextIndex_ == fragmentCount(baseline_.encodedSize))
         reset();
     if (!validFragment(fragment))
     {
@@ -610,12 +678,22 @@ AssemblyStatus ChunkAssembler::accept(const ChunkFragment &fragment, Clock::time
         baseline_ = fragment.baseline;
         started_ = now;
     }
-    std::copy_n(fragment.materials.begin(), fragmentSize(fragment.index),
+    std::copy_n(fragment.data.begin(), fragmentSize(fragment.index, baseline_.encodedSize),
                 bytes_.begin() + fragment.index * kFragmentBytes);
     progressed_ = now;
     ++nextIndex_;
-    if (nextIndex_ != kFragmentsPerChunk)
+    if (nextIndex_ != fragmentCount(baseline_.encodedSize))
         return AssemblyStatus::InProgress;
+    if (baseline_.encodedSize != 0)
+    {
+        std::array<uint8_t, kChunkBytes> materials;
+        if (!unpackChunk(std::span(bytes_).first(baseline_.encodedSize), materials))
+        {
+            reset();
+            return AssemblyStatus::InvalidFragment;
+        }
+        bytes_ = materials;
+    }
     if (chunkChecksum(bytes_) == baseline_.checksum)
         return AssemblyStatus::Complete;
     reset();
@@ -624,7 +702,7 @@ AssemblyStatus ChunkAssembler::accept(const ChunkFragment &fragment, Clock::time
 
 bool ChunkAssembler::expire(Clock::time_point now) noexcept
 {
-    if (nextIndex_ == 0 || nextIndex_ == kFragmentsPerChunk ||
+    if (nextIndex_ == 0 || nextIndex_ == fragmentCount(baseline_.encodedSize) ||
         (now - progressed_ < kChunkIdleTimeout && now - started_ < kChunkTransferTimeout))
         return false;
     reset();
@@ -635,7 +713,7 @@ void ChunkAssembler::reset() noexcept { nextIndex_ = 0; }
 
 std::span<const uint8_t> ChunkAssembler::bytes() const noexcept
 {
-    if (nextIndex_ != kFragmentsPerChunk)
+    if (nextIndex_ != fragmentCount(baseline_.encodedSize))
         return {};
     return bytes_;
 }

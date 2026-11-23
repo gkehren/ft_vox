@@ -314,7 +314,8 @@ struct ServerTransport::Impl
 		{
 			std::lock_guard lock(mutex);
 			auto &box = mailboxes[slot];
-			if (peer.worldInFlight && (!peer.transfer || peer.nextFragment == wire::kFragmentsPerChunk))
+			if (peer.worldInFlight && (!peer.transfer ||
+			    peer.nextFragment == wire::fragmentCount(peer.transfer->baseline.encodedSize)))
 			{
 				peer.transfer.reset();
 				releaseBaseline(box);
@@ -371,8 +372,8 @@ struct ServerTransport::Impl
 			wire::ChunkFragment fragment;
 			fragment.baseline = peer.transfer->baseline;
 			fragment.index = peer.nextFragment++;
-			std::copy_n(peer.transfer->materials.begin() + fragment.index * wire::kFragmentBytes,
-				wire::fragmentSize(fragment.index), fragment.materials.begin());
+			std::copy_n(peer.transfer->payload.begin() + fragment.index * wire::kFragmentBytes,
+				wire::fragmentSize(fragment.index, fragment.baseline.encodedSize), fragment.data.begin());
 			link.queue(wire::Endpoint::Server, fragment, now);
 		}
 	}
