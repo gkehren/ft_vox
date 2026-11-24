@@ -56,6 +56,7 @@ public:
 	[[nodiscard]] bool step(TerrainTiming terrainTiming, std::string &error);
 	[[nodiscard]] bool stop(std::string &error);
 	HostMetrics metrics() const;
+	void fillStatus(monitoring::Status &sample) const;
 	uint64_t ticks() const { return m_ticks; }
 	bool restoredPlayer() const { return m_restoredPlayer; }
 	net::udp::SessionWorld sessionWorld() const;

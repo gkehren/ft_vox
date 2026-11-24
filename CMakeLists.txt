@@ -472,7 +472,7 @@ set(FT_VOX_SERVER_HOST_SOURCE
     ${CMAKE_SOURCE_DIR}/src/Server/WorldIdentities.cpp
     ${CMAKE_SOURCE_DIR}/src/Server/WorldRoles.cpp
 )
-add_executable(ft_vox_server src/Server/ServerMain.cpp src/Server/RolesCommand.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+add_executable(ft_vox_server src/Server/ServerMain.cpp src/Server/RolesCommand.cpp src/Server/MonitorWriter.cpp ${FT_VOX_SERVER_HOST_SOURCE})
 target_link_libraries(ft_vox_server PRIVATE ft_vox_core)
 ft_vox_target_hygiene(ft_vox_server)
 
@@ -494,7 +494,7 @@ if(WIN32)
 endif()
 ft_vox_target_hygiene(ft_vox_udp)
 
-add_library(ft_vox_local_control STATIC src/Hosting/RoleCredentials.cpp)
+add_library(ft_vox_local_control STATIC src/Hosting/RoleCredentials.cpp src/Hosting/ServerStatus.cpp)
 target_link_libraries(ft_vox_local_control PRIVATE ft_vox_core ft_vox_udp)
 if(WIN32)
     target_link_libraries(ft_vox_local_control PRIVATE advapi32)

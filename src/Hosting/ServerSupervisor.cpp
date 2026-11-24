@@ -167,6 +167,50 @@ struct ServerOutput
 	bool truncated{}, committed{};
 	uint64_t checkpoint{};
 };
+
+struct MonitorInput
+{
+	bool drain(ChildProcess &child, Snapshot &snapshot, int capacity)
+	{
+		if (snapshot.state != State::Ready)
+			return static_cast<bool>(std::exchange(snapshot.status, {}));
+
+		std::optional<monitoring::Status> latest;
+		for (unsigned batch = 0; batch < 8; ++batch)
+		{
+			const auto read = child.readMonitoring({reinterpret_cast<char *>(frame.data()) + used, frame.size() - used});
+			if (!read)
+				break;
+			used += read;
+			if (used != frame.size())
+				continue;
+			used = 0;
+			auto decoded = monitoring::decode(frame);
+			if (decoded && decoded->transport.capacity == capacity && decoded->sampledMs > lastSample &&
+				monitoring::fresh(decoded->sampledMs, monitoring::monotonicMs()))
+			{
+				lastSample = decoded->sampledMs;
+				latest = std::move(decoded);
+			}
+		}
+		if (latest)
+		{
+			snapshot.checkpoint = latest->checkpoint;
+			snapshot.status = std::make_shared<const monitoring::Status>(std::move(*latest));
+			return true;
+		}
+		if (snapshot.status && !monitoring::fresh(snapshot.status->sampledMs, monitoring::monotonicMs()))
+		{
+			snapshot.status.reset();
+			return true;
+		}
+		return false;
+	}
+
+	monitoring::Frame frame{};
+	size_t used{};
+	uint64_t lastSample{};
+};
 }
 
 std::string validate(const Options &options)
@@ -232,6 +276,7 @@ bool ServerSupervisor::start(Options options, fs::path executable, fs::path save
 	if (m_snapshot.active())
 		return false;
 	m_snapshot = {};
+	m_snapshot.launch = m_revision.load(std::memory_order_relaxed) + 1;
 	m_snapshot.world = options.world;
 	m_snapshot.address = options.lan ? options.address : "127.0.0.1";
 	if (auto error = validate(options); !error.empty())
@@ -327,7 +372,7 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 				throw std::runtime_error("Could not read or create the owner credential. Use a profile folder that supports private file permissions.");
 			bootstrap = localcontrol::encodeBootstrap(request);
 		}
-		ChildProcess child(fs::absolute(executable), launchArguments(options, savesRoot, next.address, bootstrap.has_value()));
+		ChildProcess child(fs::absolute(executable), launchArguments(options, savesRoot, next.address, bootstrap.has_value()), true);
 		if (bootstrap && !child.writeControl(*bootstrap))
 		{
 			// Let the child report its own startup error and reap it normally.
@@ -335,6 +380,7 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 		}
 		bootstrap.reset();
 		ServerOutput output;
+		MonitorInput monitor;
 		const auto started = Clock::now();
 		std::optional<Clock::time_point> stopping, ownerGone;
 		bool forced = false;
@@ -349,11 +395,13 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 				child.closeControl();
 				stopping = now;
 				next.state = State::Stopping;
+				next.status.reset();
 				next.message = "Stopping the server and committing the world.";
 				next.delayed = false;
 				publish(next);
 			}
 			bool changed = output.drain(child, next, options.port, 4);
+			changed |= monitor.drain(child, next, options.playerSlots);
 			if (!stopping && next.state == State::Stopping)
 			{
 				stopping = now;
@@ -405,6 +453,7 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 		next.state = State::Failed;
 		next.message = error.what();
 	}
+	next.status.reset();
 	publish(next);
 }
 }

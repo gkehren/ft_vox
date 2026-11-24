@@ -431,6 +431,7 @@ private:
 	void drawMultiplayerPanel(const GameUIFrame &frame);
 	void drawJoinPanel(const GameUIFrame &frame);
 	void drawHostPanel(const GameUIFrame &frame);
+	void drawHostedPlayers(const hosting::Snapshot *server);
 	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
@@ -480,6 +481,8 @@ private:
 	hosting::Options m_hostOptions;
 	std::array<char, 64> m_hostWorld{}, m_hostAddress{};
 	std::array<char, 128> m_hostProfile{};
+	sim::PlayerId m_hostPlayerSelection;
+	uint64_t m_hostSelectionLaunch{};
 	bool m_hostAutoJoin{true}, m_focusHostPanel{}, m_hostProfileInitialized{};
 
 	/// One-shot: Help window opens with the requested tab selected.

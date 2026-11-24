@@ -7,6 +7,7 @@
 #include <map>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -169,6 +170,52 @@ void testLifecycle()
 		"rejoin must establish fresh sessions in the same world");
 	loop.server.stop(loop.owner);
 	require(loop.owner.players.empty(), "shutdown leaked players");
+}
+
+void testMonitorRoster()
+{
+	Loop loop(12);
+	std::vector<std::unique_ptr<udp::Socket>> clients;
+	std::vector<wire::SessionScope> scopes;
+	const auto address = loop.server.address();
+	for (uint8_t i = 1; i <= 12; ++i)
+	{
+		auto client = std::make_unique<udp::Socket>(loopback);
+		send(*client, address, {{}, 0, wire::Hello{i, wire::kVersion, wire::kVersion, wire::localCompatibility(), {i}}});
+		loop.step(500ms);
+		const auto welcome = receive(*client, wire::Kind::Welcome);
+		require(welcome.has_value(), "monitor fixture did not admit a player");
+		const auto syncing = *loop.server.tryMonitor();
+		require(syncing.count == i && syncing.capacity == 12 &&
+			syncing.roster().back().state == monitoring::SessionState::Syncing, "unconfirmed admission was not syncing");
+		send(*client, address, {welcome->scope, 1, wire::Heartbeat{}});
+		loop.step();
+		require(loop.server.tryMonitor()->roster().back().state == monitoring::SessionState::Connected,
+			"confirmed active player was not connected");
+		scopes.push_back(welcome->scope);
+		clients.push_back(std::move(client));
+	}
+	const auto full = *loop.server.tryMonitor();
+	require(full.count == 12 && full.receivedBytes && full.sentBytes &&
+		std::ranges::is_sorted(full.roster(), {}, [](const auto &player) { return player.id.value; }),
+		"monitor has no bounded, sorted full roster or transport counters");
+	const auto personal = receive(*clients.front(), wire::Kind::PlayerSnapshot);
+	require(personal && std::get<wire::PlayerSnapshot>(personal->payload).count == 1 &&
+		std::get<wire::PlayerSnapshot>(personal->payload).players[0].player == full.roster().front().id,
+		"host monitoring changed the interest-scoped guest snapshot");
+
+	send(*clients.front(), address, {{}, 0, wire::Hello{1, wire::kVersion, wire::kVersion, wire::localCompatibility(), {1}}});
+	loop.server.poll(loop.now);
+	require(loop.server.tryMonitor()->count == 12, "duplicate Hello added a roster row");
+	send(*clients.front(), address, {scopes.front(), 1, wire::Disconnect{wire::DisconnectReason::Leaving}});
+	loop.server.poll(loop.now);
+	require(loop.server.tryMonitor()->roster().front().state == monitoring::SessionState::Disconnecting,
+		"closing session was not distinguishable before retirement");
+	loop.step();
+	require(loop.server.tryMonitor()->count == 11, "explicit departure remained in the roster");
+	loop.step(11s);
+	require(loop.server.tryMonitor()->count == 0 && loop.owner.players.empty(), "timed-out players remained online");
+	loop.server.stop(loop.owner);
 }
 
 void testProfileSwitchOnFullEndpoint()
@@ -426,6 +473,7 @@ int main()
 	try
 	{
 		testLifecycle();
+		testMonitorRoster();
 		testProfileSwitchOnFullEndpoint();
 		testAdmission();
 		testMovementAdmission();

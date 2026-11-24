@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UdpSocket.hpp"
+#include <Core/ServerStatus.hpp>
 
 #include <memory>
 
@@ -98,6 +99,9 @@ public:
 	std::optional<WorldTraffic> worldTraffic(sim::PlayerId player) const;
 	// Logical world sends staged or in flight, excluding kernel socket buffers.
 	WorldSendQueue worldSendQueue() const;
+	// Opportunistic, metadata-only sample. Busy transport leaves this interval
+	// unsampled rather than holding up the simulation thread.
+	std::optional<monitoring::TransportSample> tryMonitor() const;
 
 	// Production runs poll on its own worker. Tests may pump the same IO
 	// implementation with an injected monotonic clock instead of starting it.

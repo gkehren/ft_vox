@@ -1524,7 +1524,7 @@ add_executable(test_multiplayer_join test_multiplayer_join.cpp
 target_link_libraries(test_multiplayer_join PRIVATE ft_vox_udp ft_vox_core)
 add_test(NAME MultiplayerJoin COMMAND test_multiplayer_join)
 
-add_executable(test_server_supervisor test_server_supervisor.cpp)
+add_executable(test_server_supervisor test_server_supervisor.cpp ${CMAKE_SOURCE_DIR}/src/Server/MonitorWriter.cpp)
 target_link_libraries(test_server_supervisor PRIVATE ft_vox_hosting ft_vox_udp ft_vox_core)
 add_dependencies(test_server_supervisor ft_vox_server)
 add_test(NAME ServerSupervisor COMMAND test_server_supervisor $<TARGET_FILE:ft_vox_server>)

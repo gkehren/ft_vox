@@ -74,7 +74,7 @@ std::wstring quoteArgument(const std::wstring &text)
 
 struct InheritedHandles
 {
-	explicit InheritedHandles(HANDLE (&handles)[2])
+	explicit InheritedHandles(std::span<HANDLE> handles)
 	{
 		SIZE_T bytes = 0;
 		InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
@@ -83,7 +83,7 @@ struct InheritedHandles
 		if (!InitializeProcThreadAttributeList(list, 1, 0, &bytes))
 			fail("initialize server handle allowlist");
 		if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-			handles, sizeof(handles), nullptr, nullptr))
+			handles.data(), handles.size_bytes(), nullptr, nullptr))
 		{
 			const auto error = GetLastError();
 			DeleteProcThreadAttributeList(list);
@@ -150,28 +150,52 @@ struct SpawnActions
 	posix_spawn_file_actions_t actions;
 };
 #endif
+
+size_t readPipe(
+#ifdef _WIN32
+	HANDLE pipe,
+#else
+	int pipe,
+#endif
+	std::span<char> buffer)
+{
+#ifdef _WIN32
+	DWORD available = 0, count = 0;
+	if (!pipe || !PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || available == 0)
+		return 0;
+	if (!ReadFile(pipe, buffer.data(),
+		available < buffer.size() ? available : static_cast<DWORD>(buffer.size()), &count, nullptr))
+		return 0;
+	return count;
+#else
+	const auto count = pipe < 0 ? 0 : ::read(pipe, buffer.data(), buffer.size());
+	return count > 0 ? static_cast<size_t>(count) : 0;
+#endif
+}
 }
 
 struct ChildProcess::Impl
 {
 #ifdef _WIN32
-	Handle control, output, process;
+	Handle control, output, monitor, process;
 #else
-	Descriptor control, output;
+	Descriptor control, output, monitor;
 	pid_t pid{-1};
 #endif
 	std::optional<int> exit;
 };
 
 ChildProcess::ChildProcess(const std::filesystem::path &executable,
-	const std::vector<std::filesystem::path> &arguments) : m_impl(std::make_unique<Impl>())
+	const std::vector<std::filesystem::path> &arguments, bool monitor) : m_impl(std::make_unique<Impl>())
 {
 #ifdef _WIN32
-	Handle childInput, childOutput;
+	Handle childInput, childOutput, childMonitor;
 	makePipe(childInput, m_impl->control, &m_impl->control.value);
 	makePipe(m_impl->output, childOutput, &m_impl->output.value);
-	HANDLE handles[] = {childInput.value, childOutput.value};
-	InheritedHandles inherited(handles);
+	if (monitor)
+		makePipe(m_impl->monitor, childMonitor, &m_impl->monitor.value);
+	HANDLE handles[] = {childInput.value, childOutput.value, childMonitor.value};
+	InheritedHandles inherited(std::span{handles}.first(monitor ? 3 : 2));
 	STARTUPINFOEXW startup{};
 	startup.StartupInfo.cb = sizeof(startup);
 	startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -182,6 +206,8 @@ ChildProcess::ChildProcess(const std::filesystem::path &executable,
 	std::wstring command = quoteArgument(executable.native());
 	for (const auto &argument : arguments)
 		command += L" " + quoteArgument(argument.native());
+	if (monitor)
+		command += L" --launcher-monitor " + std::to_wstring(reinterpret_cast<uintptr_t>(childMonitor.value));
 	PROCESS_INFORMATION process{};
 	if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
 		EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr, &startup.StartupInfo, &process))
@@ -189,24 +215,38 @@ ChildProcess::ChildProcess(const std::filesystem::path &executable,
 	m_impl->process.value = process.hProcess;
 	CloseHandle(process.hThread);
 #else
-	Descriptor childInput, childOutput;
+	Descriptor childInput, childOutput, childMonitor;
 	makePipe(childInput, m_impl->control);
 	makePipe(m_impl->output, childOutput);
 	if (::fcntl(m_impl->output.value, F_SETFL, O_NONBLOCK) == -1)
 		check(errno, "set server log pipe nonblocking");
+	if (monitor)
+	{
+		makePipe(m_impl->monitor, childMonitor);
+		if (::fcntl(m_impl->monitor.value, F_SETFL, O_NONBLOCK) == -1)
+			check(errno, "set server monitor reader nonblocking");
+	}
 	SpawnActions actions;
 	check(posix_spawn_file_actions_adddup2(&actions.actions, childInput.value, STDIN_FILENO), "set server stdin");
 	check(posix_spawn_file_actions_adddup2(&actions.actions, childOutput.value, STDOUT_FILENO), "set server stdout");
 	check(posix_spawn_file_actions_adddup2(&actions.actions, childOutput.value, STDERR_FILENO), "set server stderr");
-	// Pipe ends are close-on-exec. Only the three dup2 targets survive.
+	constexpr int monitorFd = STDERR_FILENO + 1;
+	if (monitor)
+		check(posix_spawn_file_actions_adddup2(&actions.actions, childMonitor.value, monitorFd), "set server monitoring pipe");
+	// Pipe ends are close-on-exec. Only the dup2 targets survive.
 #if defined(__GLIBC__) && defined(_GNU_SOURCE)
 #if __GLIBC_PREREQ(2, 34)
-	check(posix_spawn_file_actions_addclosefrom_np(&actions.actions, STDERR_FILENO + 1), "close other server descriptors");
+	check(posix_spawn_file_actions_addclosefrom_np(&actions.actions, monitorFd + (monitor ? 1 : 0)), "close other server descriptors");
 #endif
 #endif
 	std::vector<std::string> strings{executable.native()};
 	for (const auto &argument : arguments)
 		strings.push_back(argument.native());
+	if (monitor)
+	{
+		strings.emplace_back("--launcher-monitor");
+		strings.push_back(std::to_string(monitorFd));
+	}
 	std::vector<char *> argv;
 	for (auto &argument : strings)
 		argv.push_back(argument.data());
@@ -220,18 +260,12 @@ ChildProcess::~ChildProcess() { closeControl(); }
 
 size_t ChildProcess::readOutput(std::span<char> buffer)
 {
-#ifdef _WIN32
-	DWORD available = 0, read = 0;
-	if (!PeekNamedPipe(m_impl->output.value, nullptr, 0, nullptr, &available, nullptr) || available == 0)
-		return 0;
-	if (!ReadFile(m_impl->output.value, buffer.data(),
-		available < buffer.size() ? available : static_cast<DWORD>(buffer.size()), &read, nullptr))
-		return 0;
-	return read;
-#else
-	const auto read = ::read(m_impl->output.value, buffer.data(), buffer.size());
-	return read > 0 ? static_cast<size_t>(read) : 0;
-#endif
+	return readPipe(m_impl->output.value, buffer);
+}
+
+size_t ChildProcess::readMonitoring(std::span<char> buffer)
+{
+	return readPipe(m_impl->monitor.value, buffer);
 }
 
 bool ChildProcess::writeControl(std::span<const uint8_t> buffer)
