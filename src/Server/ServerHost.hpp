@@ -2,7 +2,7 @@
 
 #include <Sim/GameSimulation.hpp>
 #include <Network/ServerTransport.hpp>
-#include <Server/WorldIdentities.hpp>
+#include <Server/WorldRoles.hpp>
 
 #include <cstdint>
 #include <deque>
@@ -23,6 +23,7 @@ struct HostConfig
 	unsigned workers{2}; // zero uses synchronous generation
 	int interestRadiusChunks{3};
 	PlayerStreamingBudget streaming;
+	std::optional<localcontrol::Bootstrap> ownerBootstrap;
 };
 
 enum class TerrainTiming { Background, QuiescePerTick };
@@ -58,6 +59,7 @@ public:
 	uint64_t ticks() const { return m_ticks; }
 	bool restoredPlayer() const { return m_restoredPlayer; }
 	net::udp::SessionWorld sessionWorld() const;
+	Role role(sim::PlayerId player) const { return m_roles ? m_roles->role(player) : Role::Player; }
 	net::udp::SessionAdmission joinRemote(const net::wire::PlayerKey &key = net::udp::randomPlayerKey()) override;
 	bool activateRemote(sim::PlayerId player) override;
 	void leaveRemote(sim::PlayerId player) override;
@@ -72,7 +74,7 @@ public:
 private:
 	friend struct ServerHostProbe;
 
-	bool start(std::string &error, void (*beforeInitialCheckpointForTests)());
+	bool start(std::string &error, void (*beforeInitialCheckpointForTests)(), void (*beforeRoleAuthorityForTests)() = nullptr);
 	bool quiesce(std::string &error);
 	bool save(std::string &error);
 	bool reserveItemIds(std::string &error);
@@ -95,6 +97,7 @@ private:
 
 	HostConfig m_config;
 	std::unique_ptr<WorldIdentities> m_identities;
+	std::unique_ptr<WorldRoles> m_roles;
 	// Destruction is reversed: drain and destroy the world before its pool.
 	std::unique_ptr<ThreadPool> m_workers;
 	std::unique_ptr<sim::GameSimulation> m_sim;

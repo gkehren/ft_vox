@@ -505,7 +505,7 @@ bool ServerHost::start(std::string &error)
 	return start(error, nullptr);
 }
 
-bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)())
+bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)(), void (*beforeRoleAuthorityForTests)())
 {
 	if (m_sim)
 	{
@@ -521,9 +521,11 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 	if (worldConfig.seed == 0 && !WorldPersistence::worldExists(worldConfig.savesRoot, worldConfig.worldName))
 		worldConfig.seed = 42; // reproducible default for new worlds
 	worldConfig.dedicatedServer = true;
+	const auto worldDir = worldConfig.savesRoot / worldConfig.worldName;
 	auto identities = std::make_unique<WorldIdentities>();
-	if (!identities->lock(worldConfig.savesRoot / worldConfig.worldName, error))
+	if (!identities->lock(worldDir, error))
 		return false;
+	const bool fresh = m_config.ownerBootstrap && localcontrol::isFreshWorldDirectory(worldDir);
 
 	if (m_config.workers > 0)
 		m_workers = std::make_unique<ThreadPool>(m_config.workers);
@@ -569,6 +571,11 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 		error = "could not reserve shared item IDs";
 		return false;
 	}
+	if (beforeRoleAuthorityForTests)
+		beforeRoleAuthorityForTests();
+	auto roles = std::make_unique<WorldRoles>(worldDir, *identities);
+	if (!roles->prepareStart(fresh, m_config.ownerBootstrap, error))
+		return false;
 	simulation->reserveItemIds(nextItem, m_itemIdLimit);
 	// Seal a baseline before accepting actions. A first crash must recover a
 	// whole generation even when the world came from legacy loose files.
@@ -587,6 +594,8 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 		error = "could not establish the dedicated checkpoint baseline";
 		return false;
 	}
+	if (!roles->finishStart(error))
+		return false;
 	for (auto &player : roster.players)
 		m_savedPlayers.emplace(player.id, std::move(player));
 
@@ -597,6 +606,7 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 	m_spawnCenter = center;
 	simulation->world()->observeLogicalEdits();
 	m_identities = std::move(identities);
+	m_roles = std::move(roles);
 	m_sim = std::move(simulation);
 	return true;
 }
@@ -709,6 +719,7 @@ bool ServerHost::stop(std::string &error)
 	m_savedPlayers.clear();
 	m_sim.reset();
 	m_workers.reset();
+	m_roles.reset();
 	m_identities.reset();
 	return committed;
 }

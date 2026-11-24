@@ -151,6 +151,7 @@ void GameUI::drawHostProfile(const GameUIFrame &frame)
 		std::snprintf(m_hostProfile.data(), m_hostProfile.size(), "%s", profile->c_str());
 	ImGui::SetNextItemWidth(-1.f);
 	ImGui::InputTextWithHint("##host-profile", "Existing profile name", m_hostProfile.data(), m_hostProfile.size());
+	ImGui::SetItemTooltip("Starting a new world binds its primary owner to this profile.");
 }
 
 void GameUI::drawHostPanel(const GameUIFrame &frame)
@@ -256,9 +257,8 @@ void GameUI::drawHostPanel(const GameUIFrame &frame)
 		ImGui::SetNextItemWidth(-1.f);
 		if (ImGui::Combo("##host-streaming", &streaming, "Low\0Balanced\0High\0"))
 			m_hostOptions.streaming = static_cast<hosting::StreamingPreset>(streaming);
+		drawHostProfile(frame);
 		ImGui::Checkbox("Join automatically when ready", &m_hostAutoJoin);
-		if (m_hostAutoJoin)
-			drawHostProfile(frame);
 		if (ImGui::Button("Start server"))
 		{
 			m_hostOptions.world = m_hostWorld.data();

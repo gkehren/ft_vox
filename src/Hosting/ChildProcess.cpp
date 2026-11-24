@@ -14,6 +14,7 @@
 #else
 #include <csignal>
 #include <fcntl.h>
+#include <pthread.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -230,6 +231,38 @@ size_t ChildProcess::readOutput(std::span<char> buffer)
 #else
 	const auto read = ::read(m_impl->output.value, buffer.data(), buffer.size());
 	return read > 0 ? static_cast<size_t>(read) : 0;
+#endif
+}
+
+bool ChildProcess::writeControl(std::span<const uint8_t> buffer)
+{
+	// Startup records fit within the minimum POSIX PIPE_BUF, and this is
+	// the first write to an empty pipe.
+	if (buffer.empty() || buffer.size() > 512)
+		return false;
+#ifdef _WIN32
+	DWORD written = 0;
+	return WriteFile(m_impl->control.value, buffer.data(), static_cast<DWORD>(buffer.size()), &written, nullptr) &&
+		written == buffer.size();
+#else
+	sigset_t pipeSignal, previous, pending;
+	sigemptyset(&pipeSignal);
+	sigaddset(&pipeSignal, SIGPIPE);
+	if (pthread_sigmask(SIG_BLOCK, &pipeSignal, &previous) != 0)
+		return false;
+	const bool wasPending = sigpending(&pending) != 0 || sigismember(&pending, SIGPIPE) == 1;
+	ssize_t written;
+	do
+		written = ::write(m_impl->control.value, buffer.data(), buffer.size());
+	while (written < 0 && errno == EINTR);
+	if (written < 0 && errno == EPIPE && !wasPending && sigpending(&pending) == 0 &&
+		sigismember(&pending, SIGPIPE) == 1)
+	{
+		int consumed = 0;
+		sigwait(&pipeSignal, &consumed);
+	}
+	pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+	return written == static_cast<ssize_t>(buffer.size());
 #endif
 }
 

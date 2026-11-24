@@ -25,11 +25,15 @@ public:
 	bool load(int seed, uint32_t generator, std::optional<uint64_t> publishedWorldId, bool hasCheckpoint,
 			  std::string &error);
 	bool markCheckpointRequired();
+	bool checkpointRequired() const { return m_checkpointRequired; }
+	bool advanceRoleRevision(uint64_t revision);
+	uint64_t roleRevision() const { return m_roleRevision; }
 	uint64_t worldId() const { return m_worldId; }
 	size_t size() const { return m_profiles.size(); }
 	bool contains(sim::PlayerId id) const { return m_profiles.contains(id); }
 	bool includesItemWatermark(uint64_t next) const { return next <= m_itemLimit; }
 	sim::PlayerId find(const net::wire::PlayerKey &key) const;
+	const net::wire::PlayerKey *keyFor(sim::PlayerId id) const;
 	sim::PlayerId allocatePlayer();
 	bool enroll(sim::PlayerId id, const net::wire::PlayerKey &key);
 	bool reserveItems(uint64_t checkpointNext, uint64_t &next, uint64_t &limit);
@@ -45,6 +49,7 @@ private:
 	int m_seed{};
 	uint32_t m_generator{};
 	bool m_checkpointRequired{};
+	uint64_t m_roleRevision{};
 	uint32_t m_actorLimit{worldsave::kFirstRemotePlayerId};
 	uint32_t m_nextActor{worldsave::kFirstRemotePlayerId};
 	uint64_t m_itemLimit{1};

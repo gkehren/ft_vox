@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Network/WireProtocol.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -31,6 +33,12 @@ struct Options
 	StreamingPreset streaming{StreamingPreset::Balanced};
 };
 
+struct OwnerProfile
+{
+	net::wire::PlayerKey player;
+	std::filesystem::path controlFile;
+};
+
 std::string validate(const Options &options);
 std::vector<std::string> listWorlds(const std::filesystem::path &root);
 
@@ -58,7 +66,8 @@ public:
 	ServerSupervisor(const ServerSupervisor &) = delete;
 	ServerSupervisor &operator=(const ServerSupervisor &) = delete;
 
-	bool start(Options options, std::filesystem::path executable, std::filesystem::path savesRoot);
+	bool start(Options options, std::filesystem::path executable, std::filesystem::path savesRoot,
+		std::optional<OwnerProfile> owner = std::nullopt);
 	void stop();
 	bool forceStop();
 	Snapshot snapshot() const;
@@ -67,7 +76,7 @@ public:
 private:
 	enum class Command { None, Stop, Force };
 	void run(std::stop_token lifetime, const Options &options, const std::filesystem::path &executable,
-		const std::filesystem::path &savesRoot);
+		const std::filesystem::path &savesRoot, const std::optional<OwnerProfile> &owner);
 	void publish(const Snapshot &next);
 
 	const std::chrono::milliseconds m_notice;

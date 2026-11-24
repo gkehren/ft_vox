@@ -1,4 +1,5 @@
 #include <Engine/EngineMultiplayer.hpp>
+#include <Hosting/RoleCredentials.hpp>
 
 #include "TestMain.hpp"
 
@@ -74,6 +75,10 @@ struct EngineJoinProbe
 			"auto-join uses the ready loopback endpoint and assigned port");
 		CHECK(engine.m_remote->namedProfile == "host-choice" && engine.m_suspendedSolo,
 			"auto-join uses the canonical Host choice captured at Start and suspends solo play");
+		CHECK(localcontrol::readControlKey(engine.m_savesRoot / ".client-profiles" / "named" /
+			"host-choice" / "owner-control.key") &&
+			std::filesystem::is_regular_file(engine.m_hostSavesRoot / ".ft_vox..server-roles" / options.world),
+			"the graphical host creates a private owner credential and publishes role authority before joining");
 		frame().joinHostedServer("saved-choice");
 		CHECK(engine.m_joinRequest && engine.m_joinRequest->profile == "saved-choice",
 			"manual Join hosted server uses its explicit Host choice");

@@ -35,6 +35,7 @@ namespace
 	constexpr size_t kMaxManifestBytes = 77 + 16 * kMaxManifestChunks;
 	constexpr char kIdentityMagic[4] = {'F', 'T', 'V', 'A'};
 	constexpr uint32_t kIdentityVersion = 1;
+	constexpr uint32_t kIdentityRoleVersion = 2;
 	constexpr char kRosterMagic[4] = {'F', 'T', 'V', 'R'};
 	constexpr size_t kRosterHeaderBytes = 20;
 	constexpr size_t kRosterRecordBytes = 4 + kPlayerStateBytes + kInventoryStateBytes + 24;
@@ -177,21 +178,28 @@ bool readIdentityRegistryHeader(const std::vector<uint8_t> &bytes, ByteReader &r
 		return false;
 	char magic[sizeof(kIdentityMagic)];
 	reader.raw(magic, sizeof(magic));
-	if (std::memcmp(magic, kIdentityMagic, sizeof(magic)) != 0 || reader.u32() != kIdentityVersion)
+	const auto version = reader.u32();
+	if (std::memcmp(magic, kIdentityMagic, sizeof(magic)) != 0 ||
+		(version != kIdentityVersion && version != kIdentityRoleVersion))
 		return false;
 	IdentityRegistryHeader header;
 	header.worldId = reader.u64();
 	header.seed = reader.i32();
 	header.generatorVersion = reader.u32();
 	const auto required = reader.u8();
-	header.checkpointRequired = required != 0;
+	header.checkpointRequired = (required & 1) != 0;
 	header.actorLimit = reader.u32();
 	header.itemLimit = reader.u64();
 	header.profileCount = reader.u32();
-	if (!header.worldId || header.seed <= 0 || !header.generatorVersion || required > 1 ||
+	const bool hasRoles = version == kIdentityRoleVersion;
+	if (hasRoles)
+		header.roleRevision = reader.u64();
+	if (!header.worldId || header.seed <= 0 || !header.generatorVersion || required > 3 ||
+		((required & 2) != 0) != hasRoles || (hasRoles && !header.roleRevision) ||
 		header.actorLimit < kFirstRemotePlayerId || !header.itemLimit || header.profileCount > kMaxPersistentPlayers ||
 		(!header.checkpointRequired && (header.actorLimit != kFirstRemotePlayerId || header.profileCount != 0)) ||
-		bytes.size() != kEmptyIdentityRegistryBytes + kIdentityProfileBytes * header.profileCount)
+		bytes.size() != kEmptyIdentityRegistryBytes + (hasRoles ? kIdentityRoleRevisionBytes : 0) +
+			kIdentityProfileBytes * header.profileCount)
 		return false;
 	const auto payloadSize = bytes.size() - kIdentityChecksumBytes;
 	ByteReader checksum(bytes.data() + payloadSize, kIdentityChecksumBytes);
@@ -204,14 +212,16 @@ bool readIdentityRegistryHeader(const std::vector<uint8_t> &bytes, ByteReader &r
 void writeIdentityRegistryHeader(ByteWriter &writer, const IdentityRegistryHeader &header)
 {
 	writer.raw(kIdentityMagic, sizeof(kIdentityMagic));
-	writer.u32(kIdentityVersion);
+	writer.u32(header.roleRevision ? kIdentityRoleVersion : kIdentityVersion);
 	writer.u64(header.worldId);
 	writer.i32(header.seed);
 	writer.u32(header.generatorVersion);
-	writer.u8(header.checkpointRequired ? 1 : 0);
+	writer.u8(static_cast<uint8_t>((header.checkpointRequired ? 1 : 0) | (header.roleRevision ? 2 : 0)));
 	writer.u32(header.actorLimit);
 	writer.u64(header.itemLimit);
 	writer.u32(header.profileCount);
+	if (header.roleRevision)
+		writer.u64(header.roleRevision);
 }
 
 std::vector<uint8_t> encodePlayerRoster(const PlayerRoster &roster)

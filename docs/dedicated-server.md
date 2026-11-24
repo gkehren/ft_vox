@@ -43,10 +43,11 @@ preset. Port **0** requests a free port from the OS. The player limit counts
 network seats, including the local graphical client when it joins. Create
 profiles under **Join**, then choose or type the existing profile to use in
 **Host**. The **Host** field starts with the saved selection and can be
-edited independently. Auto-join uses the profile shown when you click
-**Start server**. When the child reports readiness, **Host** shows the
-bound address and assigned port. The profile field also controls **Join
-hosted server** for a manual join or retry.
+edited independently. Starting a new world binds its primary owner to the
+profile shown when you click **Start server**, with or without auto-join.
+Existing worlds keep their current role state. When the child reports
+readiness, **Host** shows the bound address and assigned port. The profile
+field also controls **Join hosted server** for a manual join or retry.
 
 Loopback is the default. **Allow LAN / VPN connections** requires an IPv4
 address assigned to an interface on this machine in an RFC 1918 range or
@@ -59,9 +60,9 @@ under the existing [private-network rules](multiplayer-public-network-readiness.
 The game starts the sibling `ft_vox_server` executable as a separate
 process and keeps a bounded log in **Host**. It reads readiness and
 checkpoint status from the child's inherited output pipe. The separate
-inherited stdin pipe is the private launcher control channel. In this
-version its EOF requests graceful shutdown. The server validates the pipe
-before opening a world. The local client joins with its ordinary profile.
+inherited stdin pipe carries the owner bootstrap before the server opens
+the world. After startup, EOF requests graceful shutdown. The local client
+joins with its ordinary profile.
 
 **Stop server** closes the control pipe and waits for the process to exit
 and report a committed checkpoint. Closing the game follows the same
@@ -76,6 +77,68 @@ retain its world lock until it finishes or its operator intervenes.
 Use the Host log to diagnose a busy port, a held world lock, startup
 delay, migration failure, or a failed checkpoint. CLI servers still
 support `--stop-file` and the existing stop signals.
+
+## Owner and delegated roles
+
+A new GUI world has one primary **owner**. The server reserves and persists
+the selected profile's identity before binding UDP. Reopening through a
+different GUI profile preserves that owner. CLI-created and migrated worlds
+start unowned and keep that state until an operator provisions them. The
+GUI requires provisioning before it can launch an existing unowned world.
+This also applies if a first GUI launch stopped before recording the owner.
+If that world has no dedicated checkpoint yet, run the CLI server first
+with `--ticks 1`, then provision it offline.
+
+The server classifies registered identities as owner, admin, or player.
+Role metadata alone gives a wire-v5 client no privileged commands. The
+gameplay profile key remains a cleartext bearer credential. The separate
+owner control key stays local to role administration. When creating a world,
+the GUI creates or reuses `owner-control.key` alongside the selected named
+profile's `player.key`. When reopening, the GUI reads the existing file.
+If you select the registered owner, the server requires the matching
+control key. Restore the private key file or use offline `roles recover`
+if it is lost. Keep control keys and the server saves root accessible only
+to the trusted local user and authorized operators.
+
+Hosting requires a filesystem that enforces private file permissions.
+From WSL, use a Linux filesystem for the profile and server saves. A
+Windows drive mounted without Linux permission metadata may report mode
+0777 even for files created with mode 0600. For the default relative save
+paths, launch the Linux game from a private working directory under your
+Linux home.
+
+### Offline administration and recovery
+
+Stop the server and wait for its checkpoint. The `roles` subcommands open
+the world under the same native lock as normal hosting, without starting
+UDP. Run `roles status SAVES_ROOT WORLD` to get the decimal world ID, role
+revision, owner ID, admin IDs and recent audit entries. For a registered
+player, use its persistent actor ID from the client's join log. Run
+`roles status` again after a mutation to get the current revision.
+
+| Command arguments after `ft_vox_server roles` | Authority and effect |
+| --- | --- |
+| `keygen NEW_CONTROL_FILE` | Creates a private, non-overwriting control key. Use a path in a private folder. |
+| `status SAVES_ROOT WORLD` | Local inspection of role state and audit history. |
+| `provision SAVES_ROOT WORLD WORLD_ID 0 PLAYER_KEY NEW_CONTROL_FILE` | Local world operator provisions an unowned, dedicated world. Supply the target profile's existing `player.key` and its control key. Open a solo or legacy save with the CLI server first to establish its dedicated checkpoint. |
+| `grant-admin SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE` | Current owner delegates to a registered player. |
+| `revoke-admin SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE` | Current owner removes a delegation. |
+| `transfer SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE NEW_CONTROL_FILE` | Current owner transfers ownership to a registered player and rotates the credential. The former owner becomes a player. Other delegations stay in place. |
+| `recover SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_KEY NEW_CONTROL_FILE` | Trusted local world operator explicitly rebinds an owned world, rotates the credential, and clears every admin. Generate a fresh control key and use the revision reported by status, including for missing, invalid, or stale authority. |
+
+Pass file paths as arguments and keep their contents private. The local
+operator is the OS principal with write access to the save directory and
+its role authority. Provision and recovery are operator procedures. Routine
+grant, revoke and transfer require the current owner control key. A world
+ID or revision mismatch refuses the request. New role operations are
+audited with their revision and affected player IDs.
+
+Keep the latest role authority and identity registry when restoring
+gameplay. A missing, corrupt, stale or foreign authority for an owned world
+blocks startup. Restore a matching current authority, or use the explicit
+recovery procedure with a fresh key after restoring a valid dedicated save
+and identity registry. The [checkpoint and role format ADR](adr/multiplayer-checkpoints.md#world-role-authority)
+specifies what to retain in backups.
 
 ## Connect two graphical clients
 

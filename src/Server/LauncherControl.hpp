@@ -1,5 +1,10 @@
 #pragma once
 
+#include <Hosting/RoleCredentials.hpp>
+
+#include <chrono>
+#include <thread>
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -26,8 +31,7 @@ inline bool hasLauncherPipe()
 #endif
 }
 
-// Version one only accepts EOF. A future bootstrap exchange can run over
-// the inherited control stream before opening the UDP socket.
+// Once started, the only accepted control signal is EOF.
 inline LauncherInput pollLauncherPipe()
 {
 #ifdef _WIN32
@@ -45,5 +49,47 @@ inline LauncherInput pollLauncherPipe()
 		return LauncherInput::Closed;
 	return LauncherInput::Invalid;
 #endif
+}
+
+inline std::optional<localcontrol::Bootstrap> readLauncherBootstrap()
+{
+	using namespace std::chrono_literals;
+	localcontrol::BootstrapFrame frame{};
+	size_t size = 0;
+	const auto deadline = std::chrono::steady_clock::now() + 5s;
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+#ifdef _WIN32
+		const auto pipe = GetStdHandle(STD_INPUT_HANDLE);
+		DWORD available = 0;
+		if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr))
+			return std::nullopt;
+		if (!available)
+		{
+			std::this_thread::sleep_for(10ms);
+			continue;
+		}
+		DWORD read = 0;
+		const auto count = static_cast<DWORD>(std::min<size_t>(available, frame.size() - size));
+		if (available > frame.size() - size || !ReadFile(pipe, frame.data() + size, count, &read, nullptr) || !read)
+			return std::nullopt;
+#else
+		pollfd pending{STDIN_FILENO, POLLIN, 0};
+		const auto ready = ::poll(&pending, 1, 20);
+		if (ready == 0 || (ready < 0 && errno == EINTR))
+			continue;
+		if (ready < 0 || !(pending.revents & POLLIN))
+			return std::nullopt;
+		const auto read = ::read(STDIN_FILENO, frame.data() + size, frame.size() - size);
+		if (read < 0 && errno == EINTR)
+			continue;
+		if (read <= 0)
+			return std::nullopt;
+#endif
+		size += static_cast<size_t>(read);
+		if (size == frame.size())
+			return pollLauncherPipe() == LauncherInput::Open ? localcontrol::decodeBootstrap(frame) : std::nullopt;
+	}
+	return std::nullopt;
 }
 }

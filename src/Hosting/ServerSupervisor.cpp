@@ -1,5 +1,6 @@
 #include <Hosting/ServerSupervisor.hpp>
 #include <Hosting/ChildProcess.hpp>
+#include <Hosting/RoleCredentials.hpp>
 
 #include <Network/UdpSocket.hpp>
 #include <Sim/GameSimulation.hpp>
@@ -57,14 +58,15 @@ PlayerStreamingBudget budget(StreamingPreset preset)
 	return {};
 }
 
-std::vector<fs::path> launchArguments(const Options &options, const fs::path &savesRoot, std::string_view address)
+std::vector<fs::path> launchArguments(const Options &options, const fs::path &savesRoot, std::string_view address,
+	bool bootstrap)
 {
 	const auto streams = budget(options.streaming);
 	return {"--world", options.world, "--saves-root", savesRoot, "--listen-address", std::string(address),
 		"--port", std::to_string(options.port), "--player-cap", std::to_string(options.playerSlots + 1),
 		"--interest-radius", std::to_string(options.interestRadius), "--workers", std::to_string(options.workers),
 		"--load-budget", std::to_string(streams.loads), "--generation-budget", std::to_string(streams.generations),
-		"--eviction-budget", std::to_string(streams.evictions), "--launcher-control", "stdin"};
+		"--eviction-budget", std::to_string(streams.evictions), "--launcher-control", bootstrap ? "bootstrap" : "stdin"};
 }
 
 std::string_view field(std::string_view line, std::string_view key)
@@ -223,7 +225,8 @@ ServerSupervisor::~ServerSupervisor()
 	// unwinding the worker closes our pipe and makes a bounded reap attempt.
 }
 
-bool ServerSupervisor::start(Options options, fs::path executable, fs::path savesRoot)
+bool ServerSupervisor::start(Options options, fs::path executable, fs::path savesRoot,
+	std::optional<OwnerProfile> owner)
 {
 	std::lock_guard lock(m_mutex);
 	if (m_snapshot.active())
@@ -244,8 +247,8 @@ bool ServerSupervisor::start(Options options, fs::path executable, fs::path save
 		try
 		{
 			m_worker = std::jthread([this, options = std::move(options), executable = std::move(executable),
-				savesRoot = std::move(savesRoot)](std::stop_token lifetime) {
-				run(lifetime, options, executable, savesRoot);
+				savesRoot = std::move(savesRoot), owner = std::move(owner)](std::stop_token lifetime) {
+				run(lifetime, options, executable, savesRoot, owner);
 			});
 		}
 		catch (const std::exception &error)
@@ -297,7 +300,7 @@ void ServerSupervisor::publish(const Snapshot &next)
 }
 
 void ServerSupervisor::run(std::stop_token lifetime, const Options &options, const fs::path &executable,
-	const fs::path &savesRoot)
+	const fs::path &savesRoot, const std::optional<OwnerProfile> &owner)
 {
 	if (lifetime.stop_requested())
 		return;
@@ -307,10 +310,30 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 		if (!fs::is_regular_file(executable))
 			throw std::runtime_error("Dedicated server executable is missing. Place ft_vox_server next to the game.");
 		std::error_code worldError;
-		const auto worldType = fs::symlink_status(savesRoot / options.world, worldError).type();
+		const auto worldDir = savesRoot / options.world;
+		const auto worldType = fs::symlink_status(worldDir, worldError).type();
 		if (worldType != fs::file_type::not_found && (worldError || worldType != fs::file_type::directory))
 			throw std::runtime_error("The hosted world path must be a local directory under server-saves.");
-		ChildProcess child(fs::absolute(executable), launchArguments(options, savesRoot, next.address));
+		std::optional<localcontrol::BootstrapFrame> bootstrap;
+		if (owner)
+		{
+			const bool fresh = worldType == fs::file_type::not_found || localcontrol::isFreshWorldDirectory(worldDir);
+			const auto control = fresh ? localcontrol::loadOrCreateControlKey(owner->controlFile) :
+				localcontrol::readControlKey(owner->controlFile);
+			localcontrol::Bootstrap request{owner->player, {}};
+			if (control && localcontrol::validBootstrap({owner->player, *control}))
+				request.control = *control;
+			else if (fresh)
+				throw std::runtime_error("Could not read or create the owner credential. Use a profile folder that supports private file permissions.");
+			bootstrap = localcontrol::encodeBootstrap(request);
+		}
+		ChildProcess child(fs::absolute(executable), launchArguments(options, savesRoot, next.address, bootstrap.has_value()));
+		if (bootstrap && !child.writeControl(*bootstrap))
+		{
+			// Let the child report its own startup error and reap it normally.
+			child.closeControl();
+		}
+		bootstrap.reset();
 		ServerOutput output;
 		const auto started = Clock::now();
 		std::optional<Clock::time_point> stopping, ownerGone;
