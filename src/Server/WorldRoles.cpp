@@ -95,13 +95,9 @@ WorldRoles::Load WorldRoles::read(const fs::path &path, State &state) const
 		return Load::Missing;
 	if (error || file.type() != fs::file_type::regular)
 		return Load::Invalid;
-#ifndef _WIN32
-	if ((file.permissions() & (fs::perms::group_all | fs::perms::others_all)) != fs::perms::none)
-		return Load::Invalid;
-#endif
 	std::vector<uint8_t> bytes;
 	uint64_t worldId = 0;
-	if (ws::readFileInto(path, bytes, kMaxState) != ws::SaveStatus::Ok || !decode(bytes, worldId, state))
+	if (!localcontrol::readPrivateFile(path, bytes, kMaxState) || !decode(bytes, worldId, state))
 		return Load::Invalid;
 	return worldId == m_identities.worldId() ? Load::Present : Load::WrongWorld;
 }
@@ -239,8 +235,10 @@ bool WorldRoles::prepareStart(bool fresh, const std::optional<localcontrol::Boot
 {
 	if (m_load == Load::Unowned)
 	{
-		if (!fresh || !bootstrap)
+		if (!bootstrap)
 			return true;
+		if (!fresh)
+			return fail(error, "existing world has no owner; open it with the CLI first if a checkpoint is needed, then use offline roles provision");
 		if (!localcontrol::validBootstrap(*bootstrap))
 			return fail(error, "invalid local owner bootstrap");
 		State next;
@@ -250,7 +248,9 @@ bool WorldRoles::prepareStart(bool fresh, const std::optional<localcontrol::Boot
 			return false;
 	}
 	if (m_load != Load::Present || !identitiesMatch(m_state))
-		return fail(error, "role authority missing, corrupt or mismatched; inspect it with the offline roles command");
+		return fail(error, "role authority missing, corrupt, insecure or mismatched; inspect it with the offline roles command");
+	if (bootstrap && bootstrap->player == m_state.ownerProfile && !localcontrol::matches(bootstrap->control, m_state.control))
+		return fail(error, "owner credential missing, unreadable or mismatched; restore the private owner-control.key or use offline roles recover");
 	if (!m_identities.advanceRoleRevision(m_state.revision))
 		return fail(error, "could not reconcile the role revision in the identity registry");
 	return true;

@@ -83,15 +83,22 @@ support `--stop-file` and the existing stop signals.
 A new GUI world has one primary **owner**. The server reserves and persists
 the selected profile's identity before binding UDP. Reopening through a
 different GUI profile preserves that owner. CLI-created and migrated worlds
-start unowned and keep that state until an operator provisions them.
+start unowned and keep that state until an operator provisions them. The
+GUI requires provisioning before it can launch an existing unowned world.
+This also applies if a first GUI launch stopped before recording the owner.
+If that world has no dedicated checkpoint yet, run the CLI server first
+with `--ticks 1`, then provision it offline.
 
 The server classifies registered identities as owner, admin, or player.
 Role metadata alone gives a wire-v5 client no privileged commands. The
 gameplay profile key remains a cleartext bearer credential. The separate
-owner control key stays local to role administration. The GUI creates
-`owner-control.key` alongside the selected named profile's `player.key`.
-Keep control keys and the server saves root accessible only to the trusted
-local user and authorized operators.
+owner control key stays local to role administration. When creating a world,
+the GUI creates or reuses `owner-control.key` alongside the selected named
+profile's `player.key`. When reopening, the GUI reads the existing file.
+If you select the registered owner, the server requires the matching
+control key. Restore the private key file or use offline `roles recover`
+if it is lost. Keep control keys and the server saves root accessible only
+to the trusted local user and authorized operators.
 
 Hosting requires a filesystem that enforces private file permissions.
 From WSL, use a Linux filesystem for the profile and server saves. A

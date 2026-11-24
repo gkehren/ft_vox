@@ -505,7 +505,7 @@ bool ServerHost::start(std::string &error)
 	return start(error, nullptr);
 }
 
-bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)())
+bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)(), void (*beforeRoleAuthorityForTests)())
 {
 	if (m_sim)
 	{
@@ -525,24 +525,7 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 	auto identities = std::make_unique<WorldIdentities>();
 	if (!identities->lock(worldDir, error))
 		return false;
-	bool fresh = false;
-	if (m_config.ownerBootstrap)
-	{
-		std::error_code ec;
-		fresh = true;
-		for (std::filesystem::directory_iterator entry(worldDir, ec), end; !ec && entry != end; entry.increment(ec))
-		{
-			if (entry->path().filename() == "server.lock")
-				continue;
-			fresh = false;
-			break;
-		}
-		if (ec)
-		{
-			error = "could not inspect the world before owner bootstrap";
-			return false;
-		}
-	}
+	const bool fresh = m_config.ownerBootstrap && localcontrol::isFreshWorldDirectory(worldDir);
 
 	if (m_config.workers > 0)
 		m_workers = std::make_unique<ThreadPool>(m_config.workers);
@@ -588,6 +571,8 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 		error = "could not reserve shared item IDs";
 		return false;
 	}
+	if (beforeRoleAuthorityForTests)
+		beforeRoleAuthorityForTests();
 	auto roles = std::make_unique<WorldRoles>(worldDir, *identities);
 	if (!roles->prepareStart(fresh, m_config.ownerBootstrap, error))
 		return false;

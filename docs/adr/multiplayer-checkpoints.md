@@ -129,7 +129,9 @@ does not authenticate a command or modify wire v5.
 
 - The launcher writes one fixed 72-byte record to the private inherited
   stdin pipe. It contains `FTLB`, little-endian u32 version 1, the
-  32-byte player key and a distinct 32-byte owner control key. The server
+  32-byte player key and a 32-byte owner control field. The field is zero
+  when reopening without a readable key. A fresh bootstrap requires a
+  distinct, nonzero control key. The server
   reads it within five seconds before opening a world. Extra bytes are
   rejected and closing the writer requests graceful shutdown after startup.
   Key bytes are absent from command arguments, environment, preferences,
@@ -139,10 +141,16 @@ does not authenticate a command or modify wire v5.
   nonzero OS-generated 32-byte value. New files use mode 0600 on POSIX and a
   protected DACL for the current user and SYSTEM on Windows. The authority
   file uses the same private write path. The writer verifies privacy
-  before putting any key bytes on disk. Keep the enclosing directories
-  under the trusted operator's control.
-- Only a fresh world directory may use an incoming GUI bootstrap. Existing
-  worlds without a role record remain unowned. Routine offline owner
+  before putting any key bytes on disk. On Windows, reads also require a
+  protected DACL with allow entries limited to the current user and
+  SYSTEM, and an owner from that same set. POSIX reads refuse group or
+  other permissions. Preserve these permissions when restoring
+  authoritative files.
+- Only a fresh world directory may use an incoming GUI bootstrap. The GUI
+  refuses to launch an existing world without a role record and directs
+  the operator to offline provisioning. A launcher that selects the
+  recorded owner's profile must supply the matching local control key.
+  Routine offline owner
   commands require the independent owner control key plus the current
   world ID and revision. Provision and recovery require local operator
   access and the world lock. They have explicit CLI verbs and audit
@@ -177,7 +185,8 @@ does not authenticate a command or modify wire v5.
   role record. Both steps finish before UDP readiness. A crash after the
   pending write retries the original profile. A crash after enrollment
   reuses that registered ID. If the world was created but no pending record
-  survived, a repeat launch leaves it unowned for explicit provisioning.
+  survived, a repeat GUI launch fails before UDP binds. The CLI can
+  establish the checkpoint for explicit local provisioning.
 - Gameplay rollback and world-directory restores leave the latest role
   file in the separate authority directory. Keep the current
   `server-identities.state` with it to preserve role bindings and

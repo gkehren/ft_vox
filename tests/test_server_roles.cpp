@@ -11,6 +11,11 @@
 #include <fstream>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <aclapi.h>
+#endif
+
 namespace server
 {
 struct ServerHostProbe
@@ -18,6 +23,10 @@ struct ServerHostProbe
 	static bool startWithCheckpointHook(ServerHost &host, std::string &error, void (*hook)())
 	{
 		return host.start(error, hook);
+	}
+	static bool startWithRoleHook(ServerHost &host, std::string &error, void (*hook)())
+	{
+		return host.start(error, nullptr, hook);
 	}
 };
 }
@@ -153,6 +162,38 @@ fs::path authority(const fs::path &root, std::string_view world)
 	return root / ".ft_vox..server-roles" / world;
 }
 
+std::vector<uint8_t> readPrivateFixture(const fs::path &path)
+{
+	std::vector<uint8_t> bytes;
+	require(localcontrol::readPrivateFile(path, bytes, 200'000), "read private fixture");
+	return bytes;
+}
+
+#ifdef _WIN32
+void allowEveryoneToRead(const fs::path &path)
+{
+	auto name = path.native();
+	alignas(SID) std::array<BYTE, SECURITY_MAX_SID_SIZE> sid{};
+	DWORD size = static_cast<DWORD>(sid.size());
+	require(CreateWellKnownSid(WinWorldSid, nullptr, sid.data(), &size) != FALSE, "build Everyone SID");
+	PACL current = nullptr;
+	PSECURITY_DESCRIPTOR descriptor = nullptr;
+	require(GetNamedSecurityInfoW(name.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+		nullptr, nullptr, &current, nullptr, &descriptor) == ERROR_SUCCESS, "read fixture DACL");
+	EXPLICIT_ACCESS_W grant{};
+	grant.grfAccessPermissions = FILE_GENERIC_READ;
+	grant.grfAccessMode = GRANT_ACCESS;
+	BuildTrusteeWithSidW(&grant.Trustee, sid.data());
+	PACL expanded = nullptr;
+	const auto built = SetEntriesInAclW(1, &grant, current, &expanded);
+	const auto changed = built == ERROR_SUCCESS ? SetNamedSecurityInfoW(name.data(), SE_FILE_OBJECT,
+		DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, expanded, nullptr) : built;
+	LocalFree(expanded);
+	LocalFree(descriptor);
+	require(changed == ERROR_SUCCESS, "widen protected fixture DACL");
+}
+#endif
+
 void checkBootstrapAndRoles(const fs::path &exe, const fs::path &root)
 {
 	const auto ownerFile = root / "owner secret", guestFile = root / "next owner secret";
@@ -209,6 +250,39 @@ void checkBootstrapAndRoles(const fs::path &exe, const fs::path &root)
 			args.push_back(next);
 		return run(exe, args);
 	};
+	const auto ownerBytes = readPrivateFixture(ownerFile);
+	fs::remove(ownerFile);
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "reopen with missing owner credential");
+	auto refused = await(supervisor, [](const Snapshot &s) { return !s.active(); });
+	CHECK(refused.state == State::Failed && refused.port == 0 && refused.message.find("offline roles recover") != std::string::npos &&
+		!fs::exists(ownerFile), "missing owner credential fails before UDP with recovery instructions and no replacement");
+	require(localcontrol::createControlKey(ownerFile), "create distinct wrong credential fixture");
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "reopen with mismatched owner credential");
+	refused = await(supervisor, [](const Snapshot &s) { return !s.active(); });
+	CHECK(refused.state == State::Failed && refused.port == 0 && refused.message.find("offline roles recover") != std::string::npos,
+		"replacement credential cannot start as the registered owner");
+	require(localcontrol::writePrivateFile(ownerFile, ownerBytes, true), "restore matching owner credential");
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "reopen with restored owner credential");
+	ready(supervisor);
+	stop(supervisor);
+
+#ifdef _WIN32
+	allowEveryoneToRead(ownerFile);
+	CHECK(!localcontrol::readControlKey(ownerFile) && mutation("grant-admin", worldId, rev, guestId, ownerFile).code == 2,
+		"protected control key with an Everyone read grant is rejected by offline owner authentication");
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "reopen with a widened control DACL");
+	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).message.find("offline roles recover") != std::string::npos,
+		"an insecure Windows control key cannot start as the registered owner");
+	require(localcontrol::writePrivateFile(ownerFile, ownerBytes, true), "restore private owner DACL");
+	const auto authorityFile = authority(root, settings.world);
+	const auto authorityBytes = readPrivateFixture(authorityFile);
+	allowEveryoneToRead(authorityFile);
+	CHECK(status().has("status=invalid"), "protected authority with an Everyone read grant is rejected");
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "reopen with a widened authority DACL");
+	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).message.find("role authority") != std::string::npos,
+		"insecure Windows authority fails before UDP");
+	require(localcontrol::writePrivateFile(authorityFile, authorityBytes, true), "restore private authority DACL");
+#endif
 	CHECK(mutation("grant-admin", worldId, rev, guestId, wireKeyFile).code == 2,
 		"wire key file is not a control credential");
 	CHECK(mutation("grant-admin", worldId, rev, guestId, copiedCredential).has("valid local owner credential"),
@@ -244,17 +318,17 @@ void checkBootstrapAndRoles(const fs::path &exe, const fs::path &root)
 	const auto olderAuthority = root / "authority before revocation";
 	const auto newestAuthority = root / "authority after revocation";
 	const auto activeAuthority = authority(root, settings.world);
-	fs::copy_file(activeAuthority, olderAuthority);
+	require(localcontrol::writePrivateFile(olderAuthority, readPrivateFixture(activeAuthority), false), "save old authority");
 	CHECK(mutation("revoke-admin", worldId, revision(), guestId, ownerFile).has("operation=revoke-admin"),
 		"revocation is audited");
-	fs::copy_file(activeAuthority, newestAuthority);
-	fs::copy_file(olderAuthority, activeAuthority, fs::copy_options::overwrite_existing);
+	require(localcontrol::writePrivateFile(newestAuthority, readPrivateFixture(activeAuthority), false), "save current authority");
+	require(localcontrol::writePrivateFile(activeAuthority, readPrivateFixture(olderAuthority), true), "restore old authority");
 	CHECK(status().has("status=stale"), "restoring an older authority alone is recognized by the registry revision");
 	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, ownerFile}), "try opening rolled-back role authority");
 	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).state == State::Failed,
 		"stale authority cannot start UDP or reactivate a revoked admin");
 	const auto pendingAuthority = activeAuthority.parent_path() / (".pending.." + settings.world);
-	fs::copy_file(newestAuthority, pendingAuthority);
+	require(localcontrol::writePrivateFile(pendingAuthority, readPrivateFixture(newestAuthority), false), "stage current authority");
 	const auto completed = status();
 	CHECK(completed.has("status=owned") && completed.has("operation=revoke-admin") &&
 		!completed.has("admin_id=") && !fs::exists(pendingAuthority),
@@ -263,9 +337,10 @@ void checkBootstrapAndRoles(const fs::path &exe, const fs::path &root)
 	fs::copy(saved, root / settings.world, fs::copy_options::recursive);
 
 	udp::Socket previousPort(udp::parseAddress(first.address, first.port));
-	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kGuest, guestFile}), "restart with different launcher");
+	const auto noGuestCredential = root / "no guest credential";
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kGuest, noGuestCredential}), "restart with different launcher");
 	const auto second = ready(supervisor);
-	CHECK(first.port != second.port, "restart binds a different port");
+	CHECK(first.port != second.port && !fs::exists(noGuestCredential), "different launcher can host without creating an owner credential");
 	udp::ClientTransport ownerAgain(udp::parseAddress(second.address, second.port), kHost);
 	const auto retained = connect(ownerAgain);
 	udp::ClientTransport guestAgain(udp::parseAddress(second.address, second.port), kGuest);
@@ -325,21 +400,48 @@ void checkLegacyAndCrash(const fs::path &exe, const fs::path &self, const fs::pa
 	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).state == State::Failed &&
 		!fs::exists(authority(root, settings.world)), "failed legacy migration creates no owner");
 	fs::remove(world / "player.state");
-	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, controlFile}), "reopen repaired legacy world");
-	ready(supervisor);
-	stop(supervisor);
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, controlFile}), "try reopening repaired legacy world in GUI");
+	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).message.find("offline roles provision") != std::string::npos,
+		"GUI requires explicit provisioning for repaired legacy worlds");
+	require(run(exe, {"--world", settings.world, "--saves-root", root, "--workers", "0", "--ticks", "1"}).code == 0,
+		"CLI establishes the dedicated checkpoint for a repaired legacy world");
 	const auto status = run(exe, {"roles", "status", root, settings.world});
-	CHECK(status.has("status=unowned"), "opening a migrated world from the launcher leaves it unowned");
+	CHECK(status.has("status=unowned"), "CLI migration keeps the world unowned until provisioning");
 	const auto worldId = std::to_string(field(status, "world_id="));
 	CHECK(run(exe, {"roles", "provision", root, settings.world, worldId, "0", profile, controlFile}).has("operation=provision"),
 		"operator can explicitly provision an unowned migrated or CLI world");
 	CHECK(run(exe, {"roles", "provision", root, settings.world, worldId, "0", profile, controlFile}).code != 0,
 		"provision cannot replace an existing owner");
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kHost, controlFile}), "reopen provisioned world in GUI");
+	ready(supervisor);
+	stop(supervisor);
 	const auto registry = world / ws::kIdentityFile;
 	std::ofstream(registry, std::ios::binary | std::ios::trunc) << "bad registry";
 	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kGuest, controlFile}), "start with corrupt registry");
 	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).state == State::Failed &&
 		run(exe, {"roles", "status", root, settings.world}).has("identity registry"), "corrupt registry fails closed");
+
+	CHECK(run(self, {"--crash-before-authority", root, controlFile}).code == 84,
+		"interrupted after world metadata and registry but before recording bootstrap");
+	const auto early = options("Early roles");
+	CHECK(fs::exists(root / early.world / "world.meta") && fs::exists(root / early.world / ws::kIdentityFile) &&
+		!fs::exists(authority(root, early.world)), "early crash leaves a partial world without authority");
+	for (const auto &profileKey : {kHost, kGuest})
+	{
+		require(supervisor.start(early, exe, root, hosting::OwnerProfile{profileKey, controlFile}), "retry early startup from GUI");
+		const auto refused = await(supervisor, [](const Snapshot &s) { return !s.active(); });
+		CHECK(refused.state == State::Failed && refused.port == 0 &&
+			refused.message.find("offline roles provision") != std::string::npos &&
+			!fs::exists(authority(root, early.world)), "early retry requires provisioning and never grants or serves an unowned world");
+	}
+	require(run(exe, {"--world", early.world, "--saves-root", root, "--workers", "0", "--ticks", "1"}).code == 0,
+		"CLI can finish the checkpoint after early interruption");
+	const auto earlyStatus = run(exe, {"roles", "status", root, early.world});
+	CHECK(run(exe, {"roles", "provision", root, early.world, std::to_string(field(earlyStatus, "world_id=")),
+		"0", profile, controlFile}).has("operation=provision"), "early world can be explicitly provisioned");
+	require(supervisor.start(early, exe, root, hosting::OwnerProfile{kHost, controlFile}), "reopen early world after provisioning");
+	ready(supervisor);
+	stop(supervisor);
 
 	CHECK(run(self, {"--crash-pending", root, controlFile}).code == 83, "interrupted before the first checkpoint publication");
 	const auto pending = options("Pending roles");
@@ -358,10 +460,10 @@ void checkLegacyAndCrash(const fs::path &exe, const fs::path &self, const fs::pa
 		"standalone CLI still creates a world");
 	CHECK(run(exe, {"roles", "status", root, cli.world}).has("status=unowned"), "standalone world starts unowned");
 	require(supervisor.start(cli, exe, root, hosting::OwnerProfile{kHost, controlFile}), "host existing CLI world");
-	ready(supervisor);
-	stop(supervisor);
-	CHECK(run(exe, {"roles", "status", root, cli.world}).has("status=unowned"), "a GUI start cannot claim a CLI world");
-	fs::copy_file(authority(root, pending.world), authority(root, cli.world));
+	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).message.find("offline roles provision") != std::string::npos &&
+		run(exe, {"roles", "status", root, cli.world}).has("status=unowned"), "a GUI start cannot claim or serve an unowned CLI world");
+	require(localcontrol::writePrivateFile(authority(root, cli.world), readPrivateFixture(authority(root, pending.world)), false),
+		"copy foreign authority fixture");
 	require(supervisor.start(cli, exe, root, hosting::OwnerProfile{kHost, controlFile}), "try copying another world's authority");
 	CHECK(await(supervisor, [](const Snapshot &s) { return !s.active(); }).state == State::Failed &&
 		run(exe, {"roles", "status", root, cli.world}).has("status=wrong_world"), "another world's authority cannot be transplanted");
@@ -385,18 +487,23 @@ void checkMalformed(const fs::path &exe, const fs::path &root)
 
 int main(int argc, char **argv)
 {
-	if (argc == 4 && std::string_view(argv[1]) == "--crash-pending")
+	const auto mode = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+	if (argc == 4 && (mode == "--crash-pending" || mode == "--crash-before-authority"))
 	{
 		const auto control = localcontrol::readControlKey(argv[3]);
 		if (!control)
 			return 1;
 		server::HostConfig config;
-		config.world = {.seed = 17, .worldName = "Pending roles", .savesRoot = argv[2]};
+		const bool early = mode == "--crash-before-authority";
+		config.world = {.seed = 17, .worldName = early ? "Early roles" : "Pending roles", .savesRoot = argv[2]};
 		config.workers = 0;
 		config.ownerBootstrap = localcontrol::Bootstrap{kHost, *control};
 		server::ServerHost host(config);
 		std::string error;
-		if (!server::ServerHostProbe::startWithCheckpointHook(host, error, [] { std::_Exit(83); }))
+		const bool started = early ?
+			server::ServerHostProbe::startWithRoleHook(host, error, [] { std::_Exit(84); }) :
+			server::ServerHostProbe::startWithCheckpointHook(host, error, [] { std::_Exit(83); });
+		if (!started)
 			std::cerr << error << '\n';
 		return 2;
 	}

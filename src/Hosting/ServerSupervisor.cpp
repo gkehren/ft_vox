@@ -310,16 +310,22 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 		if (!fs::is_regular_file(executable))
 			throw std::runtime_error("Dedicated server executable is missing. Place ft_vox_server next to the game.");
 		std::error_code worldError;
-		const auto worldType = fs::symlink_status(savesRoot / options.world, worldError).type();
+		const auto worldDir = savesRoot / options.world;
+		const auto worldType = fs::symlink_status(worldDir, worldError).type();
 		if (worldType != fs::file_type::not_found && (worldError || worldType != fs::file_type::directory))
 			throw std::runtime_error("The hosted world path must be a local directory under server-saves.");
 		std::optional<localcontrol::BootstrapFrame> bootstrap;
 		if (owner)
 		{
-			const auto control = localcontrol::loadOrCreateControlKey(owner->controlFile);
-			if (!control || !localcontrol::validBootstrap({owner->player, *control}))
+			const bool fresh = worldType == fs::file_type::not_found || localcontrol::isFreshWorldDirectory(worldDir);
+			const auto control = fresh ? localcontrol::loadOrCreateControlKey(owner->controlFile) :
+				localcontrol::readControlKey(owner->controlFile);
+			localcontrol::Bootstrap request{owner->player, {}};
+			if (control && localcontrol::validBootstrap({owner->player, *control}))
+				request.control = *control;
+			else if (fresh)
 				throw std::runtime_error("Could not read or create the owner credential. Use a profile folder that supports private file permissions.");
-			bootstrap = localcontrol::encodeBootstrap({owner->player, *control});
+			bootstrap = localcontrol::encodeBootstrap(request);
 		}
 		ChildProcess child(fs::absolute(executable), launchArguments(options, savesRoot, next.address, bootstrap.has_value()));
 		if (bootstrap && !child.writeControl(*bootstrap))
