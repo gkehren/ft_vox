@@ -67,6 +67,8 @@ struct EngineJoinProbe
 		frame().selectJoinProfile(joinDraft.profile.data());
 		until([&] {
 			return engine.m_hostSnapshot.state == hosting::State::Ready &&
+				engine.m_hostSnapshot.status && engine.m_hostSnapshot.status->transport.count == 1 &&
+				engine.m_hostSnapshot.status->transport.roster().front().state == monitoring::SessionState::Connected &&
 				engine.m_remote && engine.m_remote->ready();
 		}, "hosted server did not auto-join");
 		auto state = engine.m_hostSnapshot;
@@ -75,6 +77,10 @@ struct EngineJoinProbe
 			"auto-join uses the ready loopback endpoint and assigned port");
 		CHECK(engine.m_remote->namedProfile == "host-choice" && engine.m_suspendedSolo,
 			"auto-join uses the canonical Host choice captured at Start and suspends solo play");
+		CHECK(engine.m_remote->welcome && state.status->transport.roster().front().id == engine.m_remote->welcome->player &&
+			state.status->transport.roster().front().state == monitoring::SessionState::Connected &&
+			state.status->transport.capacity == 1 && state.status->checkpoint == state.checkpoint,
+			"the graphical host receives authoritative identity, capacity, phase and checkpoint on its monitoring pipe");
 		CHECK(localcontrol::readControlKey(engine.m_savesRoot / ".client-profiles" / "named" /
 			"host-choice" / "owner-control.key") &&
 			std::filesystem::is_regular_file(engine.m_hostSavesRoot / ".ft_vox..server-roles" / options.world),
@@ -94,7 +100,7 @@ struct EngineJoinProbe
 		CHECK(engine.running && engine.m_exitAfterHostedStop, "game exit waits for its hosted server");
 		until([&] { return !engine.running || engine.m_hostSnapshot.state == hosting::State::Failed; },
 			"game did not reach a terminal hosted shutdown");
-		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped &&
+		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped && !engine.m_hostSnapshot.status &&
 			engine.m_hostSnapshot.checkpoint > state.checkpoint,
 			"game exits after the final hosted checkpoint was committed");
 	}

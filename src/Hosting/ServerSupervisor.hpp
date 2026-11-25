@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Network/WireProtocol.hpp>
+#include <Core/ServerStatus.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,7 +18,7 @@
 
 namespace hosting
 {
-inline constexpr int kMaxPlayerSlots = 255;
+inline constexpr int kMaxPlayerSlots = static_cast<int>(monitoring::kMaxPlayers);
 inline constexpr int kMaxInterestRadius = 8;
 inline constexpr size_t kMaxLogLines = 48;
 inline constexpr size_t kMaxLogLineBytes = 1024;
@@ -50,8 +52,10 @@ struct Snapshot
 	std::string world, address, message;
 	uint16_t port{};
 	uint64_t checkpoint{};
+	uint64_t launch{};
 	bool delayed{};
 	std::deque<std::string> logs;
+	std::shared_ptr<const monitoring::Status> status;
 
 	bool active() const { return state == State::Starting || state == State::Ready || state == State::Stopping; }
 };

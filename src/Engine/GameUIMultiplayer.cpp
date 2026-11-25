@@ -60,6 +60,45 @@ const std::string *profileChoice(const char *id, std::span<const std::string> pr
 	}
 	return choice;
 }
+
+const char *sessionLabel(monitoring::SessionState phase)
+{
+	switch (phase)
+	{
+	case monitoring::SessionState::Syncing: return "Syncing";
+	case monitoring::SessionState::Connected: return "Connected";
+	case monitoring::SessionState::Disconnecting: return "Disconnecting";
+	}
+	return "Unavailable";
+}
+
+void drawHostedStatus(const hosting::Snapshot &server)
+{
+	if (!ImGui::TreeNode("Server status"))
+		return;
+	if (const auto &sample = server.status)
+	{
+		const auto &transport = sample->transport;
+		const auto number = [](uint64_t value) { return static_cast<unsigned long long>(value); };
+		ImGui::Text("Uptime: %.1f s", static_cast<double>(sample->uptimeMs) / 1000.0);
+		ImGui::Text("Admitted sessions: %u / %u", static_cast<unsigned>(transport.count),
+			static_cast<unsigned>(transport.capacity));
+		ImGui::Text("Offline registered profiles: %llu", number(sample->offlineProfiles));
+		ImGui::Text("Completed ticks: %llu   Dropped ticks: %llu", number(sample->ticks), number(sample->droppedTicks));
+		ImGui::Text("Resident chunks: %llu", number(sample->chunks));
+		ImGui::TextWrapped("Streaming: %llu awaiting records, %llu awaiting generation, %llu generating",
+			number(sample->waitingForRecord), number(sample->waitingForGeneration), number(sample->generating));
+		ImGui::TextWrapped("World sends: %u pending/in flight, %u baselines",
+			static_cast<unsigned>(transport.worldSends), static_cast<unsigned>(transport.baselines));
+		ImGui::TextWrapped("Server UDP total: %.1f KiB received, %.1f KiB sent",
+			static_cast<double>(transport.receivedBytes) / 1024.0, static_cast<double>(transport.sentBytes) / 1024.0);
+		ImGui::TextWrapped("World traffic total: %.1f KiB sent, %llu retransmits, %llu resyncs",
+			static_cast<double>(transport.worldBytes) / 1024.0, number(transport.retransmits), number(transport.resyncs));
+	}
+	else
+		ImGui::TextWrapped("Waiting for a current server sample.");
+	ImGui::TreePop();
+}
 }
 
 void ui::drawMultiplayerNetworkStats(const NetworkStats &stats)
@@ -125,11 +164,70 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 	}
 	if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen))
 		ui::drawMultiplayerNetworkStats(frame.networkStats);
-	if (ImGui::CollapsingHeader("Players"))
-		ImGui::TextWrapped("The server roster is unavailable.");
+	drawHostedPlayers(frame.hostedServer);
 	if (ImGui::CollapsingHeader("Administration"))
 		ImGui::TextWrapped("Server controls are unavailable.");
 	ImGui::End();
+}
+
+void GameUI::drawHostedPlayers(const hosting::Snapshot *server)
+{
+	const auto *sample = server && server->state == hosting::State::Ready ? server->status.get() : nullptr;
+	if (!sample || m_hostSelectionLaunch != server->launch)
+		m_hostPlayerSelection = {};
+	m_hostSelectionLaunch = server ? server->launch : 0;
+	if (sample && m_hostPlayerSelection.valid())
+	{
+		const auto players = sample->transport.roster();
+		const auto found = std::ranges::lower_bound(players, m_hostPlayerSelection.value, {}, [](const auto &player) {
+			return player.id.value;
+		});
+		if (found == players.end() || found->id != m_hostPlayerSelection)
+			m_hostPlayerSelection = {};
+	}
+	if (!ImGui::CollapsingHeader("Players"))
+		return;
+	if (!sample)
+	{
+		ImGui::TextWrapped("%s", server && server->state == hosting::State::Ready ?
+			"Waiting for a current server roster." : "The full roster is available when hosting a local server.");
+		return;
+	}
+	const auto players = sample->transport.roster();
+	ImGui::TextWrapped("Hosted world: %s", server->world.c_str());
+	ImGui::Text("Admitted sessions: %u / %u", static_cast<unsigned>(players.size()),
+		static_cast<unsigned>(sample->transport.capacity));
+	ImGui::Text("Offline registered profiles: %llu", static_cast<unsigned long long>(sample->offlineProfiles));
+	if (players.empty())
+	{
+		ImGui::TextUnformatted("No admitted sessions.");
+		return;
+	}
+	ImGui::TextWrapped("Server-side player RTT is unavailable. The Network section shows your client RTT.");
+	if (ImGui::BeginTable("host-roster", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+		ImVec2(0.f, ImGui::GetTextLineHeightWithSpacing() * 10.f)))
+	{
+		ImGui::TableSetupScrollFreeze(0, 1);
+		ImGui::TableSetupColumn("Player");
+		ImGui::TableSetupColumn("Session");
+		ImGui::TableHeadersRow();
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(players.size()));
+		while (clipper.Step())
+			for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
+			{
+				const auto &row = players[static_cast<size_t>(index)];
+				char label[32];
+				std::snprintf(label, sizeof(label), "Player #%u", static_cast<unsigned>(row.id.value));
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				if (ImGui::Selectable(label, m_hostPlayerSelection == row.id, ImGuiSelectableFlags_SpanAllColumns))
+					m_hostPlayerSelection = row.id;
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(sessionLabel(row.state));
+			}
+		ImGui::EndTable();
+	}
 }
 
 void GameUI::showHostPanel()
@@ -268,6 +366,8 @@ void GameUI::drawHostPanel(const GameUIFrame &frame)
 	}
 	if (server.checkpoint > 0)
 		ImGui::Text("Checkpoint generation: %llu", static_cast<unsigned long long>(server.checkpoint));
+	if (server.state == State::Ready)
+		drawHostedStatus(server);
 	if (!server.logs.empty() && ImGui::TreeNode("Server log"))
 	{
 		ImGui::BeginChild("##host-log", ImVec2(0.f, ImGui::GetTextLineHeightWithSpacing() * 9.f));

@@ -1,6 +1,7 @@
 #include "ServerTransport.hpp"
 #include "UdpLink.hpp"
 
+#include <atomic>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -74,7 +75,7 @@ struct Discovery
 
 size_t checkedCap(size_t cap)
 {
-	if (cap > 255)
+	if (cap > monitoring::kMaxPlayers)
 		throw std::invalid_argument("remote session cap exceeds 255");
 	return cap;
 }
@@ -91,7 +92,7 @@ struct ServerTransport::Impl
 
 	Sender sender(Peer &peer)
 	{
-		return {socket, peer.address, wire::Endpoint::Server, peer.outbound, globalOut};
+		return {socket, peer.address, wire::Endpoint::Server, peer.outbound, globalOut, &sentBytes};
 	}
 
 	void releaseBaseline(Mailbox &box)
@@ -139,7 +140,7 @@ struct ServerTransport::Impl
 		if (!rates.inbound.takeKind(now, wire::Kind::Hello))
 			return;
 		const auto reject = [&](wire::RejectReason reason) {
-			Sender{socket, from, wire::Endpoint::Server, rates.outbound, globalOut}.send(now,
+			Sender{socket, from, wire::Endpoint::Server, rates.outbound, globalOut, &sentBytes}.send(now,
 				{{}, 0, wire::Reject{msg.nonce, reason, wire::kVersion, wire::kVersion}});
 		};
 		if (const auto reason = wire::rejectHello(msg, compatibility))
@@ -445,7 +446,11 @@ struct ServerTransport::Impl
 			refresh((firstPeer + i) % peers.size(), now);
 		Received frame;
 		for (unsigned i = 0; i < kReadBatch && socket.receive(frame); ++i)
+		{
+			if (frame.size <= wire::kDatagramBytes)
+				receivedBytes += frame.size;
 			receive(frame, now);
+		}
 		for (size_t i = 0; i < peers.size(); ++i)
 		{
 			const auto slot = (firstPeer + i) % peers.size();
@@ -467,6 +472,8 @@ struct ServerTransport::Impl
 		}
 		if (!peers.empty())
 			firstPeer = (firstPeer + 1) % peers.size();
+		publishedReceived.store(receivedBytes, std::memory_order_relaxed);
+		publishedSent.store(sentBytes, std::memory_order_relaxed);
 	}
 
 	void shutdownIo()
@@ -637,6 +644,8 @@ struct ServerTransport::Impl
 	uint64_t baselinesQueued{}; // shared under mutex
 	std::mutex mutex;
 	WorldTraffic worldTraffic; // lifetime totals, shared under mutex
+	uint64_t receivedBytes{}, sentBytes{}; // IO thread only
+	std::atomic<uint64_t> publishedReceived{}, publishedSent{};
 	std::exception_ptr error;
 	std::jthread worker; // joins before releasing any socket/IO state
 };
@@ -670,6 +679,37 @@ WorldSendQueue ServerTransport::worldSendQueue() const
 		return !box.closing && box.worldBusy;
 	});
 	return {static_cast<size_t>(pending), m_impl->activeBaselines, m_impl->baselinesQueued};
+}
+
+std::optional<monitoring::TransportSample> ServerTransport::tryMonitor() const
+{
+	monitoring::TransportSample sample;
+	{
+		std::unique_lock lock(m_impl->mutex, std::try_to_lock);
+		if (!lock)
+			return std::nullopt;
+		sample.capacity = static_cast<uint16_t>(m_impl->mailboxes.size());
+		for (const auto &box : m_impl->mailboxes)
+		{
+			if (!box.admission || !box.admission->player.valid())
+				continue;
+			const auto phase = box.closing ? monitoring::SessionState::Disconnecting :
+				box.active ? monitoring::SessionState::Connected : monitoring::SessionState::Syncing;
+			sample.players[sample.count++] = {box.admission->player, phase};
+			if (!box.closing && box.worldBusy)
+				++sample.worldSends;
+		}
+		sample.baselines = static_cast<uint16_t>(m_impl->activeBaselines);
+		sample.worldBytes = m_impl->worldTraffic.bytes;
+		sample.retransmits = m_impl->worldTraffic.retransmits;
+		sample.resyncs = m_impl->worldTraffic.resyncs;
+	}
+	sample.receivedBytes = m_impl->publishedReceived.load(std::memory_order_relaxed);
+	sample.sentBytes = m_impl->publishedSent.load(std::memory_order_relaxed);
+	std::ranges::sort(std::span{sample.players}.first(sample.count), {}, [](const auto &player) {
+		return player.id.value;
+	});
+	return sample;
 }
 
 void ServerTransport::start()

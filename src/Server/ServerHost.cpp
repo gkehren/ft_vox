@@ -744,4 +744,20 @@ HostMetrics ServerHost::metrics() const
 			.seed = world.seed};
 }
 
+void ServerHost::fillStatus(monitoring::Status &sample) const
+{
+	const auto streaming = m_sim->world()->playerStreamingStats();
+	sample.ticks = m_ticks;
+	sample.checkpoint = m_sim->worldPersistence()->checkpointGeneration();
+	sample.chunks = streaming.residentChunks;
+	sample.generating = m_sim->world()->pendingGenJobs();
+	sample.waitingForRecord = streaming.waitingForRecord;
+	sample.waitingForGeneration = streaming.waitingForGeneration;
+	sample.registeredProfiles = m_identities->size();
+	const auto registeredInRoster = std::ranges::count_if(sample.transport.roster(), [&](const auto &player) {
+		return m_identities->contains(player.id);
+	});
+	sample.offlineProfiles = sample.registeredProfiles - static_cast<uint64_t>(registeredInRoster);
+}
+
 } // namespace server

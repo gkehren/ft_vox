@@ -1,6 +1,7 @@
 #include <Server/ServerHost.hpp>
 #include <Server/TickSchedule.hpp>
 #include <Server/LauncherControl.hpp>
+#include <Server/MonitorWriter.hpp>
 #include <Server/RolesCommand.hpp>
 
 #include <atomic>
@@ -30,6 +31,7 @@ struct Options
 	std::filesystem::path stopFile;
 	bool launcherControl{};
 	bool launcherBootstrap{};
+	std::optional<uintptr_t> monitorPipe;
 };
 
 static_assert(std::atomic<bool>::is_always_lock_free);
@@ -85,6 +87,7 @@ void printUsage()
 		"  --metrics-every N         completed ticks between log records, 0..1000000 (default 600; 0 disables)\n"
 		"  --stop-file PATH          save and stop when PATH exists\n"
 		"  --launcher-control MODE   inherited stdin: stdin for EOF only, bootstrap for owner startup\n"
+		"  --launcher-monitor ID     optional inherited write-only status pipe\n"
 		"  --help                    show this help\n";
 	server::printRolesUsage();
 }
@@ -153,6 +156,8 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 			options.launcherControl = true;
 			options.launcherBootstrap = value == "bootstrap";
 		}
+		else if (option == "--launcher-monitor" && !options.monitorPipe)
+			number(options.monitorPipe.emplace(), uintptr_t{1}, std::numeric_limits<uintptr_t>::max());
 		else
 			error = "unknown option " + std::string(option);
 		if (!error.empty())
@@ -162,6 +167,8 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 		error = "--world is required";
 	else if (options.launcherControl && options.ticks)
 		error = "--launcher-control requires live mode";
+	else if (options.monitorPipe && !options.launcherControl)
+		error = "--launcher-monitor requires launcher control";
 	return error.empty();
 }
 
@@ -180,11 +187,13 @@ void printMetrics(const server::HostMetrics &metrics, uint64_t droppedTicks, net
 }
 
 const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transport,
-                     const Options &options, uint64_t &droppedTicks, std::string &error)
+                     const Options &options, server::MonitorWriter &monitor, uint64_t &droppedTicks, std::string &error)
 {
 	const bool deterministic = options.ticks > 0;
 	using server::TickSchedule;
-	TickSchedule schedule(TickSchedule::Clock::now(), options.maxCatchUp);
+	const auto started = TickSchedule::Clock::now();
+	TickSchedule schedule(started, options.maxCatchUp);
+	auto nextSample = started;
 	unsigned batchRemaining = 0;
 	const auto timing = deterministic ? server::TerrainTiming::QuiescePerTick : server::TerrainTiming::Background;
 	for (;;)
@@ -241,6 +250,23 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 		}
 		if (!host.step(timing, error))
 			return "runtime_error";
+		if (monitor && transport)
+		{
+			const auto now = TickSchedule::Clock::now();
+			if (now >= nextSample)
+			{
+				nextSample = now + monitoring::kSampleInterval;
+				if (auto sample = transport->tryMonitor())
+				{
+					monitoring::Status status{
+						.sampledMs = monitoring::monotonicMs(),
+						.uptimeMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count()),
+						.droppedTicks = droppedTicks, .transport = *sample};
+					host.fillStatus(status);
+					monitor.offer(status);
+				}
+			}
+		}
 		if (options.metricsEvery && host.ticks() % options.metricsEvery == 0)
 		{
 			std::cout << "SERVER status=metrics";
@@ -274,6 +300,7 @@ ExitCode runServer(const Options &options)
 		std::cerr << "SERVER error=runtime detail=failed to install stop handlers\n";
 		return ExitCode::Run;
 	}
+	server::MonitorWriter monitor(options.monitorPipe);
 	auto config = options.host;
 	if (options.launcherBootstrap)
 	{
@@ -317,7 +344,7 @@ ExitCode runServer(const Options &options)
 					  << " player_cap=" << options.playerCap << " workers=" << options.host.workers
 					  << " restored=" << host.restoredPlayer();
 			printMetrics(host.metrics(), 0);
-			reason = runTicks(host, transport.get(), options, droppedTicks, error);
+			reason = runTicks(host, transport.get(), options, monitor, droppedTicks, error);
 		}
 	}
 	catch (const std::exception &ex)

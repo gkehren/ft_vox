@@ -45,10 +45,32 @@ force stop while an independently supervised child stays alive.
 ctest --test-dir build-cpu -C Release -R '^(ServerSupervisor|ServerLifecycle|ServerRestart|ServerMigration)$' --output-on-failure
 ```
 
-The opt-in Vulkan smoke drives the game host's Start callback, auto-join,
-and a window-close event against a real child. It checks the assigned
-port, profile, suspended solo state, and final checkpoint. Pass a fresh
-temporary directory for the smoke's saves.
+## Hosted monitoring (#287)
+
+Run a native Windows graphical build with an isolated save root and follow
+the hosting steps above. Create a world with a selected profile and port
+0. Expand **Host → Server status** and **Players** once it is ready.
+
+1. Check that uptime and completed ticks advance, and the checkpoint and
+   seat count agree with the active world and host settings.
+2. Join from a second client with a distinct profile. Move that client
+   outside the host's interest and confirm that its player ID remains
+   selectable in the roster. On the guest, check its own **Network** stats
+   and the unavailable server-wide roster.
+3. Disconnect the selected player and verify that its row and selection
+   disappear and the offline count rises. Reconnect with the same profile
+   and verify that the player ID is stable.
+4. Stop the server and watch the save status. The live roster should
+   become unavailable and the committed checkpoint should remain visible.
+
+The CPU `UdpTransport` regression covers a 12-player roster with
+interest-scoped guest snapshots and simulated timeouts. `ServerSupervisor`
+exercises the inherited pipe, live counters, reconnects, stale samples,
+crashes, maximum-size records and a reader that stops draining the feed.
+The opt-in Vulkan `--hosting-smoke` drives Start, auto-join and a
+window-close event against a real child. It checks the assigned port,
+profile, suspended solo state, roster, and final checkpoint. Pass a
+fresh temporary directory for the smoke's saves.
 
 ```powershell
 $smokeRoot = Join-Path $env:TEMP ("ft-vox-host-" + [guid]::NewGuid())

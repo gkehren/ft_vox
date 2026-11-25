@@ -15,12 +15,14 @@ namespace hosting
 class ChildProcess
 {
 public:
-	ChildProcess(const std::filesystem::path &executable, const std::vector<std::filesystem::path> &arguments);
+	ChildProcess(const std::filesystem::path &executable, const std::vector<std::filesystem::path> &arguments,
+		bool monitor = false);
 	~ChildProcess();
 	ChildProcess(const ChildProcess &) = delete;
 	ChildProcess &operator=(const ChildProcess &) = delete;
 
 	size_t readOutput(std::span<char> buffer);
+	size_t readMonitoring(std::span<char> buffer);
 	bool writeControl(std::span<const uint8_t> buffer);
 	std::optional<int> pollExit();
 	void closeControl();

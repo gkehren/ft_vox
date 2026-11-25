@@ -2,6 +2,7 @@
 #include <Hosting/ServerSupervisor.hpp>
 #include <Network/ClientTransport.hpp>
 #include <Server/LauncherControl.hpp>
+#include <Server/MonitorWriter.hpp>
 #include <World/WorldCheckpoint.hpp>
 
 #include "TestMain.hpp"
@@ -105,6 +106,10 @@ void checkRealServer(const fs::path &exe, const fs::path &root)
 	CHECK(std::ranges::find(worlds, settings.world) != worlds.end(), "hosted world can be selected again");
 	CHECK(!supervisor.start(options("Another"), exe, root), "one supervisor owns at most one child");
 	CHECK(!supervisor.forceStop(), "ready server cannot be force stopped directly");
+	const auto empty = await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
+	CHECK(empty.status->transport.count == 0 && empty.status->transport.capacity == 1 &&
+		empty.status->checkpoint == initial.checkpoint && empty.status->ticks > 0,
+		"empty roster and real owner values are published by the child");
 
 	net::udp::ClientTransport client(net::udp::parseAddress(initial.address, initial.port));
 	using Clock = net::udp::ClientTransport::Clock;
@@ -116,6 +121,32 @@ void checkRealServer(const fs::path &exe, const fs::path &root)
 		std::this_thread::sleep_for(10ms);
 	}
 	CHECK(client.status() == net::udp::ClientStatus::Connected, "real client joins the published UDP endpoint");
+	const auto connected = await(supervisor, [&](const Snapshot &s) {
+		client.poll(Clock::now());
+		return s.status && s.status->transport.count == 1 &&
+			s.status->transport.roster().front().state == monitoring::SessionState::Connected;
+	});
+	const auto player = connected.status->transport.roster().front().id;
+	CHECK(client.welcome() && client.welcome()->player == player &&
+		connected.status->registeredProfiles == 1 && connected.status->offlineProfiles == 0 &&
+		connected.status->transport.receivedBytes > 0 && connected.status->transport.sentBytes > 0 &&
+		connected.status->ticks > empty.status->ticks && connected.status->uptimeMs >= 900,
+		"live monitoring carries real sessions, profile counts, traffic and monotonic timing");
+	client.disconnect(Clock::now());
+	const auto left = await(supervisor, [&](const Snapshot &s) {
+		client.poll(Clock::now());
+		return s.status && s.status->transport.count == 0 && client.status() == net::udp::ClientStatus::Disconnected;
+	});
+	CHECK(left.status->offlineProfiles == 1 && left.status->registeredProfiles == 1,
+		"a departed registered profile is counted offline and omitted from the roster");
+	client.connect(Clock::now());
+	const auto rejoined = await(supervisor, [&](const Snapshot &s) {
+		client.poll(Clock::now());
+		return s.status && s.status->transport.count == 1 &&
+			s.status->transport.roster().front().state == monitoring::SessionState::Connected;
+	});
+	CHECK(rejoined.status->transport.roster().front().id == player && rejoined.status->offlineProfiles == 0,
+		"reconnect preserves the registered display identity without a ghost row");
 
 	ServerSupervisor duplicate;
 	CHECK(duplicate.start(settings, exe, root), "duplicate world request launches a separate process");
@@ -125,7 +156,7 @@ void checkRealServer(const fs::path &exe, const fs::path &root)
 
 	supervisor.stop();
 	auto stop = finished(supervisor);
-	CHECK(stop.state == State::Stopped && stop.checkpoint > initial.checkpoint &&
+	CHECK(stop.state == State::Stopped && !stop.status && stop.checkpoint > initial.checkpoint &&
 		std::ranges::any_of(stop.logs, [](const auto &line) { return line.find("reason=launcher saved=1") != std::string::npos; }),
 		"EOF is graceful and a committed checkpoint is required for completion");
 	settings.workers = 2;
@@ -166,7 +197,7 @@ void checkRealServer(const fs::path &exe, const fs::path &root)
 	CHECK(finished(supervisor).state == State::Stopped, "supervisor recovers after startup failures");
 }
 
-int fixture(std::string_view world, const fs::path &root)
+int fixture(std::string_view world, const fs::path &root, std::optional<uintptr_t> inheritedMonitor)
 {
 	if (!server::hasLauncherPipe())
 		return 8;
@@ -181,6 +212,37 @@ int fixture(std::string_view world, const fs::path &root)
 	}
 	std::cout << "SERVER status=ready mode=live transport=udp listen_address=127.0.0.1 port=62001 checkpoint_generation=1"
 		<< std::endl;
+	server::MonitorWriter monitor(world.starts_with("monitor ") ? inheritedMonitor : std::nullopt);
+	if (monitor)
+	{
+		monitoring::Status sample;
+		sample.sampledMs = monitoring::monotonicMs();
+		sample.checkpoint = 1;
+		sample.transport.capacity = 1;
+		sample.transport.count = 1;
+		sample.transport.players[0] = {{2}, monitoring::SessionState::Connected};
+		monitor.offer(sample);
+		if (world == "monitor pressure")
+		{
+			for (unsigned i = 0; i < 130; ++i)
+			{
+				sample.sampledMs = monitoring::monotonicMs();
+				monitor.offer(sample);
+				std::this_thread::sleep_for(20ms);
+			}
+			std::cout << "fixture completed under pressure" << std::endl;
+		}
+		else
+		{
+			while (server::pollLauncherPipe() == server::LauncherInput::Open && !fs::exists(root / "resume-monitor"))
+				std::this_thread::sleep_for(10ms);
+			if (world == "monitor crash")
+				std::_Exit(42);
+			sample.sampledMs = monitoring::monotonicMs();
+			sample.transport.count = 0;
+			monitor.offer(sample);
+		}
+	}
 	if (world == "log updates")
 	{
 		while (server::pollLauncherPipe() == server::LauncherInput::Open && !fs::is_regular_file(root / "emit-log"))
@@ -203,6 +265,77 @@ int fixture(std::string_view world, const fs::path &root)
 	}
 	std::cout << "SERVER status=stopped reason=launcher saved=1 exit_code=0 checkpoint_generation=2" << std::endl;
 	return 0;
+}
+
+void checkMonitorCodec()
+{
+	monitoring::Status status;
+	status.transport.capacity = static_cast<uint16_t>(monitoring::kMaxPlayers);
+	status.transport.count = status.transport.capacity;
+	for (uint32_t i = 0; i < status.transport.count; ++i)
+		status.transport.players[i] = {{i + 2}, monitoring::SessionState::Connected};
+	const auto full = monitoring::decode(monitoring::encode(status));
+	CHECK(full && full->transport.roster().size() == monitoring::kMaxPlayers, "maximum roster fits one bounded record");
+	status.transport.players[1] = status.transport.players[0];
+	CHECK(!monitoring::decode(monitoring::encode(status)), "duplicate player identities are rejected");
+	status.transport.count = 1;
+	auto frame = monitoring::encode(status);
+	frame[4] = 2;
+	CHECK(!monitoring::decode(frame), "unexpected monitor version is rejected");
+	frame = monitoring::encode(status);
+	frame.back() = 1;
+	CHECK(!monitoring::decode(frame), "unused roster padding must be empty");
+	CHECK(!monitoring::fresh(100, 99) && monitoring::fresh(100, 3100) && !monitoring::fresh(100, 3101),
+		"delayed frames and future capture times cannot refresh a stale roster");
+}
+
+void checkMonitoringLifecycle(const fs::path &fixturePath, const fs::path &root)
+{
+	ServerSupervisor supervisor;
+	supervisor.start(options("monitor stale"), fixturePath, root);
+	const auto first = await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
+	CHECK(first.status->transport.count == 1, "fixture published a player before stalling");
+	await(supervisor, [](const Snapshot &s) { return s.state == State::Ready && !s.status; });
+	std::ofstream(root / "resume-monitor").put('\n');
+	const auto resumed = await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
+	CHECK(resumed.status->transport.count == 0, "fresh empty sample replaces expired roster after resuming");
+	supervisor.stop();
+	finished(supervisor);
+
+	fs::remove(root / "resume-monitor");
+	supervisor.start(options("monitor crash"), fixturePath, root);
+	await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
+	std::ofstream(root / "resume-monitor").put('\n');
+	const auto crashed = finished(supervisor);
+	CHECK(crashed.state == State::Failed && !crashed.status, "process crash clears the roster immediately");
+}
+
+void checkMonitorBackpressure(const fs::path &fixturePath, const fs::path &root)
+{
+	hosting::ChildProcess child(fs::absolute(fixturePath),
+		{"--world", "monitor pressure", "--saves-root", root}, true);
+	const auto deadline = std::chrono::steady_clock::now() + 12s;
+	std::string output;
+	bool done = false;
+	// Intentionally leave the monitoring pipe unread for the whole run.
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		std::array<char, 1024> buffer{};
+		output.append(buffer.data(), child.readOutput(buffer));
+		if (!done && output.find("fixture completed under pressure") != std::string::npos)
+		{
+			done = true;
+			child.closeControl();
+		}
+		if (const auto exit = child.pollExit())
+		{
+			CHECK(done && *exit == 0, "full monitor pipe cannot delay the publisher or prevent clean exit");
+			return;
+		}
+		std::this_thread::sleep_for(10ms);
+	}
+	child.forceStop(); // Owned fixture only.
+	CHECK(false, "fixture stalled behind its unread monitor pipe");
 }
 
 void checkSnapshotRevisions(const fs::path &fixturePath, const fs::path &root)
@@ -310,7 +443,12 @@ void checkLauncherLoss(const fs::path &fixturePath, const fs::path &exe, const f
 int main(int argc, char **argv)
 {
 	if (argc >= 5 && std::string_view(argv[1]) == "--world" && std::string_view(argv[3]) == "--saves-root")
-		return fixture(argv[2], argv[4]);
+	{
+		std::optional<uintptr_t> monitor;
+		if (argc >= 7 && std::string_view(argv[argc - 2]) == "--launcher-monitor")
+			monitor = static_cast<uintptr_t>(std::stoull(argv[argc - 1]));
+		return fixture(argv[2], argv[4], monitor);
+	}
 	if (argc == 4 && std::string_view(argv[1]) == "--abandon")
 	{
 		ServerSupervisor supervisor;
@@ -324,7 +462,10 @@ int main(int argc, char **argv)
 	try
 	{
 		checkValidation();
+		checkMonitorCodec();
 		checkRealServer(fs::path(argv[1]), root);
+		checkMonitoringLifecycle(fs::path(argv[0]), root);
+		checkMonitorBackpressure(fs::path(argv[0]), root);
 		checkSnapshotRevisions(fs::path(argv[0]), root);
 		checkSupervision(fs::path(argv[0]), root);
 		checkLauncherLoss(fs::path(argv[0]), fs::path(argv[1]), root);

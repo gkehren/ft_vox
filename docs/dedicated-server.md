@@ -78,6 +78,43 @@ Use the Host log to diagnose a busy port, a held world lock, startup
 delay, migration failure, or a failed checkpoint. CLI servers still
 support `--stop-file` and the existing stop signals.
 
+## Hosted server monitoring
+
+The supervising game can inspect **Host → Server status** and **Players**.
+The roster comes from the dedicated server's admission table and covers
+all admitted sessions, including players outside the local client's
+terrain interest. **Syncing** means the server assigned an actor and is
+waiting for route confirmation or activation. **Connected** means the
+server activated the actor. **Disconnecting** means transport has begun
+retiring the slot. This phase can pass between samples. Persistent
+player IDs identify the selectable rows, and the offline count covers
+only registered profiles outside the current roster. Capacity counts
+network seats and excludes the simulation anchor.
+
+The server offers a sample once per monotonic second. Uptime starts after
+the UDP bind. Completed and dropped ticks are lifetime counters, with a
+60 Hz target and dropped deadlines counted by the server scheduler.
+The last committed checkpoint is shown separately from the supervisor's
+startup, save, and exit status. Streaming counters measure chunk records
+awaiting registration or generation and currently dispatched jobs.
+World sends count staged or in-flight logical updates, including
+baselines. Kernel socket queues are outside these measurements.
+UDP received/sent totals count payload bytes since startup. Oversized
+input datagrams are excluded. World bytes, retransmits and resyncs
+measure the reliable terrain stream.
+
+The launcher receives a bounded, versioned FTMN v1 snapshot over a
+dedicated one-way inherited pipe. The record has fixed-width little-endian
+metrics and at most 255 sorted player IDs and session phases. The
+simulation uses a try-lock for sampling and offers the latest sample to a
+single overwrite slot. A separate worker handles pipe backpressure.
+The panel clears samples older than three seconds or when the server
+leaves Ready. Role credentials, UDP session capabilities and player
+addresses are outside the format. The monitor supplies no server-side
+player RTT. Every client can still see its own RTT, loss, traffic and
+prediction under **Network**. A client attached to another process has no
+local feed for that server's status or roster.
+
 ## Owner and delegated roles
 
 A new GUI world has one primary **owner**. The server reserves and persists
