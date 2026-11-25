@@ -106,19 +106,21 @@ void GameUiSample::handleWindowEvent(Uint32 type)
 	case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 	case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
 		break;
+	case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+		cancelPointerPress();
+		return;
 	default:
 		return;
 	}
 	m_armed = false;
 	m_button = {};
+	invalidateLayout();
 	if (!windowInteractive())
 		m_buttonFocused = false;
 }
 
 GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SDL_Event &event, bool canClick)
 {
-	if (!m_standalone && !canClick)
-		cancelPointerPress();
 	const SDL_WindowID id = SDL_GetWindowID(window);
 	if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)
 	{
@@ -126,6 +128,8 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 			handleWindowEvent(event.type);
 		return InputResult::Unhandled;
 	}
+	if (!m_standalone && !canClick)
+		cancelPointerPress();
 
 	switch (event.type)
 	{
@@ -147,18 +151,18 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 	{
 		if (event.button.windowID != id || event.button.button != SDL_BUTTON_LEFT)
 			return m_standalone ? InputResult::Consumed : InputResult::Unhandled;
-		const bool inside = windowInteractive() && (m_standalone || canClick) &&
+		const bool inside = (m_standalone ? windowInteractive() : canClick) &&
 			contains(m_standalone ? layoutFor(window, {}, true, 0).button() : m_button,
 				event.button.x, event.button.y);
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
-			m_buttonFocused = m_armed = m_ownsPress = inside;
+			m_buttonFocused = m_armed = inside;
 			return inside || m_standalone ? InputResult::Consumed : InputResult::Unhandled;
 		}
-		const bool consumes = m_standalone || m_ownsPress;
+		const bool consumes = m_standalone || m_armed;
 		if (m_armed && inside)
 			activate("mouse");
-		m_ownsPress = m_armed = false;
+		m_armed = false;
 		return consumes ? InputResult::Consumed : InputResult::Unhandled;
 	}
 	case SDL_EVENT_KEY_UP:
@@ -179,15 +183,9 @@ void GameUiSample::activate(const char *source)
 		std::printf("UI spike activated by %s (%u)\n", source, m_activations);
 }
 
-void GameUiSample::text(glm::vec2 pos, std::string_view value, glm::vec4 color, float scale, gameui::Clip clip)
+bool GameUiSample::hitsStrip(float x, float y) const
 {
-	for (const unsigned char c : value)
-	{
-		const Glyph &g = m_glyphs[c < m_glyphs.size() ? c : '?'];
-		if (g.visible)
-			m_draws.glyph(g.rect * scale + glm::vec4(pos, pos), g.uv, color, clip);
-		pos.x += g.advance * scale;
-	}
+	return m_screens.top() == gameui::Screen::Hud && contains(m_button, x, y);
 }
 
 void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent, gameui::Clip view,
@@ -195,18 +193,34 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 {
 	const Layout layout = layoutFor(window, view, m_standalone, m_standalone ? 0 : m_activations);
 	m_draws.reset(layout.windowSize, atlasGeneration);
+	const auto priorButton = m_button;
 	m_button = {};
-	if (layout.scale > 0.f)
+	if (!m_standalone && m_screens.nativeScreen())
+	{
+		const float density = SDL_GetWindowPixelDensity(window);
+		const float display = SDL_GetWindowDisplayScale(window);
+		const float scale = density > 0.f && display > 0.f ? display / density : 1.f;
+		const auto bounds = m_draws.bounds();
+		buildScreen(m_screens.suppressDeveloper() || view.empty() ? bounds : view.intersect(bounds),
+			std::clamp(scale * kScales[m_activations % kScales.size()], 0.75f, 2.f));
+		float x = 0.f, y = 0.f;
+		SDL_GetMouseState(&x, &y);
+		paintScreen(SDL_GetMouseFocus() == window ? glm::vec2{x, y} : glm::vec2{-1});
+	}
+	else if (layout.scale > 0.f && (m_standalone || m_screens.top() == gameui::Screen::Hud))
 	{
 		m_button = layout.button();
+		if (priorButton != m_button)
+			cancelPointerPress();
 		const auto clip = view.empty() ? m_draws.bounds() : view.intersect(m_draws.bounds());
 		const auto panel = [&](glm::vec4 rect, glm::vec4 color) { m_draws.panel(layout.rect(rect), color, clip); };
 		const auto label = [&](glm::vec2 pos, std::string_view caption, glm::vec4 color, float fontScale = 1.f) {
-			text(layout.origin + pos * layout.scale, caption, color, layout.scale * fontScale, clip);
+			font().paint(m_draws, layout.origin + pos * layout.scale, caption, color, layout.scale * fontScale, clip);
 		};
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);
-		const bool hovered = windowInteractive() && SDL_GetMouseFocus() == window && contains(m_button, x, y);
+		const bool hovered = SDL_GetMouseFocus() == window && contains(m_button, x, y) &&
+			(!m_standalone || windowInteractive());
 		const glm::vec4 fill = m_armed && hovered ? kAccent :
 			(hovered ? glm::vec4(0.23f, 0.55f, 0.50f, 0.94f) : glm::vec4(0.15f, 0.38f, 0.37f, 0.9f));
 		const auto focusRing = [&] {

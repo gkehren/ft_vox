@@ -79,6 +79,7 @@ struct GameUiBackendProbe
 		engine.initializeNoiseGenerator(42);
 		engine.stepDerivedProjectionForTests(1.0 / 60.0);
 		engine.enableGameUi();
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
 	}
 
 	visual::RgbaImage capture(Readback &target, gameui::Renderer *ui,
@@ -235,15 +236,379 @@ struct GameUiBackendProbe
 			present();
 	}
 
-	void button(Uint32 type, float x, float y)
+	void button(Uint32 type, float x, float y, Uint8 which = SDL_BUTTON_LEFT)
 	{
 		SDL_Event event{};
 		event.type = type;
 		event.button.windowID = SDL_GetWindowID(engine.window);
-		event.button.button = SDL_BUTTON_LEFT;
+		event.button.button = which;
 		event.button.x = x;
 		event.button.y = y;
 		checked(SDL_PushEvent(&event), "queue Game UI sample click");
+	}
+
+	void motion(float x, float y)
+	{
+		SDL_Event event{};
+		event.type = SDL_EVENT_MOUSE_MOTION;
+		event.motion.windowID = SDL_GetWindowID(engine.window);
+		event.motion.x = x;
+		event.motion.y = y;
+		checked(SDL_PushEvent(&event), "queue pointer motion");
+	}
+
+	void clickAt(glm::vec2 point)
+	{
+		SDL_WarpMouseInWindow(engine.window, point.x, point.y);
+		motion(point.x, point.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y);
+	}
+
+	void commitText(const char *text)
+	{
+		SDL_Event event{};
+		event.type = SDL_EVENT_TEXT_INPUT;
+		event.text.windowID = SDL_GetWindowID(engine.window);
+		event.text.text = text;
+		checked(SDL_PushEvent(&event), "queue committed SDL text");
+	}
+
+	void key(SDL_Keycode code, Uint32 type, bool repeat = false, SDL_Keymod mods = SDL_KMOD_NONE)
+	{
+		SDL_Event event{};
+		event.type = type;
+		event.key.windowID = SDL_GetWindowID(engine.window);
+		event.key.key = code;
+		event.key.scancode = SDL_GetScancodeFromKey(code, nullptr);
+		event.key.repeat = repeat;
+		event.key.mod = mods;
+		checked(SDL_PushEvent(&event), "queue Game UI keyboard event");
+	}
+
+	void tap(SDL_Keycode code, SDL_Keymod mods = SDL_KMOD_NONE)
+	{
+		key(code, SDL_EVENT_KEY_DOWN, false, mods);
+		key(code, SDL_EVENT_KEY_UP, false, mods);
+	}
+
+	void windowEvent(Uint32 type)
+	{
+		SDL_Event event{};
+		event.type = type;
+		event.window.windowID = SDL_GetWindowID(engine.window);
+		checked(SDL_PushEvent(&event), "queue Game UI window event");
+	}
+
+	void showcaseProof()
+	{
+		init();
+		auto &context = *engine.vkContext;
+		const auto before = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
+		auto &sample = *engine.m_playerUi;
+		using gameui::Screen;
+		using gameui::Widget;
+		const auto widget = [&](std::string_view label) -> const Widget & {
+			for (const auto &item : sample.m_widgets.widgets())
+				if (item.label == label)
+					return item;
+			throw std::runtime_error("showcase control missing");
+		};
+		const auto center = [&](std::string_view label) {
+			const auto bounds = sample.m_widgets.bounds(widget(label)).rect;
+			return (glm::vec2(bounds) + glm::vec2(bounds.z, bounds.w)) * 0.5f;
+		};
+		const auto click = [&](glm::vec2 point) {
+			SDL_WarpMouseInWindow(engine.window, point.x, point.y);
+			button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y);
+			button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y);
+		};
+		resize(1920, 1080);
+		frames(3);
+		const auto firstPolicy = engine.inputContext();
+		CHECK(firstPolicy.interactive && !firstPolicy.devKeyboard,
+			"focused WSI test starts with gameplay ownership; focused=" << firstPolicy.interactive
+			<< " developer=" << firstPolicy.devKeyboard);
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && sample.screens().top() == Screen::Inventory &&
+			!engine.mouseCaptured && !engine.simulationSuspended(), "inventory releases cursor without pausing solo");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && sample.screens().top() == Screen::Hud && engine.mouseCaptured,
+			"Escape closes inventory and restores capture");
+
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		engine.handleEvents();
+		CHECK(engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "held W initially belongs to gameplay");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && engine.simulationSuspended() &&
+			!engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W) && !engine.mouseCaptured,
+			"solo Escape opens Pause and clears held gameplay");
+		CHECK(sample.screens().focus() == widget("Resume").id,
+			"new Pause focuses Resume (focus=" << sample.screens().focus() << ", layout revision=" <<
+			sample.m_layoutRevision << ", screen revision=" << sample.screens().revision() << ")");
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		CHECK(sample.screens().focus() == widget("Widget showcase").id,
+			"Tab focuses the showcase opener (focus=" << sample.screens().focus() << ", active=" <<
+			engine.inputContext().interactive << ", developer text=" << engine.inputContext().devText <<
+			", layout=" << sample.m_layoutRevision << ", stack=" << sample.screens().revision() << ")");
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::Showcase && sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window),
+			"keyboard opens showcase and starts SDL text input at the first field (screen=" <<
+			int(sample.screens().top()) << ", focus=" << sample.screens().focus() << ")");
+		SDL_Event editing{};
+		editing.type = SDL_EVENT_TEXT_EDITING;
+		editing.edit.windowID = SDL_GetWindowID(engine.window);
+		editing.edit.text = "a\xc3\xa9";
+		editing.edit.start = 1;
+		editing.edit.length = 1;
+		checked(SDL_PushEvent(&editing), "queue SDL composition");
+		engine.handleEvents();
+		CHECK(sample.m_field.value().empty() && sample.m_field.composition() == "a\xc3\xa9" &&
+			sample.m_field.compositionCursor() == 1 && sample.m_field.compositionEnd() == 3,
+			"SDL preedit preserves a multibyte caret and selection without committing");
+		SDL_Event text{};
+		text.type = SDL_EVENT_TEXT_INPUT;
+		text.text.windowID = SDL_GetWindowID(engine.window);
+		text.text.text = "Qa\xc3\xa9";
+		tap(SDLK_Q);
+		checked(SDL_PushEvent(&text), "queue UTF-8 text commit");
+		present();
+		CHECK(sample.m_field.value() == "Qa\xc3\xa9" && sample.m_field.composition().empty(),
+			"committed text reaches one editor without gameplay ownership");
+		tap(SDLK_LEFT);
+		tap(SDLK_BACKSPACE);
+		present();
+		CHECK(sample.m_field.value() == "Q\xc3\xa9", "caret moves and deletes at UTF-8 boundaries");
+		tap(SDLK_TAB);
+		key(SDLK_SPACE, SDL_EVENT_KEY_DOWN);
+		key(SDLK_SPACE, SDL_EVENT_KEY_DOWN, true);
+		key(SDLK_SPACE, SDL_EVENT_KEY_UP);
+		present();
+		CHECK(!sample.m_feature.value && !sample.m_sdlEditor && !engine.jumpPressed,
+			"toggle fires once and keyboard space does not queue gameplay jump");
+		tap(SDLK_TAB);
+		tap(SDLK_RIGHT);
+		tap(SDLK_TAB);
+		tap(SDLK_DOWN);
+		present();
+		CHECK(std::abs(sample.m_slider.value - 0.55f) < 0.001f && sample.m_list.selection.selected == 1,
+			"keyboard adjusts slider and list selection");
+		SDL_Event wheel{};
+		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
+		wheel.wheel.y = -1.f;
+		wheel.wheel.mouse_x = center("Biome preview").x;
+		wheel.wheel.mouse_y = center("Biome preview").y;
+		checked(SDL_PushEvent(&wheel), "queue SDL wheel");
+		present();
+		CHECK(sample.m_list.selection.first == 1 && sample.m_list.selection.selected == 1, "wheel scrolls only the visible list");
+
+		click(center("Secondary name"));
+		text.text.text = "Secondary";
+		checked(SDL_PushEvent(&text), "queue text for a second editor");
+		present();
+		CHECK(sample.m_secondaryField.value() == "Secondary" && sample.m_field.value() == "Q\xc3\xa9",
+			"two bound text fields keep independent committed values");
+		const std::string longPreedit(gameui::TextField::kMaxBytes, 'W');
+		editing.edit.text = longPreedit.c_str();
+		editing.edit.start = int(longPreedit.size());
+		editing.edit.length = 0;
+		checked(SDL_PushEvent(&editing), "queue horizontally scrolling preedit");
+		engine.handleEvents();
+		SDL_Rect textArea{};
+		int cursor = 0;
+		const auto textGeometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(), sample.m_screenScale);
+		CHECK(SDL_GetTextInputArea(engine.window, &textArea, &cursor) &&
+			textArea.x + cursor == int(std::lround(textGeometry.caretX)) &&
+			textGeometry.caretX == textGeometry.clip.rect.z - sample.m_screenScale,
+			"SDL candidate location follows the visible horizontally scrolled caret");
+		click(center("Secondary level"));
+		click(center("Enable secondary name"));
+		click(center("Secondary name"));
+		text.text.text = "Ignored";
+		checked(SDL_PushEvent(&text), "queue committed text over disabled editor");
+		present();
+		CHECK(!sample.m_enableSecond.value && !sample.m_sdlEditor && !SDL_TextInputActive(engine.window) &&
+			sample.m_secondaryField.value() == "Secondary" && !sample.m_feature.value &&
+			std::abs(sample.m_secondarySlider.value - 0.5f) < 0.01f && std::abs(sample.m_slider.value - 0.55f) < 0.001f,
+			"second slider and toggle are independent, and disabling the field stops its SDL session");
+		CHECK(sample.lastRecordedStats() && sample.lastRecordedStats()->metrics.draws <= 31 &&
+			sample.lastRecordedStats()->metrics.dropped == 0, "two widget groups fit the existing draw budget");
+
+		const auto sliderPoint = center("Preview level");
+		const bool overDeveloper = engine.developerPointerAt(50.f, 12.f) == ImGuiLayer::PointerHit::Interactive;
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, sliderPoint.x, sliderPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, 50.f, 12.f, SDL_BUTTON_RIGHT);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, 50.f, 12.f, SDL_BUTTON_RIGHT);
+		motion(sliderPoint.x + 40.f, sliderPoint.y);
+		engine.handleEvents();
+		CHECK(overDeveloper && sample.m_slider.value > 0.55f && sample.m_widgets.hasPress(),
+			"cross-surface blocked release cannot cancel the native slider");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, sliderPoint.x, sliderPoint.y, SDL_BUTTON_RIGHT);
+		motion(sliderPoint.x + 50.f, sliderPoint.y);
+		engine.handleEvents();
+		const float beforeCancel = sample.m_slider.value;
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		motion(sliderPoint.x - 60.f, sliderPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, sliderPoint.x, sliderPoint.y, SDL_BUTTON_RIGHT);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, sliderPoint.x, sliderPoint.y);
+		present();
+		CHECK(beforeCancel > 0.5f && sample.m_slider.value == beforeCancel && !sample.m_widgets.hasPress(),
+			"two-button native drag does not resume after cancellation or out-of-order releases");
+
+		auto pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		tap(SDLK_ESCAPE);
+		engine.handleEvents();
+		CHECK(!sample.m_feature.value && sample.screens().top() == Screen::Showcase && !engine.windowFocused,
+			"focus loss cancels a press and ignores delayed Escape");
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		const auto previousFocus = sample.screens().focus();
+		click(center("Unavailable"));
+		present();
+		CHECK(sample.screens().top() == Screen::Showcase && sample.screens().focus() == previousFocus,
+			"disabled control cannot focus or activate");
+		const auto oldPanel = sample.m_panel;
+		pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		engine.handleEvents();
+		resize(1160, 680);
+		frames(2);
+		pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		present();
+		CHECK(sample.m_panel != oldPanel && !sample.m_feature.value, "WSI resize reflows geometry and cancels the old press");
+		click(pos);
+		present();
+		CHECK(sample.m_feature.value, "real pointer events hit the relocated control");
+
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id,
+			"back restores focus to the showcase opener");
+		tap(SDLK_TAB);
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::ConfirmExit && engine.suppressDeveloperUi(),
+			"confirmation takes full-window priority over Developer UI");
+		tap(SDLK_F10);
+		present();
+		CHECK(!engine.m_pendingVSync.has_value(), "modal vetoes view-changing globals");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && !engine.suppressDeveloperUi() &&
+			sample.screens().focus() == widget("Exit to desktop").id, "Escape dismisses only the confirmation");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Hud && !engine.simulationSuspended() &&
+			!engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "resume cannot replay held W");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		engine.handleEvents();
+		CHECK(engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "fresh gameplay press works after resume");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		keyboardHandoffProof();
+		context.waitIdle();
+		if (context.isValidationEnabled())
+			CHECK(context.validationErrorCount() - before == context.rtssValidationErrorCount() - rtssBefore,
+				"showcase presentation reports only the known RTSS subset if the hook is loaded");
+	}
+
+	void keyboardHandoffProof()
+	{
+		auto &sample = *engine.m_playerUi;
+		char developerValue[96]{};
+		glm::vec2 developerPoint{};
+		const auto developer = [&] {
+			ImGui::SetNextWindowPos({45.f, 210.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({190.f, 90.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Developer text handoff", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				ImGui::InputText("##handoff", developerValue, sizeof(developerValue));
+				const auto position = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				developerPoint = {position.x - origin.x + 15.f, position.y - origin.y + 8.f};
+			}
+			ImGui::End();
+		};
+		const auto redraw = [&] {
+			for (int frame = 0; frame < 7; ++frame)
+				present(developer);
+		};
+		tap(SDLK_ESCAPE);
+		present(developer);
+		tap(SDLK_TAB);
+		tap(SDLK_RETURN);
+		present(developer);
+		present(developer);
+		CHECK(sample.m_sdlEditor == &sample.m_field, "handoff starts with the native editor active");
+		glm::vec2 nativePoint{};
+		for (const auto &widget : sample.m_widgets.widgets())
+			if (widget.label == "Name")
+			{
+				const auto rect = sample.m_widgets.bounds(widget).rect;
+				nativePoint = {(rect.x + rect.z) * 0.5f, (rect.y + rect.w) * 0.5f};
+			}
+		const std::string originalNative = sample.m_field.value();
+		clickAt(developerPoint);
+		tap(SDLK_END);
+		commitText("dev");
+		engine.handleEvents();
+		CHECK(engine.imgui->pendingKeyboard() && SDL_TextInputActive(engine.window) && !sample.m_sdlEditor &&
+			sample.m_field.value() == originalNative, "native-to-developer press hands over SDL in the same event batch");
+		redraw();
+		CHECK(engine.imgui->editingText() && std::string_view(developerValue) == "dev",
+			"real ImGui InputText consumes its same-batch text");
+
+		commitText("-before");
+		clickAt(nativePoint);
+		tap(SDLK_END);
+		commitText("-native");
+		SDL_Event composition{};
+		composition.type = SDL_EVENT_TEXT_EDITING;
+		composition.edit.windowID = SDL_GetWindowID(engine.window);
+		composition.edit.text = "preview";
+		composition.edit.start = 1;
+		checked(SDL_PushEvent(&composition), "queue preedit after native handoff");
+		engine.handleEvents();
+		CHECK(!engine.imgui->editingText() && !engine.imgui->pendingKeyboard() &&
+			sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window) &&
+			sample.m_field.value() == originalNative + "-native" && sample.m_field.composition() == "preview",
+			"developer-to-native press transfers same-batch keys, commit and preedit");
+
+		// Switch back before ImGui builds. The old editor must still receive
+		// its earlier commit, followed by the newer click and text.
+		clickAt(developerPoint);
+		tap(SDLK_END);
+		commitText("-after");
+		engine.handleEvents();
+		CHECK(sample.m_field.composition().empty() && !sample.m_sdlEditor &&
+			engine.imgui->pendingKeyboard() && SDL_TextInputActive(engine.window),
+			"return to developer clears native composition without dropping the reservation");
+		redraw();
+		CHECK(std::string_view(developerValue) == "dev-before-after" && engine.imgui->editingText() &&
+			sample.m_field.value() == originalNative + "-native",
+			"queued developer commits are preserved across the boundary without receiving native text");
+
+		clickAt(nativePoint);
+		tap(SDLK_END);
+		commitText("-end");
+		redraw();
+		CHECK(!engine.imgui->editingText() && sample.m_sdlEditor == &sample.m_field &&
+			SDL_TextInputActive(engine.window) && sample.m_field.value() == originalNative + "-native-end" &&
+			std::string_view(developerValue) == "dev-before-after",
+			"retiring ImGui does not stop the new native SDL session at EndFrame");
 	}
 
 	static int queuedReleases()
@@ -254,6 +619,93 @@ struct GameUiBackendProbe
 				event.MouseButton.Button == ImGuiMouseButton_Left && !event.MouseButton.Down)
 				++result;
 		return result;
+	}
+
+	void developerDragProof(bool native)
+	{
+		engine.setMouseCaptured(false);
+		bool clicked = false;
+		const glm::vec2 header{150.f, 82.f}, control{145.f, 110.f};
+		const auto floating = [&] {
+			ImGui::SetNextWindowPos({45.f, 70.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({240.f, 113.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Input cancellation proof", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings))
+				clicked |= ImGui::Button("Fresh activation", {200.f, 34.f});
+			ImGui::End();
+		};
+		const auto startDrag = [&] {
+			SDL_WarpMouseInWindow(engine.window, header.x, header.y);
+			motion(header.x, header.y);
+			button(SDL_EVENT_MOUSE_BUTTON_DOWN, header.x, header.y);
+			present(floating);
+			CHECK(ImGui::GetIO().MouseDown[0] && ImGui::GetCurrentContext()->MovingWindow &&
+				engine.m_inputRouter.pointerOwner() == gameui::InputOwner::DeveloperUi,
+				"ImGui title drag owns the held left button");
+		};
+		const auto freshClick = [&] {
+			clicked = false;
+			SDL_WarpMouseInWindow(engine.window, control.x, control.y);
+			motion(control.x, control.y);
+			button(SDL_EVENT_MOUSE_BUTTON_DOWN, control.x, control.y);
+			present(floating);
+			button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y);
+			present(floating);
+			CHECK(clicked, "fresh Developer UI click activates after cancellation");
+		};
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present(floating);
+		present(floating);
+		startDrag();
+		const bool actualFocus = SDL_GetKeyboardFocus() == engine.window;
+#if defined(_WIN32)
+		if (actualFocus)
+			CHECK((SDL_GetWindowFlags(engine.window) & SDL_WINDOW_MOUSE_CAPTURE) != 0,
+				"focused SDL window has OS mouse capture during the developer drag");
+#else
+		(void)actualFocus;
+#endif
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		engine.handleEvents();
+		const int releases = queuedReleases();
+		button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		engine.handleEvents();
+		const auto &imguiContext = *ImGui::GetCurrentContext();
+		bool lost = false, regained = false;
+		for (const auto &event : imguiContext.InputEventsQueue)
+			if (event.Type == ImGuiInputEventType_Focus)
+			{
+				lost |= !event.AppFocused.Focused;
+				regained |= lost && event.AppFocused.Focused;
+			}
+		CHECK(lost && regained && !imguiContext.MovingWindow && !ImGui::GetIO().MouseDown[0] &&
+			!(SDL_GetWindowFlags(engine.window) & SDL_WINDOW_MOUSE_CAPTURE) && releases == queuedReleases() && !clicked,
+			"focus loss and gain survive cancellation and the late release activates nothing");
+		present(floating);
+		present(floating);
+		freshClick();
+
+		if (native)
+		{
+			startDrag();
+			auto &sample = *engine.m_playerUi;
+			checked(sample.m_screens.push(gameui::Screen::ConfirmExit), "suppress developer UI during drag");
+			sample.invalidateLayout();
+			engine.syncUiInput();
+			const int modalReleases = queuedReleases();
+			button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y);
+			engine.handleEvents();
+			CHECK(!imguiContext.MovingWindow && !ImGui::GetIO().MouseDown[0] &&
+				!(SDL_GetWindowFlags(engine.window) & SDL_WINDOW_MOUSE_CAPTURE) &&
+				engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None && modalReleases == queuedReleases(),
+				"native modal cancels the developer drag, OS capture and the late release");
+			sample.back();
+			engine.syncUiInput();
+			present(floating);
+			present(floating);
+			freshClick();
+		}
 	}
 
 	void pointerProof()
@@ -296,26 +748,30 @@ struct GameUiBackendProbe
 		motion.motion.y = pos.y;
 		checked(SDL_PushEvent(&motion), "queue pointer movement across the floating window");
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		tap(SDLK_P);
 		present(floating);
 		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
 		present(floating);
 		present(floating);
 		CHECK(sample.m_activations == 4 && floatingClicked,
 			"a click before NewFrame belongs to the ImGui window covering Game UI");
+		CHECK(sample.screens().top() == gameui::Screen::Hud,
+			"a gameplay shortcut queued with the developer press cannot open the pause menu");
 
 		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
 		frames(2);
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
 		engine.handleEvents();
-		CHECK(sample.m_armed && sample.m_ownsPress, "Game UI owns the uncovered press");
+		CHECK(sample.m_armed && engine.m_inputRouter.pointerOwner() == gameui::InputOwner::PlayerUi,
+			"Game UI owns the uncovered press");
 		engine.setMouseCaptured(true);
-		CHECK(engine.mouseCaptured && !sample.m_armed && sample.m_ownsPress,
+		CHECK(engine.mouseCaptured && !sample.m_armed && engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None,
 			"gameplay capture cancels activation and preserves release ownership");
 		const int releasesBeforeCapture = queuedReleases();
 		engine.setMouseCaptured(false);
 		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
 		engine.handleEvents();
-		CHECK(!engine.mouseCaptured && !sample.m_ownsPress && sample.m_activations == 4 &&
+		CHECK(!engine.mouseCaptured && !sample.m_armed && sample.m_activations == 4 &&
 			queuedReleases() == releasesBeforeCapture,
 			"releasing the cursor does not rearm or deliver the cancelled press to ImGui");
 
@@ -332,7 +788,8 @@ struct GameUiBackendProbe
 				ImGui::EndPopup();
 			}
 		});
-		CHECK(!sample.m_armed && sample.m_ownsPress, "opening a dialog between SDL events cancels activation");
+		CHECK(!sample.m_armed && engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None,
+			"opening a dialog between SDL events cancels activation");
 		present([] {
 			if (ImGui::BeginPopupModal("Proof dialog"))
 			{
@@ -343,8 +800,67 @@ struct GameUiBackendProbe
 		const int releasesBeforeDialog = queuedReleases();
 		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
 		engine.handleEvents();
-		CHECK(!sample.m_ownsPress && sample.m_activations == 4 && queuedReleases() == releasesBeforeDialog,
+		CHECK(!sample.m_armed && sample.m_activations == 4 && queuedReleases() == releasesBeforeDialog,
 			"closing the dialog keeps the cancelled release with its original owner");
+
+		const auto overlay = [&](bool passThrough) {
+			ImGui::SetNextWindowPos({pos.x - 52.f, pos.y - 30.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({104.f, 60.f}, ImGuiCond_Always);
+			if (ImGui::Begin(passThrough ? "Pass through proof" : "Passive cover proof", nullptr,
+				ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				if (passThrough)
+					ImGuiLayer::markCurrentWindowPassThrough();
+				ImGui::TextUnformatted("Status");
+			}
+			ImGui::End();
+		};
+		present([&] { overlay(false); });
+		CHECK(engine.developerPointerAt(pos.x, pos.y) == ImGuiLayer::PointerHit::Occludes,
+			"passive overlay shields its visible rectangle");
+		clickAt(pos);
+		present([&] { overlay(false); });
+		CHECK(sample.m_activations == 4 && !engine.imgui->pendingKeyboard(),
+			"passive overlay consumes neither a native click nor developer keyboard ownership");
+		present([&] { overlay(true); });
+		CHECK(engine.developerPointerAt(pos.x, pos.y) == ImGuiLayer::PointerHit::PassThrough,
+			"marked HUD overlay leaves the lower surface reachable");
+		clickAt(pos);
+		present([&] { overlay(true); });
+		CHECK(sample.m_activations == 5, "pass-through HUD permits the native scale click");
+	}
+
+	void legacyUnfocusProof()
+	{
+		char value[32]{};
+		const auto editor = [&] {
+			ImGui::SetNextWindowPos({45.f, 210.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({190.f, 90.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Legacy unfocus proof", nullptr, ImGuiWindowFlags_NoDecoration |
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings))
+				ImGui::InputText("##legacy", value, sizeof(value));
+			ImGui::End();
+		};
+		present(editor);
+		clickAt({86.f, 225.f});
+		present(editor);
+		present(editor);
+		CHECK(engine.imgui->editingText(), "legacy fixture activates a real ImGui editor");
+		CHECK(engine.developerPointerAt(500.f, 330.f) == ImGuiLayer::PointerHit::PassThrough,
+			"legacy game view is clear at the click-to-unfocus target");
+		commitText("before");
+		clickAt({500.f, 330.f});
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		commitText("ignored");
+		engine.handleEvents();
+		CHECK(!engine.imgui->editingText() && engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W),
+			"legacy gameplay click releases the editor and restores keyboard routing in the batch");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		for (int frame = 0; frame < 4; ++frame)
+			present(editor);
+		CHECK(std::string_view(value) == "before" && !engine.imgui->editingText() && !SDL_TextInputActive(engine.window),
+			"legacy editor commits only its pre-click text and relinquishes SDL");
 	}
 
 	void presentProof(const std::filesystem::path &out)
@@ -389,6 +905,11 @@ struct GameUiBackendProbe
 				stats.draws <= 8 && stats.dropped == 0, "resize, scale and reload retain a bounded UI allocation footprint");
 		}
 		pointerProof();
+		developerDragProof(true);
+		auto native = std::move(engine.m_playerUi);
+		developerDragProof(false);
+		legacyUnfocusProof();
+		engine.m_playerUi = std::move(native);
 		context.waitIdle();
 		if (context.isValidationEnabled())
 		{
@@ -496,6 +1017,14 @@ int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output)
 	GameUiBackendProbe(engine).presentProof(output);
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI present proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runGameUiShowcaseProof(Engine &engine)
+{
+	GameUiBackendProbe(engine).showcaseProof();
+	if (testmain::fails == 0)
+		std::cout << "PASS: Game UI showcase proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }
 

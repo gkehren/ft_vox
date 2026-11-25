@@ -28,6 +28,7 @@ int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
 int runUiSpikeSmoke(Engine &engine);
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output);
 int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
+int runGameUiShowcaseProof(Engine &engine);
 int runGameUiPerformance(Engine &engine);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
 	const std::filesystem::path &evidence, bool restoring);
@@ -77,6 +78,8 @@ int main(int argc, char **argv)
 			return runGameUiScreenshot(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-present-proof")
 			return runGameUiPresentProof(*engine, argv[2]);
+		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-showcase-proof")
+			return runGameUiShowcaseProof(*engine);
 		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-performance")
 			return runGameUiPerformance(*engine);
 		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")

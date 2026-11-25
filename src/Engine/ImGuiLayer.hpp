@@ -21,7 +21,11 @@ public:
 	/// Returns true if backend-owned descriptors were invalidated by reinit.
 	bool onSwapchainRecreate(VkSwapchain &swapchain);
 
-	void processEvent(const SDL_Event &event);
+	void processEvent(const SDL_Event &event, bool takingTextInput = false);
+	void observePointer(float x, float y);
+	void observeModifiers(SDL_Keymod mods);
+	void cancelInput();
+	void yieldKeyboard();
 	void beginFrame();
 	void endFrame(); // ImGui::Render()
 
@@ -30,8 +34,13 @@ public:
 
 	bool wantCaptureKeyboard() const;
 	bool wantCaptureMouse() const;
-	// Checks the latest drawn ImGui windows at the SDL event's coordinates.
-	bool blocksGameUiPointer(float x, float y) const;
+	bool editingText() const;
+	bool hasModal() const;
+	bool ownsActiveInput() const;
+	bool pendingKeyboard() const;
+	enum class PointerHit { PassThrough, Occludes, Interactive };
+	PointerHit pointerHit(float x, float y) const;
+	static void markCurrentWindowPassThrough();
 
 	/// Current UI scale (1.0 = 100%). Derived from the display content scale
 	/// at startup, overridden by the persisted value in imgui.ini.
@@ -46,6 +55,8 @@ public:
 private:
 	void initVulkanBackend(VkContext &context, VkSwapchain &swapchain);
 	void registerScaleSettingsHandler();
+	void stopTextInput();
+	void finishKeyboardYield();
 
 	bool m_initialized{false};
 	bool m_vulkanInitialized{false};
@@ -58,5 +69,9 @@ private:
 	float m_pendingUiScale{0.f};
 	float m_framebufferScale{1.f};
 	bool m_hadIniAtStartup{false};
+	unsigned m_pendingPressEvent{};
+	unsigned m_yieldThroughEvent{};
+	int m_keyboardReleasedFrame{-1};
+	bool m_provisionalTextInput{};
 	SDL_Window *m_window{nullptr};
 };

@@ -63,6 +63,9 @@ Engine::Engine(std::string resourcePackRoot)
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
+	// Developer capture is explicit. SDL auto-capture would otherwise
+	// retain the window after the router quarantines a physical button.
+	SDL_SetHintWithPriority(SDL_HINT_MOUSE_AUTO_CAPTURE, "0", SDL_HINT_OVERRIDE);
 
 	// Shared loader probe (VkLoadLibrary.hpp) — same path used by test_vulkan_resources.
 	if (!loadVulkanLibrary(&std::cout))
@@ -162,11 +165,15 @@ Engine::Engine(std::string resourcePackRoot)
 
 	camera.setWindow(window);
 	camera.setMovementSpeed(20.f);
-	SDL_SetWindowRelativeMouseMode(window, true);
+	setMouseCaptured(true);
 
 	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 
 	SDL_ShowWindow(window);
+	const auto initialWindowState = SDL_GetWindowFlags(window);
+	windowFocused = (initialWindowState & SDL_WINDOW_INPUT_FOCUS) != 0;
+	m_windowHidden = (initialWindowState & SDL_WINDOW_HIDDEN) != 0;
+	m_windowMinimized = (initialWindowState & SDL_WINDOW_MINIMIZED) != 0;
 
 	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
@@ -183,6 +190,8 @@ Engine::~Engine()
 		m_remote->disconnect();
 	if (vkContext)
 		vkContext->waitIdle();
+	if (m_playerUi)
+		m_playerUi->updateTextInput(window, false);
 	m_playerUi.reset();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
@@ -257,6 +266,13 @@ void Engine::resetWorldProjection()
 	m_itemSnapshots.clear();
 	m_itemStates.clear();
 	m_itemEventsScratch.clear();
+	clearGameplayInput();
+	m_inputRouter.cancelPlayerUi();
+	if (m_playerUi)
+	{
+		m_playerUi->resetScreens();
+		m_inventoryPanelOpen = false;
+	}
 	if (worldRenderer)
 	{
 		// Drop the renderer's mob presentation too: setMobs is otherwise
@@ -680,7 +696,7 @@ void Engine::tickDayCycle(double dt)
 	// must still track dayTime and the current view distance every frame:
 	// otherwise a view-distance change (or atmosphere edit) made while
 	// paused would leave stale fog values until the world unpauses.
-	if (!paused && shaderParams.dayCycleEnabled)
+	if (!paused && !nativePause() && shaderParams.dayCycleEnabled)
 	{
 		shaderParams.dayTime = std::fmod(shaderParams.dayTime + static_cast<float>(dt) * shaderParams.dayCycleSpeed, 1.0f);
 		if (shaderParams.dayTime < 0.f)
@@ -694,7 +710,7 @@ void Engine::tickStreaming(double dt)
 	PROFILE_SCOPE("Streaming");
 	if (!renderBridge)
 		return;
-	if (paused)
+	if (paused || nativePause())
 	{
 		{
 			PROFILE_SCOPE("Visibility");
@@ -877,21 +893,6 @@ void Engine::updateHighlight()
 		worldRenderer->overlays().setHighlight(highlight);
 }
 
-void Engine::setMouseCaptured(bool captured)
-{
-	if (captured && m_playerUi)
-		m_playerUi->cancelPointerPress();
-	mouseCaptured = captured;
-	SDL_SetWindowRelativeMouseMode(window, captured);
-}
-
-bool Engine::gameUiCanClickAt(float x, float y) const
-{
-	return !mouseCaptured && !m_benchmark.locksInput() &&
-		!(gameUi && gameUi->isFileDialogOpen()) &&
-		!(imgui && !m_inspectionView && imgui->blocksGameUiPointer(x, y));
-}
-
 void Engine::handleEvents()
 {
 	// Shortcut-routing frame built ONCE per event batch (review §4.8): the
@@ -903,36 +904,11 @@ void Engine::handleEvents()
 	shortcutFrame.setVSync = [this](bool v) { setVSync(v); };
 
 	SDL_Event event;
+	syncUiInput();
 	while (SDL_PollEvent(&event))
 	{
-		if (m_playerUi)
-		{
-			bool canClick = true;
-			if (!m_uiSpike)
-			{
-				if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP)
-					canClick = gameUiCanClickAt(event.button.x, event.button.y);
-				else if (m_playerUi->hasArmedPress())
-				{
-					float x = 0.f, y = 0.f;
-					if (event.type == SDL_EVENT_MOUSE_MOTION)
-					{
-						x = event.motion.x;
-						y = event.motion.y;
-					}
-					else
-						SDL_GetMouseState(&x, &y);
-					canClick = gameUiCanClickAt(x, y);
-				}
-			}
-			const auto result = m_playerUi->handleEvent(window, event, canClick);
-			if (result == GameUiSample::InputResult::Exit)
-				requestExit();
-			if (result != GameUiSample::InputResult::Unhandled)
-				continue;
-		}
-		if (imgui && !m_uiSpike)
-			imgui->processEvent(event);
+		if (routeUiEvent(event))
+			continue;
 
 		switch (event.type)
 		{
@@ -943,17 +919,45 @@ void Engine::handleEvents()
 			if (event.window.windowID == SDL_GetWindowID(window))
 				requestExit();
 			break;
+		case SDL_EVENT_WINDOW_HIDDEN:
+			m_windowHidden = true;
+			[[fallthrough]];
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			windowFocused = false;
-			jumpPressed = false;
+			m_inputRouter.cancelAll();
+			clearGameplayInput();
+			cancelDeveloperInput();
 			if (sim)
 				sim->suspendPlayer();
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+		{
 			windowFocused = true;
-			jumpPressed = false;
+			int count = 0;
+			const bool *keys = SDL_GetKeyboardState(&count);
+			for (int key = 1; key < count; ++key)
+				m_inputRouter.reconcileKey(size_t(key), keys[key]);
+			const SDL_MouseButtonFlags buttons = SDL_GetMouseState(nullptr, nullptr);
+			for (unsigned button = 1; button < 32; ++button)
+				m_inputRouter.reconcileButton(button, (buttons & SDL_BUTTON_MASK(button)) != 0);
+			clearGameplayInput();
+			SDL_GetRelativeMouseState(nullptr, nullptr);
 			if (sim)
 				sim->suspendPlayer();
+			break;
+		}
+		case SDL_EVENT_WINDOW_SHOWN:
+			m_windowHidden = false;
+			break;
+		case SDL_EVENT_WINDOW_MINIMIZED:
+			m_windowMinimized = true;
+			m_inputRouter.cancelAll();
+			clearGameplayInput();
+			cancelDeveloperInput();
+			break;
+		case SDL_EVENT_WINDOW_RESTORED:
+		case SDL_EVENT_WINDOW_MAXIMIZED:
+			m_windowMinimized = false;
 			break;
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			// Pixel semantics only (review §4.8): SDL_EVENT_WINDOW_RESIZED
@@ -978,7 +982,6 @@ void Engine::handleEvents()
 			if (event.key.repeat)
 				break;
 			const SDL_Keycode key = event.key.key;
-			const bool uiCapturesKeyboard = imgui && imgui->wantCaptureKeyboard();
 			const KeyRoute keyRoute = classifyKeyRoute(static_cast<int>(key));
 
 			// Input routing policy (issue #76): F-key panel/VSync shortcuts
@@ -994,17 +997,13 @@ void Engine::handleEvents()
 
 			if (key == SDLK_ESCAPE)
 			{
-				// Escape is forwarded to ImGui first. ImGuiFileDialog
-				// handles its own Escape-to-cancel path; the engine only
-				// decides whether Escape may quit.
-				if (escapeShouldQuit(uiCapturesKeyboard,
-									 gameUi && gameUi->isFileDialogOpen()))
+				if (m_playerUi)
+					m_playerUi->openPause();
+				else
 					requestExit();
 				break;
 			}
 
-			if (uiCapturesKeyboard)
-				break;
 			if (m_benchmark.isActive() || !windowFocused)
 				break;
 			if (key == SDLK_SPACE && !paused)
@@ -1026,6 +1025,11 @@ void Engine::handleEvents()
 
 			if (keyRoute == KeyRoute::GameplayShortcut)
 			{
+				if (key == SDLK_P && m_playerUi && !m_remote)
+				{
+					m_playerUi->openPause();
+					break;
+				}
 				if (gameUi->handleGameplayShortcut(static_cast<int>(key), shortcutFrame))
 					break;
 
@@ -1064,10 +1068,7 @@ void Engine::handleEvents()
 			}
 			if (key == SDLK_E)
 			{
-				// Inventory-panel UI flag; the panel itself lands in #229.
-				m_inventoryPanelOpen = !m_inventoryPanelOpen;
-				if (m_remote)
-					setMouseCaptured(!m_inventoryPanelOpen);
+				setInventoryOpen(!m_inventoryPanelOpen);
 				break;
 			}
 			if (key == SDLK_T)
@@ -1089,19 +1090,13 @@ void Engine::handleEvents()
 			break;
 		}
 		case SDL_EVENT_MOUSE_MOTION:
-			if (m_benchmark.locksInput())
-				break;
-			if (mouseCaptured && !(imgui && imgui->wantCaptureMouse()))
+			if (mouseCaptured)
 			{
 				camera.processMouseMovement(static_cast<float>(event.motion.xrel),
 											static_cast<float>(event.motion.yrel));
 			}
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			if (imgui && imgui->wantCaptureMouse())
-				break;
-			if (m_benchmark.locksInput())
-				break;
 			if (!mouseCaptured || !renderBridge || paused)
 				break;
 			if (m_remote)
@@ -1156,13 +1151,11 @@ void Engine::handleEvents()
 			}
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
-			if (camera.getMode() == CameraMode::ISOMETRIC &&
-				!(imgui && imgui->wantCaptureMouse()))
+			if (camera.getMode() == CameraMode::ISOMETRIC)
 			{
 				camera.addIsometricZoom(static_cast<float>(event.wheel.y) * 4.f);
 			}
-			else if (mouseCaptured && !(imgui && imgui->wantCaptureMouse()) &&
-					 !m_benchmark.locksInput() && event.wheel.y != 0)
+			else if (mouseCaptured && event.wheel.y != 0)
 			{
 				// Hotbar cycle (issue #227): wheel up = previous slot, down =
 				// next, wrapping 0..8. Selection is inventory management, so
@@ -1179,6 +1172,7 @@ void Engine::handleEvents()
 		default:
 			break;
 		}
+		syncUiInput();
 	}
 }
 
@@ -1197,12 +1191,19 @@ void Engine::processInput(double dt)
 	// Isometric is an inspection mode; it must never move a physical body.
 	if (sim && camera.getMode() == CameraMode::ISOMETRIC && !sim->playerFlight())
 		setPlayerFlight(true);
-	const bool captured = (imgui && imgui->wantCaptureKeyboard()) ||
-		(m_remote && (!windowFocused || !mouseCaptured || m_inventoryPanelOpen));
-	const bool *keys = SDL_GetKeyboardState(nullptr);
+	const bool captured = !m_movementAllowed;
+	static_assert(SDL_SCANCODE_COUNT <= gameui::InputRouter::kKeys);
+	std::array<bool, SDL_SCANCODE_COUNT> keys{};
+	if (!captured)
+	{
+		const bool *physical = SDL_GetKeyboardState(nullptr);
+		for (const auto key : {SDL_SCANCODE_W, SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_D,
+			SDL_SCANCODE_SPACE, SDL_SCANCODE_LSHIFT})
+			keys[key] = physical[key] && m_inputRouter.gameplayKey(size_t(key));
+	}
 	if (sim && sim->playerFlight())
 	{
-		if (!captured) camera.processKeyboard(std::min(dt, 0.05), keys);
+		if (!captured) camera.processKeyboard(std::min(dt, 0.05), keys.data());
 		resetPlayerAtCamera();
 		return;
 	}
@@ -1565,10 +1566,13 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	if (!imgui || !gameUi || m_inspectionView)
+	if (!imgui || !gameUi || m_inspectionView || suppressDeveloperUi())
 		return;
 
 	const bool prevCapture = mouseCaptured;
+	bool presentedCapture = mouseCaptured;
+	bool presentedPause = paused || nativePause();
+	const bool prevPause = presentedPause;
 
 	GameUIFrame f{};
 	f.camera = &camera;
@@ -1653,7 +1657,7 @@ void Engine::drawUi()
 	// callbacks, the inventory discipline — no mutable pointer into
 	// authoritative state crosses into the UI.
 	f.highlight = &highlight;
-	f.mouseCaptured = &mouseCaptured;
+	f.mouseCaptured = &presentedCapture;
 	f.showChunkBorders = &showChunkBorders;
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
@@ -1667,7 +1671,7 @@ void Engine::drawUi()
 		f.showDemoPlayers = &showDemoPlayers;
 		f.mobsEnabled = sim->mobsEnabled();
 		f.setMobsEnabled = [this](bool enabled) { sim->setMobsEnabled(enabled); };
-		f.paused = &paused;
+		f.paused = &presentedPause;
 		sim->inventorySnapshot(f.inventory);
 		f.selectHotbarSlot = [this](int slot) { selectHotbarSlot(slot); };
 		f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
@@ -1767,8 +1771,23 @@ void Engine::drawUi()
 
 	gameUi->draw(f);
 
-	if (mouseCaptured != prevCapture)
-		setMouseCaptured(mouseCaptured);
+	if (presentedPause != prevPause)
+	{
+		if (!m_playerUi)
+			paused = presentedPause;
+		else if (presentedPause)
+		{
+			setInventoryOpen(false);
+			m_playerUi->openPause();
+		}
+		else
+		{
+			paused = false;
+			m_playerUi->closePause();
+		}
+	}
+	if (presentedCapture != prevCapture)
+		setMouseCaptured(presentedCapture);
 	if (worldRenderer)
 		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 
@@ -1826,7 +1845,7 @@ void Engine::updateWindowTitle(double currentFrame)
 				  fps,
 				  renderBridge ? renderBridge->chunkCount() : 0,
 				  drawList.size(), worldSeed(),
-				  paused ? " [PAUSED]" : "", benchTag);
+				  (paused || nativePause()) ? " [PAUSED]" : "", benchTag);
 	SDL_SetWindowTitle(window, title);
 }
 
@@ -1870,8 +1889,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 		{
 			float x = 0.f, y = 0.f;
 			SDL_GetMouseState(&x, &y);
-			if (!gameUiCanClickAt(x, y))
-				m_playerUi->cancelPointerPress();
+			if (mouseCaptured || m_benchmark.locksInput() || inputContext().devDialog ||
+				developerPointerAt(x, y) != ImGuiLayer::PointerHit::PassThrough)
+				cancelGameUiPointer();
 		}
 		gameui::Clip view{};
 		if (gameUi && !m_uiSpike && !m_inspectionView)
@@ -1883,14 +1903,15 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 		}
 		m_playerUi->prepare(window, frameIndex, swapchain->getExtent(), view,
 			worldRenderer->getTextureManager(), m_atlasVersion);
+		syncUiInput();
 	}
 	std::function<void(VkCommandBuffer)> devUiDraw;
-	if (imgui && !m_uiSpike && !m_inspectionView)
+	if (imgui && !m_uiSpike && !m_inspectionView && !suppressDeveloperUi())
 		devUiDraw = [&](VkCommandBuffer cmd) { imgui->recordDraw(cmd); };
 	worldRenderer->recordFrame(
 		frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, kClearColor,
 		[&](VkCommandBuffer cmd) {
-			if (renderBridge && uploadBudget > 0 && !paused)
+			if (renderBridge && uploadBudget > 0 && !paused && !nativePause())
 			{
 				PROFILE_SCOPE("MeshUpload");
 				// Barrier keyed on COPIES RECORDED, not publications (review M2):
@@ -1937,11 +1958,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 void Engine::enableGameUi(bool standalone)
 {
 	auto sample = std::make_unique<GameUiSample>();
-	if (standalone && !SDL_SetWindowRelativeMouseMode(window, false))
+	if (standalone && !setMouseCaptured(false))
 		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
 	sample->init(window, *vkContext, *immediate, swapchain->getImageFormat(), swapchain->getColorSpace(), standalone);
-	if (standalone)
-		mouseCaptured = false;
 	m_uiSpike = standalone;
 	m_playerUi = std::move(sample);
 }
@@ -2037,7 +2056,7 @@ void Engine::run()
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
 		if (pixelW == 0 || pixelH == 0 ||
-			((m_remote || m_playerUi) && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
+			(SDL_GetWindowFlags(window) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)))
 		{
 			if (m_remote)
 				pollRemote();
@@ -2148,6 +2167,7 @@ void Engine::run()
 			imgui->beginFrame();
 			drawUi();
 			imgui->endFrame();
+			syncUiInput();
 		}
 
 		// (13) Presentation uniforms (underwater sample + frame UBO).

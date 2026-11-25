@@ -339,6 +339,9 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/MultiplayerJoin.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUiSample.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/EngineUiInput.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUiShowcase.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIInventory.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIMultiplayer.cpp

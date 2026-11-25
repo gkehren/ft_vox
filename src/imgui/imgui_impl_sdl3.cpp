@@ -327,6 +327,17 @@ static ImGuiViewport* ImGui_ImplSDL3_GetViewportForWindowID(SDL_WindowID window_
 // - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
 // - When io.WantCaptureKeyboard is true, do not dispatch keyboard input data to your main application, or clear/overwrite your copy of the keyboard data.
 // Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
+void ImGui_ImplSDL3_CancelMouseCapture()
+{
+    ImGui_ImplSDL3_Data* bd = ImGui_ImplSDL3_GetBackendData();
+    if (bd == nullptr || bd->MouseButtonsDown == 0)
+        return;
+    bd->MouseButtonsDown = 0;
+#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
+    SDL_CaptureMouse(false);
+#endif
+}
+
 bool ImGui_ImplSDL3_ProcessEvent(const SDL_Event* event)
 {
     ImGui_ImplSDL3_Data* bd = ImGui_ImplSDL3_GetBackendData();
@@ -378,6 +389,11 @@ bool ImGui_ImplSDL3_ProcessEvent(const SDL_Event* event)
             io.AddMouseSourceEvent(event->button.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
             io.AddMouseButtonEvent(mouse_button, (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN));
             bd->MouseButtonsDown = (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? (bd->MouseButtonsDown | (1 << mouse_button)) : (bd->MouseButtonsDown & ~(1 << mouse_button));
+#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
+            // ft_vox disables SDL auto-capture so cancelled routed presses
+            // can release OS capture. Capture real backend edges immediately.
+            SDL_CaptureMouse(bd->MouseButtonsDown != 0);
+#endif
             return true;
         }
         case SDL_EVENT_TEXT_INPUT:
