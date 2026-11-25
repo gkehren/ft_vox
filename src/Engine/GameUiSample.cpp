@@ -121,8 +121,6 @@ void GameUiSample::handleWindowEvent(Uint32 type)
 
 GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SDL_Event &event, bool canClick)
 {
-	if (!m_standalone && !canClick)
-		cancelPointerPress();
 	const SDL_WindowID id = SDL_GetWindowID(window);
 	if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)
 	{
@@ -130,6 +128,8 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 			handleWindowEvent(event.type);
 		return InputResult::Unhandled;
 	}
+	if (!m_standalone && !canClick)
+		cancelPointerPress();
 
 	switch (event.type)
 	{
@@ -156,13 +156,13 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 				event.button.x, event.button.y);
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
-			m_buttonFocused = m_armed = m_ownsPress = inside;
+			m_buttonFocused = m_armed = inside;
 			return inside || m_standalone ? InputResult::Consumed : InputResult::Unhandled;
 		}
-		const bool consumes = m_standalone || m_ownsPress;
+		const bool consumes = m_standalone || m_armed;
 		if (m_armed && inside)
 			activate("mouse");
-		m_ownsPress = m_armed = false;
+		m_armed = false;
 		return consumes ? InputResult::Consumed : InputResult::Unhandled;
 	}
 	case SDL_EVENT_KEY_UP:
@@ -181,29 +181,6 @@ void GameUiSample::activate(const char *source)
 	++m_activations;
 	if (m_standalone)
 		std::printf("UI spike activated by %s (%u)\n", source, m_activations);
-}
-
-void GameUiSample::text(glm::vec2 pos, std::string_view value, glm::vec4 color, float scale, gameui::Clip clip)
-{
-	for (size_t i = 0; i < value.size(); i = gameui::nextUtf8(value, i))
-	{
-		const auto c = static_cast<unsigned char>(value[i]);
-		const Glyph &g = m_glyphs[c >= 32 && c < m_glyphs.size() ? c : '?'];
-		if (g.visible)
-			m_draws.glyph(g.rect * scale + glm::vec4(pos, pos), g.uv, color, clip);
-		pos.x += g.advance * scale;
-	}
-}
-
-float GameUiSample::textWidth(std::string_view value, float scale) const
-{
-	float width = 0.f;
-	for (size_t i = 0; i < value.size(); i = gameui::nextUtf8(value, i))
-	{
-		const auto c = static_cast<unsigned char>(value[i]);
-		width += m_glyphs[c >= 32 && c < m_glyphs.size() ? c : '?'].advance;
-	}
-	return width * scale;
 }
 
 bool GameUiSample::hitsStrip(float x, float y) const
@@ -238,7 +215,7 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 		const auto clip = view.empty() ? m_draws.bounds() : view.intersect(m_draws.bounds());
 		const auto panel = [&](glm::vec4 rect, glm::vec4 color) { m_draws.panel(layout.rect(rect), color, clip); };
 		const auto label = [&](glm::vec2 pos, std::string_view caption, glm::vec4 color, float fontScale = 1.f) {
-			text(layout.origin + pos * layout.scale, caption, color, layout.scale * fontScale, clip);
+			font().paint(m_draws, layout.origin + pos * layout.scale, caption, color, layout.scale * fontScale, clip);
 		};
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);

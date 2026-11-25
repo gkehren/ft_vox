@@ -42,39 +42,30 @@ private:
 	friend struct UiSpikeProbe;
 	friend struct GameUiBackendProbe;
 
-	struct Glyph
-	{
-		glm::vec4 rect{}, uv{};
-		float advance{};
-		bool visible{};
-	};
-
 	void handleWindowEvent(Uint32 type);
 	bool windowInteractive() const;
 	void activate(const char *source);
-	void text(glm::vec2 pos, std::string_view text, glm::vec4 color, float scale, gameui::Clip clip);
-	float textWidth(std::string_view value, float scale) const;
+	gameui::FontView font() const { return {m_glyphs}; }
 	void buildScreen(gameui::Clip scene, float scale);
 	void paintScreen(glm::vec2 pointer);
-	void focusControl(const gameui::Widget *widget);
-	InputResult useControl(const gameui::Widget &widget, glm::vec2 point = {});
-	void editText(gameui::NavKey key, bool shift, bool shortcut);
-	void setSlider(const gameui::Widget &widget, float x);
+	InputResult applyWidgetEvent(gameui::WidgetEvent event);
 
 	gameui::Renderer m_renderer;
 	gameui::DrawList m_draws;
 	std::optional<gameui::RecordedStats> m_lastRecordedStats;
-	std::array<Glyph, 128> m_glyphs{};
+	std::array<gameui::Glyph, 128> m_glyphs{};
 	SDL_WindowFlags m_windowFlags{};
 	glm::vec4 m_button{};
 	unsigned m_activations{};
-	bool m_standalone{}, m_buttonFocused{}, m_armed{}, m_ownsPress{};
+	bool m_standalone{}, m_buttonFocused{}, m_armed{};
 	gameui::ScreenStack m_screens;
 	gameui::WidgetSet m_widgets;
-	gameui::TextField m_field;
-	gameui::ListSelection m_list;
+	gameui::TextField m_field, m_secondaryField;
+	gameui::TextField *m_sdlEditor{};
+	gameui::Toggle m_feature{true}, m_enableSecond{true};
+	gameui::Slider m_slider{0.5f}, m_secondarySlider{0.25f};
+	gameui::ListBox m_list, m_secondaryList;
 	gameui::Clip m_panel{};
 	uint64_t m_layoutRevision{UINT64_MAX};
-	float m_screenScale{1.f}, m_slider{0.5f};
-	bool m_feature{true}, m_ownsTextInput{};
+	float m_screenScale{1.f};
 };

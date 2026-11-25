@@ -3,14 +3,47 @@
 #include <Engine/GameUiSample.hpp>
 #include <Engine/InputRouting.hpp>
 
-void Engine::setMouseCaptured(bool captured)
+#include <iostream>
+
+bool Engine::setMouseCaptured(bool captured)
 {
+	if (captured && m_captureBeforeScreen)
+		return false;
+	const bool actualBefore = SDL_GetWindowRelativeMouseMode(window);
+	const bool completed = SDL_SetWindowRelativeMouseMode(window, captured);
+	const std::string error = completed ? "" : SDL_GetError();
+	const auto result = gameui::captureOutcome(captured, completed, SDL_GetWindowRelativeMouseMode(window));
+	mouseCaptured = result.relative;
+	m_captureFailed = result.failed;
+	if (actualBefore != mouseCaptured || result.failed)
+	{
+		cancelGameUiPointer();
+		cancelDeveloperInput();
+		clearGameplayInput();
+	}
+	if (m_captureFailed)
+		std::cerr << "[input] Could not " << (captured ? "enable" : "disable") << " SDL relative mouse mode"
+				  << (error.empty() ? "" : ": ") << error << " (actual: "
+				  << (mouseCaptured ? "relative" : "absolute") << ")\n";
+	SDL_GetRelativeMouseState(nullptr, nullptr);
+	return !m_captureFailed;
+}
+
+void Engine::cancelDeveloperInput()
+{
+	m_pendingDeveloperPressFrame = -2;
+	m_inputRouter.cancelDeveloper();
+	if (imgui)
+		imgui->cancelInput();
+	if (gameUi)
+		gameUi->resetInventoryInteraction();
+}
+
+void Engine::cancelGameUiPointer()
+{
+	m_inputRouter.cancelPointer(gameui::InputOwner::PlayerUi);
 	if (m_playerUi)
 		m_playerUi->cancelPointerPress();
-	clearGameplayInput();
-	mouseCaptured = captured;
-	SDL_SetWindowRelativeMouseMode(window, captured);
-	SDL_GetRelativeMouseState(nullptr, nullptr);
 }
 
 void Engine::clearGameplayInput()
@@ -51,6 +84,7 @@ gameui::InputContext Engine::inputContext() const
 		.devDialog = devAvailable && (imgui->hasModal() || (gameUi && gameUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
 		.transition = switchingSession() || (m_remote && !m_remote->ready()),
+		.captureFailed = m_captureFailed,
 	};
 }
 
@@ -83,9 +117,10 @@ void Engine::syncUiInput()
 	}
 	const bool wantsCursor = m_inventoryPanelOpen || (m_playerUi && m_playerUi->screens().blocksGameplay());
 	if (wantsCursor && !m_captureBeforeScreen)
+	{
 		m_captureBeforeScreen = mouseCaptured;
-	if (wantsCursor && mouseCaptured)
 		setMouseCaptured(false);
+	}
 	if (!wantsCursor && m_captureBeforeScreen)
 	{
 		const bool restore = *m_captureBeforeScreen;
@@ -96,10 +131,7 @@ void Engine::syncUiInput()
 	if (m_developerSuppressed != suppressed)
 	{
 		m_developerSuppressed = suppressed;
-		m_pendingDeveloperPressFrame = -2;
-		m_inputRouter.cancelDeveloper();
-		if (imgui)
-			imgui->releaseInput();
+		cancelDeveloperInput();
 	}
 	auto policy = inputContext();
 	const bool movement = policy.allowsMovement() && (!m_remote || mouseCaptured);
@@ -137,6 +169,24 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			return true;
 		if (m_playerUi)
 			m_playerUi->handleEvent(window, event, false);
+		switch (event.type)
+		{
+		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+		case SDL_EVENT_WINDOW_RESIZED:
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+			cancelGameUiPointer();
+			break;
+		case SDL_EVENT_WINDOW_MOUSE_ENTER:
+		{
+			const SDL_MouseButtonFlags buttons = SDL_GetGlobalMouseState(nullptr, nullptr);
+			for (unsigned button = 1; button < 32; ++button)
+				if ((buttons & SDL_BUTTON_MASK(button)) == 0)
+					m_inputRouter.forgetReleasedButton(button);
+			break;
+		}
+		default: break;
+		}
 		if (imgui)
 			imgui->processEvent(event);
 		return false;
@@ -156,7 +206,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const bool closeInventory = key == SDLK_E && policy.inventory;
 		if (back && m_playerUi && !policy.devText && imgui)
 			policy.devKeyboard = imgui->ownsActiveInput();
-		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory);
+		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory, key == SDLK_C);
 		auto scan = event.key.scancode;
 		if (scan == SDL_SCANCODE_UNKNOWN)
 			scan = SDL_GetScancodeFromKey(key, nullptr);
@@ -192,19 +242,22 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const auto press = m_inputRouter.pointerOwner();
 		policy.nativePointer = !mouseCaptured && m_playerUi && !wheel &&
 			(motion ? press == PlayerUi : event.button.button == SDL_BUTTON_LEFT) && m_playerUi->hitsStrip(x, y);
-		const auto candidate = policy.choose(InputKind::Pointer);
-		if (m_playerUi && press == PlayerUi && (!policy.interactive || policy.devDialog || policy.devPointer))
-			m_playerUi->cancelPointerPress();
+		const auto candidate = m_captureFailed && mouseCaptured ? Blocked : policy.choose(InputKind::Pointer);
+		const bool continuing = motion || event.type == SDL_EVENT_MOUSE_BUTTON_UP;
+		if (m_playerUi && press == PlayerUi && continuing && (!policy.interactive || policy.devDialog || policy.devPointer))
+			cancelGameUiPointer();
+		if (press == Gameplay && continuing && candidate != Gameplay)
+			m_inputRouter.cancelPointer(Gameplay);
 		if (wheel)
-			owner = candidate;
+			owner = m_inputRouter.wheelOwner(candidate);
 		else if (motion)
-			owner = press == DeveloperUi || press == PlayerUi ? press : candidate;
+			owner = m_inputRouter.motionOwner(candidate);
 		else
 			owner = m_inputRouter.button(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, candidate);
 		// Position feeds ImGui hover bookkeeping. Only Dev-owned button and
 		// wheel edges reach its controls, even when ownership changes mid-press.
 		if (imgui && policy.interactive && !policy.modal && !mouseCaptured &&
-			(motion || owner == DeveloperUi))
+			((motion && owner != DeveloperUi) || (!motion && owner == DeveloperUi)))
 			imgui->observePointer(x, y);
 		if (owner == PlayerUi && m_playerUi && !policy.nativeScreen)
 		{

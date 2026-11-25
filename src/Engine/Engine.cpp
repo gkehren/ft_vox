@@ -63,6 +63,9 @@ Engine::Engine(std::string resourcePackRoot)
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
+	// Developer capture is explicit. SDL auto-capture would otherwise
+	// retain the window after the router quarantines a physical button.
+	SDL_SetHintWithPriority(SDL_HINT_MOUSE_AUTO_CAPTURE, "0", SDL_HINT_OVERRIDE);
 
 	// Shared loader probe (VkLoadLibrary.hpp) — same path used by test_vulkan_resources.
 	if (!loadVulkanLibrary(&std::cout))
@@ -162,7 +165,7 @@ Engine::Engine(std::string resourcePackRoot)
 
 	camera.setWindow(window);
 	camera.setMovementSpeed(20.f);
-	SDL_SetWindowRelativeMouseMode(window, true);
+	setMouseCaptured(true);
 
 	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 
@@ -923,10 +926,7 @@ void Engine::handleEvents()
 			windowFocused = false;
 			m_inputRouter.cancelAll();
 			clearGameplayInput();
-			if (imgui)
-				imgui->releaseInput();
-			if (gameUi)
-				gameUi->resetInventoryInteraction();
+			cancelDeveloperInput();
 			if (sim)
 				sim->suspendPlayer();
 			break;
@@ -953,10 +953,7 @@ void Engine::handleEvents()
 			m_windowMinimized = true;
 			m_inputRouter.cancelAll();
 			clearGameplayInput();
-			if (imgui)
-				imgui->releaseInput();
-			if (gameUi)
-				gameUi->resetInventoryInteraction();
+			cancelDeveloperInput();
 			break;
 		case SDL_EVENT_WINDOW_RESTORED:
 		case SDL_EVENT_WINDOW_MAXIMIZED:
@@ -1573,6 +1570,7 @@ void Engine::drawUi()
 		return;
 
 	const bool prevCapture = mouseCaptured;
+	bool presentedCapture = mouseCaptured;
 	bool presentedPause = paused || nativePause();
 	const bool prevPause = presentedPause;
 
@@ -1659,7 +1657,7 @@ void Engine::drawUi()
 	// callbacks, the inventory discipline — no mutable pointer into
 	// authoritative state crosses into the UI.
 	f.highlight = &highlight;
-	f.mouseCaptured = &mouseCaptured;
+	f.mouseCaptured = &presentedCapture;
 	f.showChunkBorders = &showChunkBorders;
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
@@ -1788,8 +1786,8 @@ void Engine::drawUi()
 			m_playerUi->closePause();
 		}
 	}
-	if (mouseCaptured != prevCapture)
-		setMouseCaptured(mouseCaptured);
+	if (presentedCapture != prevCapture)
+		setMouseCaptured(presentedCapture);
 	if (worldRenderer)
 		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 
@@ -1892,7 +1890,7 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 			float x = 0.f, y = 0.f;
 			SDL_GetMouseState(&x, &y);
 			if (mouseCaptured || m_benchmark.locksInput() || inputContext().devDialog || developerPointerAt(x, y))
-				m_playerUi->cancelPointerPress();
+				cancelGameUiPointer();
 		}
 		gameui::Clip view{};
 		if (gameUi && !m_uiSpike && !m_inspectionView)
@@ -1959,11 +1957,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 void Engine::enableGameUi(bool standalone)
 {
 	auto sample = std::make_unique<GameUiSample>();
-	if (standalone && !SDL_SetWindowRelativeMouseMode(window, false))
+	if (standalone && !setMouseCaptured(false))
 		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
 	sample->init(window, *vkContext, *immediate, swapchain->getImageFormat(), swapchain->getColorSpace(), standalone);
-	if (standalone)
-		mouseCaptured = false;
 	m_uiSpike = standalone;
 	m_playerUi = std::move(sample);
 }

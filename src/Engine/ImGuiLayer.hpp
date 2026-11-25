@@ -24,7 +24,7 @@ public:
 	void processEvent(const SDL_Event &event);
 	void observePointer(float x, float y);
 	void observeModifiers(SDL_Keymod mods);
-	void releaseInput();
+	void cancelInput();
 	void beginFrame();
 	void endFrame(); // ImGui::Render()
 

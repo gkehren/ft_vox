@@ -233,9 +233,11 @@ private:
 	/// idle. ImGui draws and the biome-map upload keep their pass ordering.
 	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
 					 std::optional<uint64_t> gpuTag = std::nullopt);
-	void setMouseCaptured(bool captured);
+	bool setMouseCaptured(bool captured);
 	void setInventoryOpen(bool open);
 	void syncUiInput();
+	void cancelDeveloperInput();
+	void cancelGameUiPointer();
 	void clearGameplayInput();
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
@@ -378,7 +380,7 @@ private:
 	std::optional<bool> m_captureBeforeScreen;
 	uint64_t m_uiScreenRevision{};
 	int m_pendingDeveloperPressFrame{-2};
-	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{};
+	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
 	bool m_uiSpike{false};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;

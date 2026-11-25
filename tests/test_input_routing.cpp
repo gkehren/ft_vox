@@ -2,6 +2,7 @@
 // intentionally global while ImGui captures the keyboard, which are gameplay
 // keys that must be suppressed, and when Escape is allowed to quit.
 #include <Engine/InputRouting.hpp>
+#include <Engine/PlayerUiInteraction.hpp>
 
 #include <iostream>
 
@@ -74,6 +75,24 @@ int main()
 		  "escape does not quit while a modal dialog is open");
 	CHECK(!escapeShouldQuit(true, true),
 		  "escape does not quit when UI captures and a modal is open");
+
+	using namespace gameui;
+	const auto failedEnable = captureOutcome(true, false, false);
+	const auto failedDisable = captureOutcome(false, false, true);
+	const auto inconsistent = captureOutcome(true, true, false);
+	CHECK(failedEnable.failed && !failedEnable.relative && failedDisable.failed && failedDisable.relative &&
+		inconsistent.failed && !captureOutcome(true, true, true).failed, "capture result preserves SDL's actual state");
+	const InputContext failure{.captureFailed = true};
+	CHECK(!failure.allowsMovement() && failure.choose(InputKind::Pointer) == InputOwner::Blocked &&
+		failure.choose(InputKind::Key) == InputOwner::Blocked &&
+		failure.choose(InputKind::Key, false, false, false, true) == InputOwner::Gameplay,
+		"capture failure blocks gameplay while the explicit capture shortcut can recover");
+	InputRouter focus;
+	CHECK(focus.button(1, true, InputOwner::DeveloperUi) == InputOwner::DeveloperUi, "developer owns its drag");
+	focus.cancelDeveloper();
+	CHECK(focus.button(1, false, InputOwner::Gameplay) == InputOwner::Blocked &&
+		focus.button(1, true, InputOwner::DeveloperUi) == InputOwner::DeveloperUi,
+		"focus cancellation swallows the old release and allows a fresh developer press");
 
 	if (testmain::fails != 0)
 	{

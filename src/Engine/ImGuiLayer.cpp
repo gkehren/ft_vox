@@ -258,16 +258,26 @@ void ImGuiLayer::observeModifiers(SDL_Keymod mods)
 	io.AddKeyEvent(ImGuiMod_Super, (mods & SDL_KMOD_GUI) != 0);
 }
 
-void ImGuiLayer::releaseInput()
+void ImGuiLayer::cancelInput()
 {
 	if (!m_initialized)
 		return;
+	ImGui_ImplSDL3_CancelMouseCapture();
 	auto &io = ImGui::GetIO();
-	io.ClearEventsQueue();
+	auto &context = *ImGui::GetCurrentContext();
+	auto &queue = context.InputEventsQueue;
+	// Preserve platform focus transitions when a cancellation discards
+	// pending button and key edges. No synthetic release reaches widgets.
+	if (!queue.empty())
+	{
+		const auto focusEnd = std::remove_if(queue.begin(), queue.end(),
+			[](const ImGuiInputEvent &event) { return event.Type != ImGuiInputEventType_Focus; });
+		queue.resize(static_cast<int>(focusEnd - queue.begin()));
+	}
 	io.ClearInputKeys();
 	io.ClearInputMouse();
 	ImGui::ClearActiveID();
-	ImGui::GetCurrentContext()->MovingWindow = nullptr;
+	context.MovingWindow = nullptr;
 	ImGui::ClearDragDrop();
 }
 

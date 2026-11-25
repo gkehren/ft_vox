@@ -59,6 +59,17 @@ private:
 enum class InputOwner : uint8_t { None, Blocked, Global, PlayerUi, DeveloperUi, Gameplay };
 enum class InputKind { Key, Pointer, Text };
 
+struct CaptureOutcome
+{
+	bool relative{};
+	bool failed{};
+};
+
+constexpr CaptureOutcome captureOutcome(bool requested, bool completed, bool actual)
+{
+	return {actual, !completed || actual != requested};
+}
+
 struct InputContext
 {
 	bool interactive{true};
@@ -73,8 +84,10 @@ struct InputContext
 	bool devText{};
 	bool nativePointer{};
 	bool transition{};
+	bool captureFailed{};
 
-	InputOwner choose(InputKind kind, bool global = false, bool back = false, bool inventoryBack = false) const
+	InputOwner choose(InputKind kind, bool global = false, bool back = false, bool inventoryBack = false,
+					  bool captureShortcut = false) const
 	{
 		if (!interactive)
 			return InputOwner::Blocked;
@@ -108,14 +121,14 @@ struct InputContext
 			return InputOwner::PlayerUi;
 		if (kind != InputKind::Pointer && devKeyboard)
 			return InputOwner::DeveloperUi;
-		if (inventory || transition || kind == InputKind::Text)
+		if (inventory || transition || kind == InputKind::Text || (captureFailed && !back && !captureShortcut))
 			return InputOwner::Blocked;
 		return InputOwner::Gameplay;
 	}
 	bool allowsMovement() const
 	{
 		return interactive && !locked && !nativeScreen && !inventory && !paused &&
-			!devKeyboard && !devDialog && !transition;
+			!devKeyboard && !devDialog && !transition && !captureFailed;
 	}
 };
 
@@ -142,13 +155,38 @@ public:
 		if (button == 0 || button >= m_buttons.size())
 			return InputOwner::Blocked;
 		auto &owner = m_buttons[button];
-		return down ? press(owner, candidate) : release(owner);
+		if (!down)
+		{
+			const auto previous = release(owner);
+			updateGesture();
+			return previous;
+		}
+		// The first live press claims the pointer. Further buttons may join
+		// that surface only. A rejected button stays quarantined until up.
+		if (!isPointerOwner(candidate) || (m_gesture != InputOwner::None && candidate != m_gesture))
+			candidate = InputOwner::Blocked;
+		const auto accepted = press(owner, candidate);
+		if (isPointerOwner(accepted))
+			m_gesture = accepted;
+		return accepted;
 	}
-	InputOwner pointerOwner() const
+	InputOwner pointerOwner() const { return m_gesture; }
+	InputOwner motionOwner(InputOwner candidate) const
 	{
-		const auto first = std::find_if(m_buttons.begin(), m_buttons.end(),
-			[](InputOwner owner) { return owner != InputOwner::None; });
-		return first == m_buttons.end() ? InputOwner::None : *first;
+		return m_gesture == InputOwner::None ? candidate : m_gesture;
+	}
+	InputOwner wheelOwner(InputOwner candidate) const
+	{
+		return m_gesture == InputOwner::None || m_gesture == candidate ? candidate : InputOwner::Blocked;
+	}
+	void cancelPointer(InputOwner owner)
+	{
+		if (!isPointerOwner(owner))
+			return;
+		for (auto &button : m_buttons)
+			if (button == owner)
+				button = InputOwner::Blocked;
+		updateGesture();
 	}
 	bool gameplayKey(size_t code) const { return code < m_keys.size() && m_keys[code] == InputOwner::Gameplay; }
 	void cancelGameplay() { cancel(InputOwner::Gameplay); }
@@ -170,10 +208,27 @@ public:
 	void reconcileButton(size_t button, bool held)
 	{
 		if (button && button < m_buttons.size())
+		{
 			m_buttons[button] = held ? InputOwner::Blocked : InputOwner::None;
+			updateGesture();
+		}
+	}
+	void forgetReleasedButton(size_t button)
+	{
+		if (button && button < m_buttons.size() && m_buttons[button] == InputOwner::Blocked)
+			m_buttons[button] = InputOwner::None;
 	}
 
 private:
+	static bool isPointerOwner(InputOwner owner)
+	{
+		return owner == InputOwner::PlayerUi || owner == InputOwner::DeveloperUi || owner == InputOwner::Gameplay;
+	}
+	void updateGesture()
+	{
+		if (m_gesture != InputOwner::None && std::find(m_buttons.begin(), m_buttons.end(), m_gesture) == m_buttons.end())
+			m_gesture = InputOwner::None;
+	}
 	static InputOwner press(InputOwner &owner, InputOwner candidate)
 	{
 		if (owner != InputOwner::None)
@@ -191,11 +246,10 @@ private:
 		for (auto &key : m_keys)
 			if (key == owner)
 				key = InputOwner::Blocked;
-		for (auto &button : m_buttons)
-			if (button == owner)
-				button = InputOwner::Blocked;
+		cancelPointer(owner);
 	}
 	std::array<InputOwner, kKeys> m_keys{};
 	std::array<InputOwner, 32> m_buttons{};
+	InputOwner m_gesture{InputOwner::None};
 };
 } // namespace gameui
