@@ -38,6 +38,7 @@ struct Engine::RemoteSession
 	void submit(net::wire::Action action);
 	void submitSlots(net::wire::ActionKind operation, int slot, int other = 0);
 	ui::MultiplayerStatus connectionStatus(Clock::time_point now) const;
+	const char *actionStatus(Clock::time_point now) const;
 	void disconnect() noexcept;
 
 	net::udp::ClientTransport transport;

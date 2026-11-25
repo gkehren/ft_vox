@@ -631,14 +631,21 @@ void Surface::slotGrid(const SlotGrid &grid, std::span<const SlotView> entries, 
 		}
 }
 
-void Surface::crosshair(Clip viewport, glm::vec4 color) const
+void Surface::crosshair(Clip viewport, glm::vec4 color, std::optional<glm::vec4> outline) const
 {
 	const glm::vec2 center = glm::vec2(viewport.rect) + size(viewport) * 0.5f;
 	const float arm = px(m_theme.size.crosshair);
-	const float thickness = std::max(1.f, px(m_theme.size.borderWidth));
-	fill({{center.x - arm, center.y - thickness * 0.5f, center.x + arm, center.y + thickness * 0.5f}},
-		color, 0.f);
-	fill({{center.x - thickness * 0.5f, center.y - arm, center.x + thickness * 0.5f, center.y + arm}},
-		color, 0.f);
+	const float halfThickness = std::max(1.f, px(m_theme.size.borderWidth)) * 0.5f;
+	const auto paint = [&](float length, float width, glm::vec4 ink) {
+		const glm::vec2 horizontal{length, width}, vertical{width, length};
+		fill(rectangle(center - horizontal, 2.f * horizontal), ink, 0.f);
+		fill(rectangle(center - vertical, 2.f * vertical), ink, 0.f);
+	};
+	if (outline)
+	{
+		const float border = px(m_theme.size.borderWidth);
+		paint(arm + border, halfThickness + border, *outline);
+	}
+	paint(arm, halfThickness, color);
 }
 } // namespace gameui

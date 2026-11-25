@@ -354,6 +354,9 @@ public:
 	/// Application shell (dockspace, menus, layout actions). Engine queues the
 	/// default developer layout here on first run.
 	ui::UiShell &shell() { return m_shell; }
+	bool showOverlayHints() const { return m_debug.panels.overlayHints; }
+	// Legacy inventory remains available without the workspace until #304.
+	void drawInventoryPanel(GameUIFrame &frame);
 
 	/// Open the primary panels used by the default developer layout so the
 	/// docked slots materialize on the first frame. Overview stays closed to
@@ -439,12 +442,9 @@ private:
 	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
-	void drawOverlayHints(GameUIFrame &frame);
 	/// Gameplay surfaces (issue #229, Epic #223 Phase F), implemented in
 	/// GameUIInventory.cpp: the always-on hotbar HUD and the E inventory
 	/// panel. Both are snapshot-only displays issuing command callbacks.
-	void drawHotbarHud(GameUIFrame &frame);
-	void drawInventoryPanel(GameUIFrame &frame);
 
 	void requestBiomeMapRefresh()
 	{

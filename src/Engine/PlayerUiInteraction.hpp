@@ -124,6 +124,8 @@ struct InputContext
 			return InputOwner::PlayerUi;
 		if (kind != InputKind::Pointer && devKeyboard)
 			return InputOwner::DeveloperUi;
+		if (transition && kind == InputKind::Key && back)
+			return InputOwner::Gameplay; // The host can open Pause while joining or disconnected.
 		if (inventory || transition || kind == InputKind::Text || (captureFailed && !back && !captureShortcut))
 			return InputOwner::Blocked;
 		return InputOwner::Gameplay;

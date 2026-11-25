@@ -36,6 +36,7 @@ public:
 	bool wantCaptureMouse() const;
 	bool editingText() const;
 	bool hasModal() const;
+	bool hasOpenPopup() const;
 	bool ownsActiveInput() const;
 	bool pendingKeyboard() const;
 	enum class PointerHit { PassThrough, Occludes, Interactive };

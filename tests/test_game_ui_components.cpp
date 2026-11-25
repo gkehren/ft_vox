@@ -4,10 +4,12 @@
 // Each CHECK names the acceptance criterion it protects: geometry inside the
 // viewport, tokens reaching the draw list, fallback behavior for missing
 // glyphs/icons, and the bounded draw budget.
+#include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiGallery.hpp>
 #include <Engine/PlayerUiStyle.hpp>
 #include <Engine/PlayerUiText.hpp>
+#include <Items/ItemRegistry.hpp>
 
 #include <array>
 #include <cmath>
@@ -742,6 +744,91 @@ void hudMock()
 	}
 }
 
+void liveHud()
+{
+	using enum style::State;
+	std::array<items::ItemStack, items::kInventorySize> snapshot{};
+	snapshot[0] = {items::ItemId::Stone, 12};
+	snapshot[1] = {items::ItemId::Dirt, 3};
+	snapshot[5] = {static_cast<items::ItemId>(UINT16_MAX), 4};
+	snapshot[6] = {items::ItemId::Stone, UINT16_MAX};
+	const auto first = makeHudHotbar(snapshot, 0, 15, true);
+	CHECK(first.available && first.selectedName == "Stone" && first.canPlace &&
+		first.slots[0].count == 12 && first.slots[0].state == (Selected | Pending),
+		"pending preserves the authoritative count and selection");
+	CHECK(first.slots[0].icon && first.slots[0].icon->generation == 15 &&
+		first.slots[0].icon->layer == STONE, "the real atlas layer is tagged with this frame's generation");
+	CHECK(first.slots[5].empty() && !first.slots[5].icon && first.slots[6].empty(),
+		"unknown item and invalid quantity paint empty slots");
+
+	snapshot[0].count = 11;
+	const auto second = makeHudHotbar(snapshot, 1, 16, false);
+	CHECK(second.slots[0].count == 11 && second.slots[0].state == Rest &&
+		second.slots[0].icon && second.slots[0].icon->generation == 16 &&
+		second.slots[1].state == Selected && second.selectedName == "Dirt",
+		"next snapshot replaces counts, selection and atlas handles");
+	CHECK(!makeHudHotbar({}, 0, 16, false).available,
+		"absent snapshot produces no hotbar, including after an occupied frame");
+	const auto invalid = makeHudHotbar(snapshot, -1, 16, false);
+	CHECK(invalid.selectedName.empty() && invalid.slots[0].state == Rest,
+		"invalid selection neither indexes a slot nor highlights a substitute");
+	CHECK(makeHudHotbar(snapshot, 8, 16, false).selectedName == "Empty slot",
+		"authoritative selection of an empty slot remains visible");
+
+	struct Case { Clip scene, safe; bool aim; };
+	const std::array cases{
+		Case{{{0, 0, 1920, 1080}}, {{0, 0, 1920, 1080}}, true},
+		Case{{{0, 0, 2560, 1080}}, {{590, 26, 1940, 766}}, true},
+		Case{{{0, 0, 960, 540}}, {{224, 24, 695, 385}}, true},
+		Case{{{0, 0, 960, 540}}, {{520, 24, 900, 385}}, false},
+		Case{{{0, 0, 960, 540}}, {{310, 20, 740, 295}}, false},
+	};
+	for (const auto &test : cases)
+	{
+		for (const float scale : {1.f, 1.5f, 2.f})
+		{
+			const auto layout = hudLayout(test.scene, test.safe, theme(), scale);
+			const auto &bar = layout.hotbar.bounds;
+			const auto last = slotCell(layout.hotbar, items::kHotbarSize - 1, 0);
+			CHECK(layout.scale > 0.f && layout.scale <= scale && inside(bar, test.safe) &&
+				!last.empty() && inside(last, bar) &&
+				std::abs(bar.rect.x + bar.rect.z - test.safe.rect.x - test.safe.rect.z) < 0.01f,
+				"all nine slots stay at the bottom center of the safe area");
+			CHECK(inside(layout.status, test.safe) && inside(layout.activity, test.safe) &&
+				inside(layout.hint, test.safe) && inside(layout.selection, test.safe) &&
+				layout.activity.rect.w < layout.hint.rect.y &&
+				layout.hint.rect.w < layout.selection.rect.y && layout.selection.rect.w < bar.rect.y,
+				"feedback, hints, selection and the bar occupy separate bands");
+			CHECK(!layout.reticle.empty() == test.aim, "true aim point visibility at scale " << scale <<
+				" in safe area starting at " << test.safe.rect.x << ", " << test.safe.rect.y);
+
+			DrawList draws;
+			draws.reset(size(test.scene), 16);
+			const Surface paint(draws, kFont, theme(), layout.scale, layout.view);
+			HudView view{};
+			view.hotbar = second;
+			view.status = "Network degraded";
+			view.activity = "Waiting for target terrain";
+			view.aim = view.captured = view.target = true;
+			paintHud(paint, layout, test.scene, view);
+			CHECK(draws.dropped() == 0 && countLayer(draws, STONE) == 1 && countLayer(draws, DIRT) == 1,
+				"the HUD budget carries exactly one icon per populated slot");
+			for (const auto &batch : draws.batches())
+				CHECK(inside(batch.clip, test.safe), "HUD draw batches never extend into developer docks");
+		}
+	}
+	const auto layout = hudLayout(cases[1].scene, cases[1].safe, theme(), 1.f);
+	DrawList reticle;
+	reticle.reset(size(cases[1].scene), 16);
+	HudView aimOnly{};
+	aimOnly.aim = true;
+	paintHud(Surface(reticle, kFont, theme(), layout.scale, layout.view), layout, cases[1].scene, aimOnly);
+	CHECK(reticle.quads().size() == 4, "a single outlined reticle costs four quads");
+	for (const auto &quad : reticle.quads())
+		CHECK((glm::vec2(quad.rect) + glm::vec2(quad.rect.z, quad.rect.w)) * 0.5f == glm::vec2(1280, 540),
+			"an asymmetric dock does not recenter the aim");
+}
+
 void gallery()
 {
 	CHECK(gallerySections().size() >= 8, "the gallery documents every component class");
@@ -824,6 +911,7 @@ int main()
 	painting();
 	slotPaintingAndFallbacks();
 	hudMock();
+	liveHud();
 	gallery();
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI components (" << testmain::checks << " checks)" << std::endl;;

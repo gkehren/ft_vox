@@ -1178,6 +1178,95 @@ struct GameUiBackendProbe
 			<< ", known RTSS errors=" << rtss);
 	}
 
+	void playerHudProof()
+	{
+		init();
+		auto &sample = *engine.m_playerUi;
+		const auto &context = *engine.vkContext;
+		const auto errorsBefore = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
+		sample.setPreviewStripVisible(false);
+		engine.setShowDeveloperUi(false);
+		engine.sim->grantItems(items::ItemId::Stone, 12);
+		engine.sim->grantItems(items::ItemId::Dirt, 4);
+		resize(960, 540);
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 2.f});
+		frames(3);
+		const auto hasStoneIcon = [&] {
+			return std::ranges::any_of(sample.m_draws.quads(), [](const gameui::Quad &q) { return q.layer == STONE; });
+		};
+		CHECK(hasStoneIcon() && sample.renderer().stats(0).dropped == 0 && !engine.developerUiAvailable(),
+			"live hotbar draws in a small window at 200% without the developer workspace");
+		CHECK(engine.playerHudView().hotbar.slots[0].count == 12,
+			"live HUD reads the solo snapshot");
+
+		tap(SDLK_2);
+		present();
+		CHECK(engine.playerHudView().hotbar.selectedName == "Dirt", "number key selects via the existing adapter");
+		SDL_Event wheel{};
+		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
+		wheel.wheel.y = 1.f;
+		checked(SDL_PushEvent(&wheel), "queue gameplay scroll");
+		key(SDLK_Q, SDL_EVENT_KEY_DOWN);
+		key(SDLK_Q, SDL_EVENT_KEY_DOWN, true);
+		key(SDLK_Q, SDL_EVENT_KEY_UP);
+		present();
+		CHECK(engine.playerHudView().hotbar.selectedName == "Stone" &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"one wheel event and one non-repeat drop produce one selection and one count decrement");
+
+		tap(SDLK_E);
+		tap(SDLK_Q);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() && !hasStoneIcon() &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"inventory hides the HUD and consumes gameplay input without the workspace");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && hasStoneIcon() && engine.mouseCaptured,
+			"closing inventory restores the HUD and capture");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(engine.nativePause() && !hasStoneIcon(), "pause supersedes the gameplay HUD");
+		const auto toggle = std::ranges::find_if(sample.m_widgets.widgets(),
+			[](const gameui::Widget &widget) { return widget.label == "Hide HUD"; });
+		checked(toggle != sample.m_widgets.widgets().end(), "pause exposes the HUD toggle");
+		const auto bounds = sample.m_widgets.bounds(*toggle);
+		clickAt(glm::vec2(bounds.rect) + gameui::size(bounds) * 0.5f);
+		present();
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!sample.hudVisible() && sample.m_draws.quads().empty() &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"the visibility toggle changes presentation without touching inventory");
+		sample.setHudVisible(true);
+		const auto generation = engine.m_atlasVersion;
+		CHECK(engine.applyResourcePack("").atlasOk && engine.m_atlasVersion != generation,
+			"resource-pack reload publishes a new atlas");
+		frames(3);
+		CHECK(hasStoneIcon() && sample.m_draws.atlasGeneration() == engine.m_atlasVersion,
+			"live icon is repainted using the new atlas after both slots cycle");
+		CHECK(engine.reloadWorld(43), "new solo epoch starts");
+		present();
+		CHECK(!hasStoneIcon() && engine.playerHudView().hotbar.selectedName == "Empty slot",
+			"new epoch paints its own inventory with no stale item icon");
+		const auto hudFrame = sample.lastRecordedStats()->frameNumber;
+		engine.m_inspectionView = true;
+		present();
+		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "inspection skips player UI preparation");
+		engine.m_inspectionView = false;
+		engine.m_benchmark.requestStart();
+		present();
+		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "active benchmarks skip player UI preparation");
+		engine.m_benchmark.cancel();
+		context.waitIdle();
+		const auto errors = context.validationErrorCount() - errorsBefore;
+		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;
+		std::cout << "HUD validation errors=" << errors << " known_rtss_errors=" << rtss << '\n';
+		CHECK(errors == rtss, "HUD adds no validation errors outside known RTSS messages");
+	}
+
 	void performance()
 	{
 		auto &gpuProfiler = engine.frameCtx->gpuProfiler();
@@ -1187,7 +1276,11 @@ struct GameUiBackendProbe
 			return;
 		}
 		init();
-		engine.m_inspectionView = true;
+		engine.setShowDeveloperUi(false);
+		engine.m_playerUi->setPreviewStripVisible(false);
+		for (auto item : {items::ItemId::Stone, items::ItemId::Dirt, items::ItemId::Sand,
+				items::ItemId::Cobblestone, items::ItemId::GrassBlock})
+			engine.sim->grantItems(item, 32);
 		engine.setVSync(false);
 		resize(1920, 1080);
 		auto sample = std::move(engine.m_playerUi);
@@ -1295,5 +1388,13 @@ int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output)
 int runGameUiPerformance(Engine &engine)
 {
 	GameUiBackendProbe(engine).performance();
+	return testmain::exitCode();
+}
+
+int runPlayerHudProof(Engine &engine)
+{
+	GameUiBackendProbe(engine).playerHudProof();
+	if (testmain::fails == 0)
+		std::cout << "PASS: live player HUD proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }

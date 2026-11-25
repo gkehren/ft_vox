@@ -475,13 +475,6 @@ static void checkInventoryUi()
 	CHECK(panelWidth(size, gap) == 9.f * size + 8.f * gap, "panel width spans nine columns");
 	CHECK(panelHeight(size, gap) > 4.f * size, "panel height covers four rows plus gaps");
 
-	// Hotbar HUD: centered along the screen bottom, nine slots.
-	const SlotRect hud0 = hotbarSlotRect(0, 800.f, 600.f, size, gap, 10.f);
-	const SlotRect hud8 = hotbarSlotRect(8, 800.f, 600.f, size, gap, 10.f);
-	CHECK(hud0.y == 600.f - 10.f - size && hud8.y == hud0.y, "HUD hugs the bottom margin");
-	CHECK(std::abs((hud0.x + (hud8.x + size)) - 800.f) < 0.01f, "HUD is horizontally centered");
-	CHECK(hud8.x - hud0.x == 8.f * (size + gap), "HUD slots are evenly pitched");
-
 	// Cursor display: a VIEW of the source slot, never authoritative data.
 	SlotArray slots{};
 	slots[0] = items::makeStack(items::ItemId::Stone, 10);

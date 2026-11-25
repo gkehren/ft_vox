@@ -38,6 +38,8 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --ui-spike                  Run the standalone Game UI prototype over a solo scene\n"
 			  << "  --game-ui                   Show the Game UI sample alongside the existing interface\n"
+			  << "  --no-dev-ui                 Start without the developer workspace (F5 opens it)\n"
+			  << "  --no-hud                    Start with the player HUD hidden\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
 			  << "  --quality <name|0-3>        Graphics preset: low|medium|high|cinematic\n"
@@ -76,6 +78,8 @@ int main(int argc, char **argv)
 	float benchmarkDuration = 0.0f;
 	bool uiSpike = false;
 	bool gameUi = false;
+	bool showDeveloperUi = true;
+	bool showPlayerHud = true;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
 	std::optional<int> qualityPreset;
@@ -91,6 +95,16 @@ int main(int argc, char **argv)
 		if (arg == "--game-ui")
 		{
 			gameUi = true;
+			continue;
+		}
+		if (arg == "--no-dev-ui")
+		{
+			showDeveloperUi = false;
+			continue;
+		}
+		if (arg == "--no-hud")
+		{
+			showPlayerHud = false;
 			continue;
 		}
 		if (arg == "--ui-spike")
@@ -421,6 +435,8 @@ int main(int argc, char **argv)
 			playerKey = client::playerKey(playerProfile, client::ProfileAccess::LoadOrCreate);
 		}
 		Engine engine(resourcePack);
+		engine.setShowDeveloperUi(showDeveloperUi);
+		engine.setShowPlayerHud(showPlayerHud);
 		if (server)
 			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt, *playerKey);
 		else
@@ -459,7 +475,7 @@ int main(int argc, char **argv)
 			engine.benchmark().requestStart();
 			engine.setExitAfterBenchmark(true);
 		}
-		if (uiSpike || gameUi)
+		if (uiSpike || (gameUi && !inspection && benchmarkDuration == 0.f))
 			engine.enableGameUi(uiSpike);
 		engine.run();
 	}

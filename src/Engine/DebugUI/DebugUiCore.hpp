@@ -205,7 +205,7 @@ struct PanelState
 {
 	/// Read-only Status Overlay density (issue #184): F1 cycles, the View
 	/// menu offers the same three states. Replaces the old catch-all HUD.
-	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Detailed};
+	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Off};
 	/// Interactive Player / Gameplay panel (View menu).
 	bool playerPanel{false};
 	bool multiplayer{false};

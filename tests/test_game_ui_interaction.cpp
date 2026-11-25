@@ -27,6 +27,8 @@ void routing()
 	const InputContext passiveCover{.devOccludes = true, .nativePointer = true};
 	const InputContext devText{.nativeScreen = true, .devText = true};
 	const InputContext loading{.devPointer = true, .transition = true};
+	CHECK(loading.choose(InputKind::Key, false, true) == InputOwner::Gameplay,
+		"Escape can open the player menu while waiting for a remote connection");
 	CHECK(hud.choose(Key) == Gameplay && hud.choose(Pointer) == Gameplay && hud.choose(Text) == Blocked,
 		"passive HUD leaves input to gameplay and ignores committed text");
 	CHECK(developer.choose(Key) == DeveloperUi && developer.choose(Pointer) == DeveloperUi &&

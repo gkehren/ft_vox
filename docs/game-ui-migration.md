@@ -2,11 +2,63 @@
 
 Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Phase A adds an isolated preview. A normal launch still follows the existing solo, Join and Host paths and the existing ImGui controls.
 
+## Live player HUD (#303)
+
+Normal solo and remote launches now use the native Game UI hotbar. It draws the nine shared slots from the solo simulation snapshot or the connected client's confirmed private inventory. The selected stack name and quantity follow that snapshot. Pending remote actions mark the confirmed slot and show feedback until the server responds. Joining, leaving, resync and disconnect replace the hotbar with session status until a synchronized snapshot is available. The HUD reads the current atlas generation each frame, so reloads and session changes rebuild the icons from the current data.
+
+The world camera still projects across the full window. The reticle marks that projection's center in perspective play with captured input. With developer docks open, the HUD anchors its hotbar and status inside the central dock's unobstructed rectangle. The reticle keeps the world aim point and disappears if that point is covered by a dock or the space is too tight. A compact dock can shrink the HUD below the chosen player scale to fit all nine slots and omit the optional hint line to leave room for the reticle. The developer layer draws over Game UI. Pause, inventory, and open developer popups or dialogs suppress the gameplay HUD.
+
+| Control | Behavior |
+| --- | --- |
+| `1–9` / wheel | Select a hotbar slot or cycle with the mouse captured. |
+| LMB / RMB / `Q` | Break and place through the current mode, or drop one from the selected slot. |
+| `E` / Escape | Open inventory or dismiss it. Escape in play opens the game menu. `P` also opens the menu in solo. |
+| `C` / `F6` | Release or capture the mouse. Toggle the optional HUD hints with F6. |
+| Game menu → Hide HUD / Show HUD | Change HUD visibility for the current run. Start hidden with `--no-hud`. |
+| `--no-dev-ui` / `F5` | Start with a full-window HUD and open the developer workspace on demand. Other developer panel shortcuts can also open it. The existing `E` inventory works in either layout. |
+| `F1` | Cycle the developer diagnostics overlay through Off, Minimal and Detailed. It starts Off. |
+
+`--view`, command-line streaming benchmarks, and active in-game benchmarks exclude the player UI from composition. The existing offscreen scene goldens continue to render with UI excluded. `--game-ui` still opens the opt-in widget strip and HUD mock for design-system work. The default developer workspace and Join/Host workflows remain available. The legacy ImGui inventory panel and its command callbacks are the handoff to #304. This slice retires the ImGui hotbar, hint window and always-on multiplayer banner and dot.
+
+### Presented evidence
+
+Windows, MSVC Release, GeForce RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, SDL 3.4.18, Low quality, seed 42 and 1920×1080. These captures use the Vulkan SDK screenshot layer in a separate run from validation. The solo comparison starts from the same seeded local inventory and focuses the selected Dirt stack. The two remote clients connect to the same loopback server with separate profiles. Client A selects slot 4 and client B selects slot 7.
+
+| View | Before | After |
+| --- | --- | --- |
+| Solo with developer docks | [Before](images/game-ui-hud/solo-before.png) | [After](images/game-ui-hud/solo-docked.png) |
+| Solo without the workspace | | [Full-window HUD](images/game-ui-hud/solo-player.png) |
+| Remote client A | [Before](images/game-ui-hud/client-a-before.png) | [After, full window](images/game-ui-hud/client-a-after.png) |
+| Remote client B | [Before](images/game-ui-hud/client-b-before.png) | [After, docked](images/game-ui-hud/client-b-after.png) |
+
+Run the opt-in hardware proof from the game's output directory to exercise live SDL input, menu layering, 960×540 at 200%, atlas replacement and world reload. Set `FT_VOX_VALIDATION=1` for the proof. Run the performance mode with `FT_VOX_GPU_PROFILING=1` and validation disabled.
+
+```powershell
+../tests/Release/test_engine_reload.exe --player-hud-proof
+../tests/Release/test_engine_reload.exe --game-ui-performance
+```
+
+### Verification and frame cost
+
+- Windows Release passed all 53 graphics-off CTests, including the headless dependency and core include guards and all nine tests labeled `multiplayer`. The graphical build passed `UiShell` and `VisualRegression` with the committed goldens.
+- The live HUD and native showcase proofs passed on the RTX 4070 Ti. The live HUD proof's seven validation messages matched the known swapchain/image-view diagnostics in the test interval. [Vulkan validation guide](vulkan-validation.md)
+- The native Join smoke passed 30 checks, including confirmed selection while an action is pending, endpoint/profile switch, disconnect and reconnect. The native hosted closure ran two graphical clients through mining, pickup, separate hotbars, server stop and checkpoint restart. The HUD's selection and counts matched each client's private inventory before and after restart. The CPU multiplayer restart test covered remote place and drop.
+- The performance proof used the same static seed-42 scene at 1920×1080 with immediate present, Low quality and five populated slots. Each run measured 600 frames after 120 warmup frames. GPU timestamp coverage was 600/600 per run.
+
+| Run | CPU frame median / p95 (ms) | GPU frame median / p95 (ms) | HUD CPU median / p95 (ms) | HUD GPU median / p95 (ms) |
+| --- | --- | --- | --- | --- |
+| Baseline A | 0.555 / 1.467 | 0.578 / 0.782 | — | — |
+| HUD A | 0.564 / 1.416 | 0.610 / 0.782 | 0.0046 / 0.0078 | 0.0031 / 0.0041 |
+| HUD B | 0.571 / 1.338 | 0.608 / 0.621 | 0.0047 / 0.0080 | 0.0031 / 0.0041 |
+| Baseline B | 0.576 / 1.354 | 0.607 / 0.624 | — | — |
+
+The measured HUD used one draw, 936 vertices, four preallocated descriptor sets, 212,992 bytes of instance buffers and 32,768 bytes of font coverage. This sRGB path required zero composition-image bytes. Physical HUD runs used Windows. Linux, macOS/MoltenVK and physical cross-monitor DPI transitions remain unverified for #303.
+
 ## Surface inventory
 
 | Current surface | Behavior and owner today | Planned destination and parity gate |
 | --- | --- | --- |
-| Hotbar, item count/name, targeting and status | `GameUIInventory` renders the bounded inventory snapshot. Engine maps `1–9`, wheel, `Q`, LMB/RMB and runs voxel targeting and highlight publication. `GameUI` shows F1 status density and F6 hints. | **#303 HUD.** Add a crosshair aligned with the scene viewport and retain hotbar selection, counts, target and interaction feedback in solo and remote walking. Keep the 3D block highlight in the renderer. Move FPS, position, drawn chunks and detailed status/density to Dev UI. |
+| Hotbar, item count/name, targeting and status | `PlayerHud` draws the live bounded snapshot, contextual hints and connection feedback. Engine maps `1–9`, wheel, `Q`, LMB/RMB and publishes the 3D block highlight. | **#303 HUD.** Live in normal solo and remote play. F1 density and detailed performance/diagnostics stay in the developer workspace. |
 | Inventory and drag/drop | `E` toggles an Engine flag. `InventoryUi` and `GameUIInventory` handle slots, icons, tooltips and a transient drag cursor. Snapshots and callbacks select, move, swap, split or drop via Engine. Atlas layer descriptors are cached per generation. | **#304 Inventory.** Preserve selected slot, whole/half stack and partial transfers, disabled input during remote pending state, rejected-command feedback, tooltip/icon behavior and drag cancellation on close, focus loss, session or resource change. Compare authoritative inventory before and after solo and remote gestures. |
 | Solo world and pause | `--world` and `--seed` enter a saved or transient world through Engine initialization. World panel shows seed, save identity, queue/health and errors. `P` mutates host pause, `C` controls host cursor capture, and Escape or the menu requests exit. Engine owns save, flush, world epoch reset and restoration. | **#305 Main Menu, Loading and Pause.** Create/select an existing world or start transient play through the existing lifecycle. Preserve CLI entry points, save error visibility and session-epoch barriers. Validate open, resume, save-and-leave, exit and retry. Show save health to players and detailed persistence counters in Dev UI. |
 | Join, profiles, and client status | `GameUIMultiplayer`, `EngineJoin` and `EngineMultiplayer` own endpoint/expected seed, favorites, named profile creation/selection, private keys, loading/readiness, reconnect, switch, disconnect and return to suspended solo. The public roster and private inventory arrive through the remote client path. | **#306 Multiplayer.** Preserve favorites/profile persistence, unavailable/error states, endpoint validation, two-client roster and local inventory privacy, reconnect identity, and blocked transition on solo save failure. Put actionable status and latency in Game UI and detailed packet, snapshot and motion telemetry in Dev UI. |
@@ -45,7 +97,7 @@ Phase D surfaces and their owners:
 | Tokens, typography, components, slot contract | `PlayerUiStyle.hpp`, `PlayerUiText.hpp`, `PlayerUiComponents.*`, `PlayerUiFonts.*` | Consumed by every native screen; the gallery renders each component class. |
 | Player UI scale | `PlayerUiScale.hpp` + `PlayerUiPreferences.*` (Engine loads/persists) | Auto by default, pause → Design system → **Player UI scale** for the persisted override. ImGui scale/layout untouched. |
 | Component gallery | `Screen::Gallery` (`GameUiGallery.cpp`, layout in `PlayerUiGallery.hpp`) | Pause → **Design system**. |
-| HUD preview | `Screen::HudMock` | Pause → **HUD mock**. Passive mock; #303 replaces it with the live HUD. |
+| HUD preview | `Screen::HudMock` | Pause → **HUD mock** in the `--game-ui` showcase. #303 uses the live HUD during play. |
 
 No legacy binding or surface was removed in Phase D: the pause menu only gained two preview entries after Exit to desktop, and the existing ImGui panels, HUD, inventory and multiplayer flows are unchanged.
 

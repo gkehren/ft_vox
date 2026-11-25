@@ -66,9 +66,15 @@ bool Engine::suppressDeveloperUi() const
 	return m_playerUi && !m_uiSpike && m_playerUi->screens().suppressDeveloper();
 }
 
+bool Engine::developerUiAvailable() const
+{
+	return imgui && !m_inspectionView && !m_uiSpike && !suppressDeveloperUi() &&
+		(m_showDeveloperUi || m_inventoryPanelOpen);
+}
+
 gameui::InputContext Engine::inputContext() const
 {
-	const bool devAvailable = imgui && !m_inspectionView && !m_uiSpike && !suppressDeveloperUi();
+	const bool devAvailable = developerUiAvailable();
 	const bool pendingDevFocus = devAvailable && imgui->pendingKeyboard();
 	return {
 		.interactive = windowFocused && !m_windowHidden && !m_windowMinimized,
@@ -89,7 +95,7 @@ gameui::InputContext Engine::inputContext() const
 ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 {
 	using enum ImGuiLayer::PointerHit;
-	if (!imgui || m_inspectionView || m_uiSpike || suppressDeveloperUi())
+	if (!developerUiAvailable())
 		return PassThrough;
 	return mouseCaptured ? (imgui->ownsActiveInput() ? Interactive : PassThrough) : imgui->pointerHit(x, y);
 }
@@ -97,6 +103,8 @@ ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 void Engine::setInventoryOpen(bool open)
 {
 	m_inventoryPanelOpen = open;
+	if (!open && gameUi)
+		gameUi->resetInventoryInteraction();
 	syncUiInput();
 }
 
@@ -205,7 +213,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			m_playerUi->screens().top() == gameui::Screen::Pause);
 		const bool global = classifyKeyRoute(static_cast<int>(key)) == KeyRoute::GlobalShortcut;
 		const bool closeInventory = key == SDLK_E && policy.inventory;
-		if (back && m_playerUi && !policy.devText && imgui)
+		if (back && m_playerUi && !policy.devText && developerUiAvailable())
 			policy.devKeyboard = imgui->ownsActiveInput();
 		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory, key == SDLK_C);
 		auto scan = event.key.scancode;

@@ -247,6 +247,15 @@ struct EngineJoinProbe
 	void checkWitness(const fs::path &first, const fs::path &current, bool restoring)
 	{
 		const auto actor = witness();
+		const auto hud = engine.playerHudView();
+		bool matches = hud.hotbar.available;
+		for (int slot = 0; slot < items::kHotbarSize; ++slot)
+		{
+			const auto &shown = hud.hotbar.slots[size_t(slot)];
+			matches &= shown.count == actor.slots[size_t(slot)].count &&
+				gameui::style::has(shown.state, gameui::style::State::Selected) == (slot == actor.selected);
+		}
+		CHECK(matches, "HUD presents this client's authoritative selection and counts");
 		std::ostringstream status;
 		status << std::setprecision(17) << actor.world << ' ' << actor.player << ' ' << actor.selected
 			<< ' ' << actor.feet.x << ' ' << actor.feet.y << ' ' << actor.feet.z;
@@ -335,6 +344,8 @@ struct EngineJoinProbe
 			throw std::runtime_error("no mineable block after settling");
 		const auto inventoryBefore = witness().slots;
 		engine.sendRemoteVoxelAction(false);
+		CHECK(engine.playerHudView().activity == "Action pending" && witness().slots == inventoryBefore,
+			"submitted remote break exposes pending feedback without a predicted stack");
 		until([&] { return !engine.m_remote->actionPending; }, "owner break was not acknowledged");
 		const auto *feedback = engine.m_remote->feedback;
 		if (!feedback || std::string_view(feedback) != "Action accepted")
@@ -354,6 +365,7 @@ struct EngineJoinProbe
 		const auto actorFile = host ? "owner-actor.txt" : "guest-actor.txt";
 		const char *profile = host ? "closure-owner" : "closure-guest";
 		engine.initializeNoiseGenerator(host ? 13 : 19);
+		engine.enableGameUi(false, false);
 		auto *const solo = engine.sim.get();
 		engine.gameUi->showHostPanel();
 		if (!restoring)
@@ -541,6 +553,9 @@ struct EngineJoinProbe
 		    engine.drawList.empty() && engine.shadowList.empty() &&
 		    engine.mobStates.empty() && engine.m_itemStates.empty(),
 		    "departure clears draw references, entity views and pooled render handles");
+		const auto hud = engine.playerHudView();
+		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
+			"leaving or switching replaces the old HUD with session feedback");
 	}
 
 	void run(const char *first, const char *second)
@@ -569,7 +584,13 @@ struct EngineJoinProbe
 		CHECK(firstScope && engine.viewWorld() != solo->world() && engine.m_suspendedSolo &&
 			engine.m_suspendedSolo->simulation.get() == solo, "only the remote world is projected");
 		engine.selectHotbarSlot(4);
+		const auto pendingHud = engine.playerHudView();
+		CHECK(pendingHud.activity == "Action pending" &&
+			gameui::style::has(pendingHud.hotbar.slots[0].state, gameui::style::State::Selected),
+			"HUD keeps the confirmed selection while the requested slot is pending");
 		until([&] { return engine.selectedHotbarSlot() == 4; }, "server did not apply hotbar selection");
+		CHECK(gameui::style::has(engine.playerHudView().hotbar.slots[4].state, gameui::style::State::Selected),
+			"HUD highlights the successor only when the server publishes it");
 		const auto aliceInventory = engine.m_remote->transport.inventory()->slots;
 		const auto aliceFeet = net::udp::playerFeet(*engine.m_remote->localPlayer());
 		CHECK(engine.chunkPool->acquiredCount() > 0, "remote projection owns render handles before departure");

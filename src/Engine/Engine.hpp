@@ -38,6 +38,7 @@
 
 namespace net::udp { struct Address; }
 class GameUiSample;
+namespace gameui { struct HudView; }
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
 class Engine
@@ -49,8 +50,10 @@ public:
 	~Engine();
 
 	void run();
-	void enableGameUi(bool standalone = false);
+	void enableGameUi(bool standalone = false, bool previewStrip = true);
 	void enableUiSpike() { enableGameUi(true); }
+	void setShowDeveloperUi(bool visible) { m_showDeveloperUi = visible; }
+	void setShowPlayerHud(bool visible) { m_showPlayerHud = visible; }
 	void initializeNoiseGenerator(int seed);
 	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
 					   const net::wire::PlayerKey &key);
@@ -248,6 +251,8 @@ private:
 	void clearGameplayInput();
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
+	bool developerUiAvailable() const;
+	gameui::HudView playerHudView() const;
 	gameui::InputContext inputContext() const;
 	ImGuiLayer::PointerHit developerPointerAt(float x, float y) const;
 	bool routeUiEvent(const SDL_Event &event);
@@ -388,6 +393,8 @@ private:
 	uint64_t m_uiScreenRevision{};
 	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
 	bool m_uiSpike{false};
+	bool m_showDeveloperUi{true};
+	bool m_showPlayerHud{true};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
 	// Authoritative simulation + derived render projection (Epic #204,

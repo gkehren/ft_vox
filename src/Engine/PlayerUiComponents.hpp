@@ -258,7 +258,7 @@ public:
 	void slotGrid(const SlotGrid &grid, std::span<const SlotView> slots, int focused = -1) const;
 
 	// HUD
-	void crosshair(Clip viewport, glm::vec4 color) const;
+	void crosshair(Clip viewport, glm::vec4 color, std::optional<glm::vec4> outline = {}) const;
 
 	// Primitives (exposed so screens can compose without re-deriving tokens)
 	void fill(Clip rect, glm::vec4 color, float radius) const;

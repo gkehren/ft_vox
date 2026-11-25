@@ -137,7 +137,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			*toggles.helpTabRequest = HelpTabRequest::About;
 		}
 		ImGui::Separator();
-		if (ImGui::MenuItem("Exit", "Esc"))
+		if (ImGui::MenuItem("Exit"))
 		{
 			if (frame.requestExit)
 				frame.requestExit();

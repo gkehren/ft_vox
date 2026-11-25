@@ -31,6 +31,7 @@ int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
 int runGameUiShowcaseProof(Engine &engine);
 int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output);
 int runGameUiPerformance(Engine &engine);
+int runPlayerHudProof(Engine &engine);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
 	const std::filesystem::path &evidence, bool restoring);
 
@@ -85,6 +86,8 @@ int main(int argc, char **argv)
 			return runGameUiShowcaseProof(*engine);
 		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-performance")
 			return runGameUiPerformance(*engine);
+		if (argc == 2 && std::string_view(argv[1]) == "--player-hud-proof")
+			return runPlayerHudProof(*engine);
 		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")
 		{
 			engine->setSavesRootForTests(argv[4]);

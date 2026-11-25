@@ -179,7 +179,7 @@ Engine::Engine(std::string resourcePackRoot)
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
 	std::cout << "  WASD move · Space jump/swim up · Shift sprint/swim down · V flight\n";
 	std::cout << "  Mouse look · LMB/RMB break/place · 1-9 hotbar · Q drop · B borders\n";
-	std::cout << "  C free mouse · F1–F7 panels · F10 VSync · Esc quit\n";
+	std::cout << "  C free mouse · E inventory · F5 controls · F6 HUD hints · F10 VSync\n";
 	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
 
@@ -991,6 +991,10 @@ void Engine::handleEvents()
 			// toggle overlays.
 			if (keyRoute == KeyRoute::GlobalShortcut)
 			{
+				// An explicit tool shortcut also brings back the workspace
+				// when the game was launched without the developer shell.
+				if (key != SDLK_F6 && key != SDLK_F10 && !m_benchmark.isActive())
+					m_showDeveloperUi = true;
 				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), shortcutFrame))
 					break;
 			}
@@ -1566,7 +1570,7 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	if (!imgui || !gameUi || m_inspectionView || suppressDeveloperUi())
+	if (!gameUi || !developerUiAvailable())
 		return;
 
 	const bool prevCapture = mouseCaptured;
@@ -1595,7 +1599,7 @@ void Engine::drawUi()
 	// when the voxel column or the world generation changed (the player can
 	// spend many frames inside one column).
 	f.player.biome = -1;
-	if (sim && sim->terrainGenerator() && gameUi->needsPlayerBiome())
+	if (m_showDeveloperUi && sim && sim->terrainGenerator() && gameUi->needsPlayerBiome())
 	{
 		const glm::ivec2 column =
 			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
@@ -1769,7 +1773,10 @@ void Engine::drawUi()
 		};
 	}
 
-	gameUi->draw(f);
+	if (m_showDeveloperUi)
+		gameUi->draw(f);
+	else
+		gameUi->drawInventoryPanel(f);
 
 	if (presentedPause != prevPause)
 	{
@@ -1876,11 +1883,90 @@ void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, do
 							renderSettings.shadowCascadeFar, underwater);
 }
 
+gameui::HudView Engine::playerHudView() const
+{
+	using gameui::style::Status;
+	gameui::HudView view;
+	view.captured = mouseCaptured && windowFocused && !m_captureFailed;
+	view.hints = gameUi->showOverlayHints();
+	if (switchingSession())
+	{
+		view.status = "Switching worlds";
+		view.statusKind = Status::Pending;
+		return view;
+	}
+
+	bool canAim = false;
+	if (m_remote)
+	{
+		const auto now = RemoteSession::Clock::now();
+		const auto connection = m_remote->connectionStatus(now);
+		using enum ui::MultiplayerState;
+		switch (connection.state)
+		{
+		case Connected: break;
+		case Degraded:
+			view.status = connection.label;
+			view.statusKind = Status::Warning;
+			break;
+		case Connecting:
+		case SyncingTerrain:
+		case Resyncing:
+		case Leaving:
+			view.status = connection.label;
+			view.statusKind = Status::Pending;
+			break;
+		case Disconnected:
+		case TimedOut:
+		case Rejected:
+			view.status = connection.label;
+			view.statusKind = Status::Error;
+			view.activity = connection.detail ? connection.detail : "Open Multiplayer to reconnect";
+			break;
+		}
+		if ((connection.state == Connected || connection.state == Degraded) && m_remote->ready())
+		{
+			if (const auto snapshot = m_remote->transport.inventory())
+				view.hotbar = gameui::makeHudHotbar(snapshot->slots, snapshot->selected, m_atlasVersion,
+					m_remote->actionPending);
+			canAim = view.hotbar.available;
+			if (const char *action = m_remote->actionStatus(now))
+				view.activity = action;
+		}
+	}
+	else if (sim && renderBridge)
+	{
+		sim::InventorySnapshot inventory;
+		sim->inventorySnapshot(inventory);
+		view.hotbar = gameui::makeHudHotbar(inventory.slots, inventory.selectedSlot, m_atlasVersion, false);
+		const auto player = sim->playerSnapshot();
+		canAim = !player.waitingForTerrain;
+		if (!canAim)
+		{
+			view.status = "Waiting for terrain";
+			view.statusKind = Status::Pending;
+		}
+		view.creative = player.flight;
+		if (view.creative && size_t(player.selectedBlock) < textureTypeString.size())
+		{
+			view.creativeBlock = items::itemName(items::itemForBlock(player.selectedBlock));
+			if (view.creativeBlock.empty())
+				view.creativeBlock = textureTypeString[size_t(player.selectedBlock)];
+		}
+	}
+	view.aim = view.captured && canAim && camera.getMode() == CameraMode::PERSPECTIVE;
+	view.target = view.aim && highlight.active;
+	return view;
+}
+
 void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
 						 std::optional<uint64_t> gpuTag)
 {
 	PROFILE_SCOPE("Record");
-	if (m_playerUi)
+	const bool developerOverlay = developerUiAvailable();
+	const bool buildPlayerUi = m_playerUi && !m_inspectionView &&
+		!m_exitAfterBenchmark && !m_benchmark.isActive();
+	if (buildPlayerUi)
 	{
 		PROFILE_SCOPE("GameUIBuild");
 		// A modal or floating window may have appeared during DevUIBuild,
@@ -1894,19 +1980,24 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				cancelGameUiPointer();
 		}
 		gameui::Clip view{};
-		if (gameUi && !m_uiSpike && !m_inspectionView)
+		if (gameUi && m_showDeveloperUi && developerOverlay)
 		{
 			const auto area = gameUi->shell().gameViewRect();
 			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
 			const float x = area.pos.x - origin.x, y = area.pos.y - origin.y;
 			view = {{x, y, x + area.size.x, y + area.size.y}};
 		}
+		std::optional<gameui::HudView> hud;
+		if (!m_uiSpike && m_playerUi->hudVisible() && !m_inventoryPanelOpen && !paused &&
+			m_playerUi->screens().top() == gameui::Screen::Hud &&
+			!(developerOverlay && (imgui->hasOpenPopup() || gameUi->isFileDialogOpen())))
+			hud = playerHudView();
 		m_playerUi->prepare(window, frameIndex, swapchain->getExtent(), view,
-			worldRenderer->getTextureManager(), m_atlasVersion);
+			worldRenderer->getTextureManager(), m_atlasVersion, hud ? &*hud : nullptr);
 		syncUiInput();
 	}
 	std::function<void(VkCommandBuffer)> devUiDraw;
-	if (imgui && !m_uiSpike && !m_inspectionView && !suppressDeveloperUi())
+	if (developerOverlay)
 		devUiDraw = [&](VkCommandBuffer cmd) { imgui->recordDraw(cmd); };
 	worldRenderer->recordFrame(
 		frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, kClearColor,
@@ -1950,12 +2041,12 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 			}
 		}, &frameCtx->gpuProfiler(), gpuTag.value_or(m_benchmark.gpuCaptureTag()),
-		m_playerUi ? &m_playerUi->renderer() : nullptr);
-	if (m_playerUi)
+		buildPlayerUi ? &m_playerUi->renderer() : nullptr);
+	if (buildPlayerUi)
 		m_playerUi->publishRecordedStats(frameNumber, frameIndex);
 }
 
-void Engine::enableGameUi(bool standalone)
+void Engine::enableGameUi(bool standalone, bool previewStrip)
 {
 	auto sample = std::make_unique<GameUiSample>();
 	if (standalone && !setMouseCaptured(false))
@@ -1966,6 +2057,8 @@ void Engine::enableGameUi(bool standalone)
 	// the setting is edited, not silently swallowed.
 	sample->setScalePolicy(m_playerUiSettings.scale);
 	sample->setSettingsNotice(m_playerUiError);
+	sample->setPreviewStripVisible(previewStrip);
+	sample->setHudVisible(m_showPlayerHud);
 	m_uiSpike = standalone;
 	m_playerUi = std::move(sample);
 }
@@ -2022,9 +2115,12 @@ void Engine::run()
 	lastFrame = static_cast<double>(m_lastPerfCounter) / static_cast<double>(m_perfFrequency);
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
-	// Player UI preferences are read for every launch mode: the player surface
-	// exists (or will exist) in all of them, and the record is presentation-only.
-	loadPlayerUiPreferences();
+	if (!m_inspectionView && !m_exitAfterBenchmark)
+	{
+		loadPlayerUiPreferences();
+		if (!m_playerUi)
+			enableGameUi(false, false);
+	}
 	if (!m_uiSpike && !m_inspectionView && !m_exitAfterBenchmark)
 	{
 		loadJoinPreferences();
