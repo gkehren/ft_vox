@@ -7,6 +7,12 @@
 #include <Engine/PlayerUiScale.hpp>
 #include <Engine/PlayerUiStyle.hpp>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <atomic>
 #include <cmath>
 #include <filesystem>
@@ -478,8 +484,36 @@ void preferences()
 			"concurrent readers never report a false corrupt record or a partial value");
 	}
 
-	// R03: an injected replacement failure against the real destination keeps the
-	// previous record and leaves no staging file behind.
+#if defined(_WIN32)
+	// R03: a real replacement failure against the actual destination. A second
+	// instance holds the record without FILE_SHARE_DELETE, so MoveFileEx cannot
+	// land: save reports false, the previous record survives and the staging file
+	// is cleaned up.
+	{
+		PlayerUiSettings kept;
+		kept.scale = {ScaleMode::Fixed, 1.25f};
+		CHECK(kept.save(path), "the record to survive a sharing violation is on disk");
+		const auto wide = path.wstring();
+		const HANDLE holder = CreateFileW(wide.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(holder != INVALID_HANDLE_VALUE, "the record can be held exclusively by another instance");
+		PlayerUiSettings replacement;
+		replacement.scale = {ScaleMode::Fixed, 2.f};
+		CHECK(!replacement.save(path), "a replace against a held destination is reported as failed");
+		if (holder != INVALID_HANDLE_VALUE)
+			CloseHandle(holder);
+		PlayerUiSettings after;
+		CHECK(after.load(path) == LoadStatus::Ok && after.scale.value == 1.25f,
+			"the previous record survives a failed replacement against the same destination");
+		bool stagingLeft = false;
+		for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+			stagingLeft = stagingLeft || entry.path().filename().string().find(".tmp.") != std::string::npos;
+		CHECK(!stagingLeft, "a failed replacement against the destination leaves no staging file");
+	}
+#endif
+
+	// Same contract on every platform: a destination whose parent is a regular
+	// file cannot be staged, and the existing record is untouched.
 	{
 		PlayerUiSettings kept;
 		kept.scale = {ScaleMode::Fixed, 1.25f};
