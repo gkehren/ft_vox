@@ -117,6 +117,8 @@ void GameUiSample::handleWindowEvent(Uint32 type)
 
 GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SDL_Event &event, bool canClick)
 {
+	if (!m_standalone && !canClick)
+		cancelPointerPress();
 	const SDL_WindowID id = SDL_GetWindowID(window);
 	if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)
 	{
@@ -143,7 +145,6 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 	{
-		const bool consumes = m_standalone || m_armed;
 		if (event.button.windowID != id || event.button.button != SDL_BUTTON_LEFT)
 			return m_standalone ? InputResult::Consumed : InputResult::Unhandled;
 		const bool inside = windowInteractive() && (m_standalone || canClick) &&
@@ -151,12 +152,13 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 				event.button.x, event.button.y);
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
-			m_buttonFocused = m_armed = inside;
-			return inside || consumes ? InputResult::Consumed : InputResult::Unhandled;
+			m_buttonFocused = m_armed = m_ownsPress = inside;
+			return inside || m_standalone ? InputResult::Consumed : InputResult::Unhandled;
 		}
+		const bool consumes = m_standalone || m_ownsPress;
 		if (m_armed && inside)
 			activate("mouse");
-		m_armed = false;
+		m_ownsPress = m_armed = false;
 		return consumes ? InputResult::Consumed : InputResult::Unhandled;
 	}
 	case SDL_EVENT_KEY_UP:

@@ -3,6 +3,7 @@
 #include <Engine/Profiler.hpp>
 #include <Renderer/ColorSpace.hpp>
 #include <Vulkan/ImageBarrier.hpp>
+#include <imgui/imgui_internal.h>
 
 #include "TestMain.hpp"
 #include "VisualImage.hpp"
@@ -193,7 +194,7 @@ struct GameUiBackendProbe
 		return {uint32_t(w), uint32_t(h)};
 	}
 
-	void present()
+	void present(const std::function<void()> &extraDevUi = {}, std::optional<uint64_t> gpuTag = std::nullopt)
 	{
 		auto &prof = GetProfiler();
 		prof.beginFrame();
@@ -211,10 +212,12 @@ struct GameUiBackendProbe
 			PROFILE_SCOPE("DevUIBuild");
 			engine.imgui->beginFrame();
 			engine.drawUi();
+			if (extraDevUi)
+				extraDevUi();
 			engine.imgui->endFrame();
 		}
 		engine.updateFrameUniforms(slot, int(size.width), int(size.height), 5.f);
-		engine.recordFrame(slot, image, 0);
+		engine.recordFrame(slot, image, 0, gpuTag);
 		checked(engine.frameCtx->submitAndPresent(*engine.swapchain, image), "present Game UI proof frame");
 		++engine.frameNumber;
 		prof.endFrame();
@@ -232,9 +235,124 @@ struct GameUiBackendProbe
 			present();
 	}
 
+	void button(Uint32 type, float x, float y)
+	{
+		SDL_Event event{};
+		event.type = type;
+		event.button.windowID = SDL_GetWindowID(engine.window);
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.x = x;
+		event.button.y = y;
+		checked(SDL_PushEvent(&event), "queue Game UI sample click");
+	}
+
+	static int queuedReleases()
+	{
+		int result = 0;
+		for (const auto &event : ImGui::GetCurrentContext()->InputEventsQueue)
+			if (event.Type == ImGuiInputEventType_MouseButton &&
+				event.MouseButton.Button == ImGuiMouseButton_Left && !event.MouseButton.Down)
+				++result;
+		return result;
+	}
+
+	void pointerProof()
+	{
+		auto &sample = *engine.m_playerUi;
+		engine.setMouseCaptured(false);
+		const auto buttonCenter = [&] {
+			const auto r = sample.m_button;
+			return glm::vec2(r.x + r.z, r.y + r.w) * 0.5f;
+		};
+		auto pos = buttonCenter();
+		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
+		frames(2);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		present();
+		CHECK(sample.m_activations == 4, "the scale button accepts one click while ImGui is active");
+		CHECK(sample.lastRecordedStats() && sample.lastRecordedStats()->frameNumber == engine.frameNumber - 1,
+			"UI stats identify the last recorded frame, regardless of frame slot");
+		pos = buttonCenter();
+
+		bool floatingClicked = false;
+		const auto floating = [&] {
+			ImGui::SetNextWindowPos({pos.x - 50.f, pos.y - 30.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({100.f, 60.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Proof floating window", nullptr,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings))
+				floatingClicked |= ImGui::Button("Occluding", {84.f, 44.f});
+			ImGui::End();
+		};
+		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y + 140.f);
+		present(floating);
+		present(floating);
+		CHECK(!engine.imgui->wantCaptureMouse(), "previous ImGui frame saw the pointer over the scene");
+		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
+		SDL_Event motion{};
+		motion.type = SDL_EVENT_MOUSE_MOTION;
+		motion.motion.windowID = SDL_GetWindowID(engine.window);
+		motion.motion.x = pos.x;
+		motion.motion.y = pos.y;
+		checked(SDL_PushEvent(&motion), "queue pointer movement across the floating window");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		present(floating);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		present(floating);
+		present(floating);
+		CHECK(sample.m_activations == 4 && floatingClicked,
+			"a click before NewFrame belongs to the ImGui window covering Game UI");
+
+		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
+		frames(2);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		engine.handleEvents();
+		CHECK(sample.m_armed && sample.m_ownsPress, "Game UI owns the uncovered press");
+		engine.setMouseCaptured(true);
+		CHECK(engine.mouseCaptured && !sample.m_armed && sample.m_ownsPress,
+			"gameplay capture cancels activation and preserves release ownership");
+		const int releasesBeforeCapture = queuedReleases();
+		engine.setMouseCaptured(false);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		engine.handleEvents();
+		CHECK(!engine.mouseCaptured && !sample.m_ownsPress && sample.m_activations == 4 &&
+			queuedReleases() == releasesBeforeCapture,
+			"releasing the cursor does not rearm or deliver the cancelled press to ImGui");
+
+		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
+		frames(2);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		engine.handleEvents();
+		CHECK(sample.m_armed, "a fresh press can arm before a dialog appears");
+		present([] {
+			ImGui::OpenPopup("Proof dialog");
+			if (ImGui::BeginPopupModal("Proof dialog"))
+			{
+				ImGui::TextUnformatted("Game UI pointer proof");
+				ImGui::EndPopup();
+			}
+		});
+		CHECK(!sample.m_armed && sample.m_ownsPress, "opening a dialog between SDL events cancels activation");
+		present([] {
+			if (ImGui::BeginPopupModal("Proof dialog"))
+			{
+				ImGui::CloseCurrentPopup();
+				ImGui::EndPopup();
+			}
+		});
+		const int releasesBeforeDialog = queuedReleases();
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		engine.handleEvents();
+		CHECK(!sample.m_ownsPress && sample.m_activations == 4 && queuedReleases() == releasesBeforeDialog,
+			"closing the dialog keeps the cancelled release with its original owner");
+	}
+
 	void presentProof(const std::filesystem::path &out)
 	{
 		init();
+		const auto &context = *engine.vkContext;
+		const auto before = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
 		engine.gameUi->shell().queueDefaultLayout();
 		engine.gameUi->enableDefaultDeveloperPanels();
 		resize(1920, 1080);
@@ -270,64 +388,94 @@ struct GameUiBackendProbe
 				stats.fontBytes == baseline.fontBytes && stats.compositionBytes == baseline.compositionBytes &&
 				stats.draws <= 8 && stats.dropped == 0, "resize, scale and reload retain a bounded UI allocation footprint");
 		}
-		checked(SDL_SetWindowRelativeMouseMode(engine.window, false), "release cursor for Game UI click");
-		engine.mouseCaptured = false;
-		const float x = (sample.m_button.x + sample.m_button.z) * 0.5f;
-		const float y = (sample.m_button.y + sample.m_button.w) * 0.5f;
-		SDL_WarpMouseInWindow(engine.window, x, y);
-		frames(2);
-		for (const auto type : {SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP})
+		pointerProof();
+		context.waitIdle();
+		if (context.isValidationEnabled())
 		{
-			SDL_Event event{};
-			event.type = type;
-			event.button.windowID = SDL_GetWindowID(engine.window);
-			event.button.button = SDL_BUTTON_LEFT;
-			event.button.x = x;
-			event.button.y = y;
-			checked(SDL_PushEvent(&event), "queue Game UI sample click");
+			const auto errors = context.validationErrorCount() - before;
+			const auto rtssErrors = context.rtssValidationErrorCount() - rtssBefore;
+			CHECK(errors == rtssErrors, "WSI validation errors=" << errors << ", known RTSS errors=" << rtssErrors);
+			std::cout << "WSI validation errors=" << errors << " known_rtss_errors=" << rtssErrors << '\n';
 		}
-		present();
-		CHECK(sample.m_activations == 4, "the scale button accepts one click while ImGui is active");
+		else
+			std::cout << "WSI validation unavailable or disabled for this run\n";
 	}
 
 	void performance()
 	{
+		auto &gpuProfiler = engine.frameCtx->gpuProfiler();
+		if (!gpuProfiler.supported() || !gpuProfiler.enabled())
+		{
+			CHECK(false, gpuProfiler.status());
+			return;
+		}
 		init();
 		engine.m_inspectionView = true;
 		engine.setVSync(false);
 		resize(1920, 1080);
 		auto sample = std::move(engine.m_playerUi);
-		const auto measure = [&](const char *label) {
+		const auto measure = [&](bool uiEnabled, uint64_t tag) {
+			constexpr unsigned measuredFrames = 600;
+			constexpr unsigned minGpuSamples = measuredFrames * 95 / 100;
 			frames(120);
 			std::vector<float> wall, gpuFrame, uiCpu, uiGpu;
-			for (unsigned i = 0; i < 600; ++i)
+			uint64_t serial = gpuProfiler.latest().serial;
+			const bool expectEncode = uiEnabled && colorspace::outputTransferRequiresShaderEncode(
+				colorspace::classifyOutputTransfer(engine.swapchain->getImageFormat(), engine.swapchain->getColorSpace()));
+			const auto collect = [&] {
+				const auto &gpu = gpuProfiler.latest();
+				if (gpu.serial <= serial)
+					return;
+				serial = gpu.serial;
+				const auto draw = size_t(GpuPass::GameUi);
+				const auto encode = size_t(GpuPass::GameUiEncode);
+				if (gpu.benchmarkTag != tag || !gpu.present[size_t(GpuPass::Frame)] ||
+					gpu.present[draw] != uiEnabled || gpu.present[encode] != expectEncode)
+					return;
+				gpuFrame.push_back(gpu.ms[size_t(GpuPass::Frame)]);
+				if (uiEnabled)
+					uiGpu.push_back(gpu.ms[draw] + (expectEncode ? gpu.ms[encode] : 0.f));
+			};
+			for (unsigned i = 0; i < measuredFrames; ++i)
 			{
-				present();
+				present({}, tag);
 				const auto &prof = GetProfiler();
 				wall.push_back(prof.lastFrameMs());
-				uiCpu.push_back(prof.lastScopeMs("GameUIBuild") + prof.lastScopeMs("GameUIDraw"));
-				const auto &gpu = engine.frameCtx->gpuProfiler().latest();
-				if (gpu.present[size_t(GpuPass::Frame)])
-				{
-					gpuFrame.push_back(gpu.ms[size_t(GpuPass::Frame)]);
-					uiGpu.push_back(gpu.ms[size_t(GpuPass::GameUi)] + gpu.ms[size_t(GpuPass::GameUiEncode)]);
-				}
+				if (uiEnabled)
+					uiCpu.push_back(prof.lastScopeMs("GameUIBuild") + prof.lastScopeMs("GameUIDraw"));
+				collect();
+			}
+			// Slot reads happen before recording. Drain the final measured
+			// slots with untagged frames and the normal fence path.
+			for (uint32_t i = 0; i < VkFrameContext::kMaxFramesInFlight; ++i)
+			{
+				present();
+				collect();
 			}
 			const auto report = [](const char *name, const std::vector<float> &samples) {
-				if (!samples.empty())
+				if (samples.empty())
+					std::cout << ' ' << name << "=n/a";
+				else
 					std::cout << ' ' << name << "_median=" << percentile(samples, 0.5f)
 						<< ' ' << name << "_p95=" << percentile(samples, 0.95f);
 			};
-			std::cout << label << " frames=" << wall.size() << " gpu_samples=" << gpuFrame.size();
+			std::cout << (uiEnabled ? "game_ui" : "baseline") << " frames=" << wall.size()
+				<< " gpu_samples=" << gpuFrame.size() << " ui_gpu_samples=" << uiGpu.size();
 			report("frame", wall);
 			report("gpu", gpuFrame);
 			report("ui_cpu", uiCpu);
 			report("ui_gpu", uiGpu);
 			std::cout << '\n';
+			CHECK(gpuFrame.size() >= minGpuSamples, "GPU sample coverage below " << minGpuSamples <<
+				"/" << measuredFrames << " with the expected passes, mode=" << (uiEnabled ? "game_ui" : "baseline"));
 		};
-		measure("baseline");
+		measure(false, 1);
 		engine.m_playerUi = std::move(sample);
-		measure("game_ui");
+		measure(true, 2);
+		measure(true, 3);
+		sample = std::move(engine.m_playerUi);
+		measure(false, 4);
+		engine.m_playerUi = std::move(sample);
 		const auto stats = engine.m_playerUi->renderer().stats(0);
 		std::cout << "ui_resources draws=" << stats.draws << " vertices=" << stats.vertices
 			<< " sets=" << stats.descriptorSets << " instance_bytes=" << stats.instanceBytes
@@ -354,5 +502,5 @@ int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output)
 int runGameUiPerformance(Engine &engine)
 {
 	GameUiBackendProbe(engine).performance();
-	return 0;
+	return testmain::exitCode();
 }

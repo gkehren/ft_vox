@@ -230,7 +230,10 @@ private:
 	/// Record the frame's passes (issue #209 frame step). Mesh uploads are
 	/// recorded HERE (after acquire) — the only GPU upload point; no device
 	/// idle. ImGui draws and the biome-map upload keep their pass ordering.
-	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget);
+	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
+					 std::optional<uint64_t> gpuTag = std::nullopt);
+	void setMouseCaptured(bool captured);
+	bool gameUiCanClickAt(float x, float y) const;
 	/// FPS / world-state window title, once per second of frame clock.
 	void updateWindowTitle(double currentFrame);
 	void placeCameraOnSurface();

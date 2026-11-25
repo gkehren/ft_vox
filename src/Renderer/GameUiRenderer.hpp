@@ -16,6 +16,12 @@ struct RenderStats
 	VkDeviceSize instanceBytes{}, fontBytes{}, compositionBytes{};
 };
 
+struct RecordedStats
+{
+	uint64_t frameNumber{};
+	RenderStats metrics{};
+};
+
 class Renderer
 {
 public:

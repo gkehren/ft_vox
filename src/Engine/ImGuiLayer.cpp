@@ -307,3 +307,38 @@ bool ImGuiLayer::wantCaptureMouse() const
 {
 	return m_initialized && ImGui::GetIO().WantCaptureMouse;
 }
+
+bool ImGuiLayer::blocksGameUiPointer(float x, float y) const
+{
+	if (!m_initialized)
+		return false;
+	const ImGuiContext &ctx = *ImGui::GetCurrentContext();
+	if (!ctx.OpenPopupStack.empty() || ctx.MovingWindow || ctx.DragDropActive ||
+		(ctx.ActiveId && ctx.ActiveIdMouseButton == ImGuiMouseButton_Left && ctx.IO.MouseDown[0]))
+		return true;
+
+	const auto *viewport = ImGui::GetMainViewport();
+	const ImVec2 pos{viewport->Pos.x + x, viewport->Pos.y + y};
+	for (const ImGuiWindow *window : ctx.Windows)
+	{
+		// NewFrame's hover uses WasActive and the previous event position.
+		// Active and OuterRectClipped describe the most recently drawn layout.
+		if (!window->Active || window->Hidden || window->Viewport != viewport ||
+			(window->IsFallbackWindow && !window->WriteAccessed))
+			continue;
+		const bool resizable = !(window->Flags & (ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMouseInputs));
+		const float border = resizable ? ctx.Style.WindowBorderHoverPadding : 0.f;
+		const ImVec2 padding{std::max(border, ctx.Style.TouchExtraPadding.x),
+			std::max(border, ctx.Style.TouchExtraPadding.y)};
+		if (!window->OuterRectClipped.ContainsWithPad(pos, padding))
+			continue;
+		const ImVec2 hole{window->Pos.x + window->HitTestHoleOffset.x,
+			window->Pos.y + window->HitTestHoleOffset.y};
+		const ImRect passthrough(hole, ImVec2(hole.x + window->HitTestHoleSize.x,
+			hole.y + window->HitTestHoleSize.y));
+		if (!passthrough.Contains(pos))
+			return true;
+	}
+	return false;
+}

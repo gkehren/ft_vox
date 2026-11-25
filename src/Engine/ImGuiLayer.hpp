@@ -30,6 +30,8 @@ public:
 
 	bool wantCaptureKeyboard() const;
 	bool wantCaptureMouse() const;
+	// Checks the latest drawn ImGui windows at the SDL event's coordinates.
+	bool blocksGameUiPointer(float x, float y) const;
 
 	/// Current UI scale (1.0 = 100%). Derived from the display content scale
 	/// at startup, overridden by the persisted value in imgui.ini.

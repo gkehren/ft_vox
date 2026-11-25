@@ -250,7 +250,7 @@ struct GameUIFrame
 	// into Engine / ImGuiLayer. setUiScale applies at the next frame boundary
 	// (never mid-frame); requestExit mirrors the Escape quit path.
 	float uiScale{1.f};
-	std::optional<gameui::RenderStats> gameUiStats;
+	std::optional<gameui::RecordedStats> gameUiStats;
 	std::function<void(float)> setUiScale;
 	std::function<void()> requestExit;
 

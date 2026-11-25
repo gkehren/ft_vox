@@ -486,8 +486,7 @@ void Engine::setInspectionView(glm::vec3 position, float yaw, float pitch, float
     sim->setPlayerFlight(true, glm::dvec3(camera.getPosition()) -
                                    glm::dvec3(0, sim->playerSettings().eyeHeight, 0));
     jumpPressed = false;
-    mouseCaptured = false;
-    SDL_SetWindowRelativeMouseMode(window, false);
+    setMouseCaptured(false);
     shaderParams.dayCycleEnabled = false;
     shaderParams.dayTime = 0.35f;
     showDemoPlayers = false;
@@ -878,6 +877,21 @@ void Engine::updateHighlight()
 		worldRenderer->overlays().setHighlight(highlight);
 }
 
+void Engine::setMouseCaptured(bool captured)
+{
+	if (captured && m_playerUi)
+		m_playerUi->cancelPointerPress();
+	mouseCaptured = captured;
+	SDL_SetWindowRelativeMouseMode(window, captured);
+}
+
+bool Engine::gameUiCanClickAt(float x, float y) const
+{
+	return !mouseCaptured && !m_benchmark.locksInput() &&
+		!(gameUi && gameUi->isFileDialogOpen()) &&
+		!(imgui && !m_inspectionView && imgui->blocksGameUiPointer(x, y));
+}
+
 void Engine::handleEvents()
 {
 	// Shortcut-routing frame built ONCE per event batch (review §4.8): the
@@ -893,8 +907,24 @@ void Engine::handleEvents()
 	{
 		if (m_playerUi)
 		{
-			const bool canClick = !mouseCaptured && !m_benchmark.locksInput() &&
-				!(imgui && imgui->wantCaptureMouse()) && !(gameUi && gameUi->isFileDialogOpen());
+			bool canClick = true;
+			if (!m_uiSpike)
+			{
+				if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP)
+					canClick = gameUiCanClickAt(event.button.x, event.button.y);
+				else if (m_playerUi->hasArmedPress())
+				{
+					float x = 0.f, y = 0.f;
+					if (event.type == SDL_EVENT_MOUSE_MOTION)
+					{
+						x = event.motion.x;
+						y = event.motion.y;
+					}
+					else
+						SDL_GetMouseState(&x, &y);
+					canClick = gameUiCanClickAt(x, y);
+				}
+			}
 			const auto result = m_playerUi->handleEvent(window, event, canClick);
 			if (result == GameUiSample::InputResult::Exit)
 				requestExit();
@@ -1007,8 +1037,7 @@ void Engine::handleEvents()
 
 			if (key == SDLK_C)
 			{
-				mouseCaptured = !mouseCaptured;
-				SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
+				setMouseCaptured(!mouseCaptured);
 				break;
 			}
 			if (key == SDLK_B)
@@ -1038,10 +1067,7 @@ void Engine::handleEvents()
 				// Inventory-panel UI flag; the panel itself lands in #229.
 				m_inventoryPanelOpen = !m_inventoryPanelOpen;
 				if (m_remote)
-				{
-					mouseCaptured = !m_inventoryPanelOpen;
-					SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
-				}
+					setMouseCaptured(!m_inventoryPanelOpen);
 				break;
 			}
 			if (key == SDLK_T)
@@ -1652,7 +1678,7 @@ void Engine::drawUi()
 	f.inventoryPanelOpen = &m_inventoryPanelOpen;
 	f.atlasVersion = m_atlasVersion;
 	if (m_playerUi)
-		f.gameUiStats = m_playerUi->renderer().stats(frameCtx->frameIndex());
+		f.gameUiStats = m_playerUi->lastRecordedStats();
 	f.seed = worldSeed();
 	f.worldGenerationId = worldGenerationId();
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
@@ -1742,7 +1768,7 @@ void Engine::drawUi()
 	gameUi->draw(f);
 
 	if (mouseCaptured != prevCapture)
-		SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
+		setMouseCaptured(mouseCaptured);
 	if (worldRenderer)
 		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 
@@ -1831,12 +1857,22 @@ void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, do
 							renderSettings.shadowCascadeFar, underwater);
 }
 
-void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget)
+void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
+						 std::optional<uint64_t> gpuTag)
 {
 	PROFILE_SCOPE("Record");
 	if (m_playerUi)
 	{
 		PROFILE_SCOPE("GameUIBuild");
+		// A modal or floating window may have appeared during DevUIBuild,
+		// even if SDL delivered no pointer event this frame.
+		if (!m_uiSpike && m_playerUi->hasArmedPress())
+		{
+			float x = 0.f, y = 0.f;
+			SDL_GetMouseState(&x, &y);
+			if (!gameUiCanClickAt(x, y))
+				m_playerUi->cancelPointerPress();
+		}
 		gameui::Clip view{};
 		if (gameUi && !m_uiSpike && !m_inspectionView)
 		{
@@ -1892,8 +1928,10 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				PROFILE_SCOPE("BiomeMapUpload");
 				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 			}
-		}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag(),
+		}, &frameCtx->gpuProfiler(), gpuTag.value_or(m_benchmark.gpuCaptureTag()),
 		m_playerUi ? &m_playerUi->renderer() : nullptr);
+	if (m_playerUi)
+		m_playerUi->publishRecordedStats(frameNumber, frameIndex);
 }
 
 void Engine::enableGameUi(bool standalone)

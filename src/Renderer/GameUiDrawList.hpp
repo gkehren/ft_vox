@@ -50,7 +50,8 @@ class DrawList
 {
 public:
 	static constexpr uint32_t kMaxQuads = 2048;
-	static constexpr uint32_t kMaxBatches = 32;
+	// Reserve one of the 32 draws for UNORM output encoding.
+	static constexpr uint32_t kMaxBatches = 31;
 
 	void reset(glm::vec2 logicalSize, uint64_t atlasGeneration)
 	{
