@@ -36,6 +36,7 @@ static void printUsage(const char *argv0)
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
+			  << "  --ui-spike                  Run the standalone Game UI prototype over a solo scene\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
 			  << "  --quality <name|0-3>        Graphics preset: low|medium|high|cinematic\n"
@@ -72,6 +73,7 @@ int main(int argc, char **argv)
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
+	bool uiSpike = false;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
 	std::optional<int> qualityPreset;
@@ -84,6 +86,11 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
+		if (arg == "--ui-spike")
+		{
+			uiSpike = true;
+			continue;
+		}
 		if (arg == "--shadow-size")
 		{
 			if (i + 1 >= argc)
@@ -373,6 +380,11 @@ int main(int argc, char **argv)
 	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
+	if (uiSpike && (server || !worldName.empty() || benchmarkDuration > 0.f || inspection))
+	{
+		std::cerr << "Error: --ui-spike uses a transient solo scene and cannot be combined with --connect, --world, --benchmark or --view.\n";
+		return kExitUsage;
+	}
 	if (server && (!worldName.empty() || benchmarkDuration > 0.f || inspection))
 	{
 		std::cerr << "Error: --connect cannot be combined with --world, --benchmark or --view.\n";
@@ -440,6 +452,8 @@ int main(int argc, char **argv)
 			engine.benchmark().requestStart();
 			engine.setExitAfterBenchmark(true);
 		}
+		if (uiSpike)
+			engine.enableUiSpike();
 		engine.run();
 	}
 	catch (const std::exception &e)

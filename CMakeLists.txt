@@ -211,6 +211,8 @@ ft_vox_compile_shader(vert item.vert.glsl item.vert.spv)
 ft_vox_compile_shader(frag item.frag.glsl item.frag.spv)
 ft_vox_compile_shader(vert overlay.vert.glsl overlay.vert.spv)
 ft_vox_compile_shader(frag overlay.frag.glsl overlay.frag.spv)
+ft_vox_compile_shader(vert ui_spike.vert.glsl ui_spike.vert.spv)
+ft_vox_compile_shader(frag ui_spike.frag.glsl ui_spike.frag.spv)
 add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES} ft_vox_frame_ubo_glsl)
 add_dependencies(ft_vox_shaders ft_vox_frame_ubo_glsl)
 
@@ -333,6 +335,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/ClientProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/MultiplayerJoin.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/UiSpike.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIInventory.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIMultiplayer.cpp

@@ -542,7 +542,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 								  VkSwapchain &swapchain, const std::vector<Chunk *> &chunks,
 								  const std::vector<Chunk *> &shadowChunks, const VkClearColorValue &clearColor,
 								  const std::function<void(VkCommandBuffer)> &preRecord,
-								  const std::function<void(VkCommandBuffer)> &imguiDraw,
+								  const std::function<void(VkCommandBuffer)> &uiDraw,
 								  const std::function<void(VkCommandBuffer)> &postImGuiRecord,
 								  VkGpuProfiler *gpu, uint64_t benchmarkTag)
 {
@@ -565,7 +565,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	recordSceneAndPost(cmd, frameIndex, extent, swapchain.getImages()[imageIndex],
 					   swapchain.getImageViews()[imageIndex], chunks, shadowChunks, clearColor, gpu);
 
-	if (imguiDraw)
+	if (uiDraw)
 	{
 		PROFILE_SCOPE("ImGuiDraw");
 		if (gpu) gpu->beginPass(cmd, GpuPass::ImGui);
@@ -584,7 +584,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		VkRect2D sc{{0, 0}, extent};
 		vkCmdSetViewport(cmd, 0, 1, &vp);
 		vkCmdSetScissor(cmd, 0, 1, &sc);
-		imguiDraw(cmd);
+		uiDraw(cmd);
 		endRendering(cmd);
 		if (gpu) gpu->endPass(cmd, GpuPass::ImGui);
 	}

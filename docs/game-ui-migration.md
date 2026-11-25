@@ -49,3 +49,20 @@ The spike can be removed as a unit in #300. During migration the legacy path is 
 Run `ft_vox --seed 42 --ui-spike --quality low` in a graphics build. It uses a transient solo scene and closes with Escape. Tab focuses the button. Enter, Space, or a mouse press and release inside the button increments the on-screen counter and writes the input source to stdout. Repeated keydown, release outside the button after pressing inside, and activation after focus loss should leave the counter unchanged. Resize to verify that the panel stays centered, the checker texture stays inside the frame and the button target follows its new position.
 
 The spike draws at most two instanced batches, owns one atlas descriptor, and uses a fixed 9 KiB instance buffer per frame slot. It does not add a readback or a per-frame wait. For standard Vulkan validation, set `FT_VOX_VALIDATION=1`. For extra synchronization checking, also set `FT_VOX_SYNC_VALIDATION=1`. Keep this check targeted to hardware runs.
+
+### Windows GPU evidence
+
+Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, SDL 3.4.18, `B8G8R8A8_SRGB` swapchain, FIFO, seed 42 and Low quality. A temporary test driver posted events into the real SDL queue and called `SDL_SetWindowSize` between frames. The [LunarG screenshot layer](https://vulkan.lunarg.com/doc/view/latest/windows/screenshot_layer.html) captured the presented images in a separate run from validation. These are hardware captures of the on-screen frame path.
+
+| Check | Observed |
+| --- | --- |
+| At 1920×1080, press Enter before focus, then Tab and Enter, then repeat Enter | Focus ring appears. Exactly one keyboard activation. [1920×1080 keyboard capture](images/game-ui/spike-keyboard.png) |
+| Resize to 1160×680, press inside and release outside, then press and release inside | Panel recenters, checker sample stays within its scissor, and the moved button accepts exactly one mouse activation. [1160×680 mouse capture](images/game-ui/spike-mouse-resized.png) |
+| Deliver focus loss, press Space, then Escape | Counter stays at two after focus loss. Escape exits with status 0. |
+| CLI | `--help` lists the spike. The four conflicting modes `--connect`, `--world`, `--benchmark` and `--view` each return status 2. |
+| Vulkan validation | The spike and the normal launch control each presented 325 frames and resized once with synchronization validation enabled. Both logged 325 present/acquire `SYNC-HAZARD-WRITE-AFTER-READ` reports and the same sRGB/STORAGE swapchain and image-view VUIDs (12 and 9). The standard-validation spike run showed those two VUIDs only. The existing sRGB/STORAGE reports are documented in the [Vulkan validation guide](vulkan-validation.md). |
+| CPU-only Release | All 50 configured tests passed, including `CoreIncludeGuard`, `HeadlessDeps` and the nested `CpuOnlyBuild`. |
+| Windows graphical Release | `ft_vox` built with both new shaders. Both SPIR-V files passed `spirv-val --target-env vulkan1.2`. `UiShell`, `PostResizeFormats` and the `VisualRegression` smoke suite passed. `test_engine_reload.exe` passed all 33 checks when run from the game's build output directory, where its compiled shader files were available. |
+| Linux/WSL compile | Debian GCC compiled and linked the graphical executable with the local build's cached shader compiler stub. The shader compile and GPU evidence above use the actual Windows Vulkan SDK toolchain. |
+
+Linux and macOS/MoltenVK graphics, UNORM swapchain output, high-DPI monitor transitions and minimization were untested for the spike. Production UI timing and resource-pack reload measurements are follow-ups in #300–#309.

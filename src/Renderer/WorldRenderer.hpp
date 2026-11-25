@@ -58,7 +58,8 @@ public:
 						bool underwater = false);
 
 	/// Record full frame into an already-reset command buffer (from VkFrameContext).
-	/// postImGuiRecord (issue #191 review round 2) runs after the ImGui pass
+	/// uiDraw runs inside the postprocessing overlay pass.
+	/// postImGuiRecord (issue #191 review round 2) runs after the overlay pass
 	/// is recorded but before the command buffer ends: uploads whose textures
 	/// ImGui samples directly (biome map) commit here so the UI never samples
 	/// pixels newer than the state its draw lists were built from.
@@ -66,13 +67,13 @@ public:
 					 const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 					 const VkClearColorValue &clearColor,
 					 const std::function<void(VkCommandBuffer)> &preRecord = {},
-					 const std::function<void(VkCommandBuffer)> &imguiDraw = {},
+					 const std::function<void(VkCommandBuffer)> &uiDraw = {},
 					 const std::function<void(VkCommandBuffer)> &postImGuiRecord = {},
                      VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
 
 	/// Offscreen variant for tooling (visual-regression tests): identical pass
 	/// graph and production shaders, but composites into a caller-owned target
-	/// which is left in COLOR_ATTACHMENT_OPTIMAL. No ImGui overlay, no
+	/// which is left in COLOR_ATTACHMENT_OPTIMAL. No UI overlay, no
 	/// PRESENT transition — the runtime path never records this way. The
 	/// command buffer must already be in the recording state and is NOT ended
 	/// here (ImmediateCommands::submitAndWait owns the lifecycle).
