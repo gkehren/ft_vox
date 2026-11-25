@@ -70,6 +70,9 @@ struct GameUiBackendProbe
 {
 	explicit GameUiBackendProbe(Engine &host) : engine(host) {}
 	Engine &engine;
+	/// Backing storage for io.IniFilename during the ini-persistence proof: ImGui
+	/// keeps the pointer, so it has to outlive every frame.
+	std::string m_iniPath;
 
 	void init()
 	{
@@ -1618,8 +1621,83 @@ struct GameUiBackendProbe
 			<< " sets=" << stats.descriptorSets << " instance_bytes=" << stats.instanceBytes
 			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
+	/// F01/F12 across a real process boundary: the same ini file is written by the
+	/// `dock` phase (workspace visible, inventory docked into the central node) and
+	/// then re-opened by the `hidden` phase, which starts without the developer
+	/// workspace and opens the inventory through the temporary identity. The
+	/// canonical `[Window][Inventory]` record must come back byte-identical.
+	void iniPersistence(const std::filesystem::path &ini, std::string_view phase)
+	{
+		init();
+		m_iniPath = ini.string();
+		ImGui::GetIO().IniFilename = m_iniPath.c_str();
+		if (std::filesystem::exists(ini))
+			ImGui::LoadIniSettingsFromDisk(m_iniPath.c_str());
+		const bool dock = phase == "dock";
+		engine.setDeveloperWorkspaceVisible(dock);
+		engine.setInventoryOpen(false);
+		frames(3);
+		tap(SDLK_E);
+		frames(2);
+		checked(engine.inventoryPanelOpen(), "the inventory is open for the ini proof");
+		if (dock)
+		{
+			const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(engine.gameUi->shell().dockspaceId());
+			checked(central && central->ID != 0, "the dockspace exposes a central node");
+			ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : engine.gameUi->shell().dockspaceId());
+			ImGui::DockBuilderFinish(engine.gameUi->shell().dockspaceId());
+			frames(2);
+			tap(SDLK_E);
+			frames(1);
+			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
+			const auto record = iniFileInventoryRecord(ini);
+			std::cout << "ini dock phase record: " << record << '\n';
+			CHECK(record.find("DockId=") != std::string::npos &&
+				record.find("DockId=0x00000000") == std::string::npos,
+				"the dock phase persists a real docking association");
+		}
+		else
+		{
+			const auto before = iniFileInventoryRecord(ini);
+			checked(before.find("DockId=0x00000000") == std::string::npos && !before.empty(),
+				"the hidden phase starts from a persisted docking association");
+			tap(SDLK_E); // close through the temporary identity
+			frames(1);
+			tap(SDLK_E); // and open it again
+			frames(2);
+			checked(engine.inventoryPanelOpen() &&
+				ImGui::FindWindowByName("Inventory###inventory-floating") != nullptr,
+				"the hidden workspace opens the inventory through its temporary identity");
+			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
+			const auto after = iniFileInventoryRecord(ini);
+			std::cout << "ini hidden phase record: " << after << '\n';
+			CHECK(after == before,
+				"opening and closing the inventory with the workspace hidden keeps its persisted record");
+		}
+	}
+
+	std::string iniFileInventoryRecord(const std::filesystem::path &ini) const
+	{
+		std::ifstream stream(ini);
+		if (!stream)
+			return {};
+		std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+		const auto start = text.find("[Window][Inventory]\n");
+		if (start == std::string::npos)
+			return {};
+		const auto end = text.find("\n[", start + 1);
+		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
+	}
 };
 
+int runGameUiIniPersistence(Engine &engine, const std::filesystem::path &ini, std::string_view phase)
+{
+	GameUiBackendProbe(engine).iniPersistence(ini, phase);
+	if (testmain::fails == 0)
+		std::cout << "PASS: inventory ini persistence, " << phase << " phase (" << testmain::checks
+			<< " checks)\n";
+	return testmain::exitCode();
+}
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output)
 {
 	GameUiBackendProbe(engine).screenshot(output);
