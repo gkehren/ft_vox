@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Opt-in physical-GPU closure with two native clients and one hosted child."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import time
+from contextlib import ExitStack
+from pathlib import Path
+
+
+def run_phase(client: Path, server: Path, root: Path, phase: str) -> None:
+    evidence = root / phase
+    evidence.mkdir()
+    with ExitStack() as logs:
+        processes: list[tuple[str, subprocess.Popen, Path]] = []
+        try:
+            for role, launcher in (("owner", str(server)), ("guest", "guest")):
+                logs_path = evidence / f"{role}.log"
+                profile_root = root / role / "saves"
+                output = logs.enter_context(logs_path.open("wb"))
+                cmd = [str(client), "--hosted-closure", launcher, str(root), str(profile_root), phase]
+                env = os.environ.copy()
+                env.pop("FT_VOX_MOTION_TRACE", None)
+                process = subprocess.Popen(cmd, cwd=profile_root.parent, stdout=output,
+                                           stderr=subprocess.STDOUT, env=env)
+                processes.append((role, process, logs_path))
+
+            deadline = time.monotonic() + 100
+            while time.monotonic() < deadline:
+                codes = [process.poll() for _, process, _ in processes]
+                if any(code not in (None, 0) for code in codes):
+                    raise RuntimeError(f"{phase} owner/guest exit codes {codes}")
+                if all(code == 0 for code in codes):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"{phase} timed out")
+        finally:
+            # Close only these test clients. Releasing the owner's inherited
+            # writer leaves its dedicated child to checkpoint and exit.
+            for _, process, _ in processes:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=10)
+            for role, _, path in processes:
+                print(f"--- {phase} {role} ({path.name}) ---")
+                log = path.read_text(encoding="utf-8", errors="replace")
+                for line in log.splitlines():
+                    if (line.startswith(("HOSTED ", "SERVER status=stopped ", "Native hosted",
+                                          "Vulkan device:", "Vulkan API:", "FAIL:", "SKIP",
+                                          "[multiplayer]"))):
+                        print(line)
+                for code in sorted(set(re.findall(r"VUID-[\w-]+", log))):
+                    print(f"Vulkan validation {code}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--client", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True, help="new directory for logs and isolated saves")
+    args = parser.parse_args()
+    server, client, root = args.server.resolve(), args.client.resolve(), args.output.resolve()
+    resources = server.parent / "ressources"
+    if not (resources / "default-resource-pack.zip").is_file():
+        parser.error("build ft_vox so its runtime resources sit next to ft_vox_server")
+    root.mkdir(parents=True)
+    for role in ("owner", "guest"):
+        work = root / role
+        work.mkdir()
+        shutil.copytree(resources, work / "ressources")
+    for phase in ("first", "restart"):
+        run_phase(client, server, root, phase)
+    print("Hosted closure passed in both native processes across checkpoint restart.")
+
+
+if __name__ == "__main__":
+    main()

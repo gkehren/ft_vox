@@ -844,6 +844,40 @@ void checkAdministration(const fs::path &exe, const fs::path &root)
 	const auto status = run(exe, {"roles", "status", root, settings.world});
 	CHECK(status.has("operation=ban actor_id=" + std::to_string(guestId.value) + " target_id=" + std::to_string(bannedId.value)) &&
 		status.has("operation=revoke-admin actor_id=" + std::to_string(ownerId.value)), "offline audit shows stable identities");
+
+	const auto replacementProfile = root / "recover-profile";
+	const auto replacementControl = root / "recover-control";
+	writeProfile(replacementProfile, kOutside);
+	require(localcontrol::createControlKey(replacementControl), "create a distinct recovery credential");
+	const auto result = run(exe, {"roles", "recover", root, settings.world,
+		std::to_string(field(status, "world_id=")), std::to_string(field(status, "revision=")),
+		replacementProfile, replacementControl});
+	require(result.code == 0, "recover owner from valid authority with existing moderation: " + result.output);
+	require(supervisor.start(settings, exe, root, owner), "reopen with the retired owner's saved profile");
+	const auto former = awaitAdmin(supervisor);
+	CHECK(former.administration->role == Role::Player && former.administration->audit.empty() &&
+		!supervisor.administer(former.launch, {Operation::Stop, {}, {}}),
+		"the old profile and control key cannot administer the recovered world");
+	stop(supervisor);
+
+	require(supervisor.start(settings, exe, root, hosting::OwnerProfile{kOutside, replacementControl}),
+		"relaunch with the recovered owner's local profile and credential");
+	const auto replacement = awaitAdmin(supervisor);
+	CHECK(replacement.administration->role == Role::Owner && replacement.administration->allowlist &&
+		player(*replacement.administration, bannedId).banned &&
+		replacement.administration->audit.back().operation == Operation::Recover,
+		"the recovered owner has live authority with existing bans and audit still in force");
+	udp::ClientTransport replacementClient(endpoint(replacement), kOutside);
+	const auto replacementId = connect(replacementClient).player;
+	CHECK(player(*replacement.administration, replacementId).role == Role::Owner &&
+		player(*replacement.administration, guestId).role == Role::Player &&
+		player(*replacement.administration, ownerId).role == Role::Player,
+		"only the recovered owner bypasses admission and former role holders stay ordinary players");
+	auto final = command(supervisor, Operation::Stop);
+	if (final.active())
+		final = await(supervisor, [](const Snapshot &s) { return !s.active(); });
+	CHECK(final.state == State::Stopped && final.checkpoint > replacement.checkpoint,
+		"recovered owner can complete a live privileged stop and checkpoint");
 }
 
 }
