@@ -18,7 +18,8 @@ terrain generation and engine architecture.
 
 It features infinite terrain, biome generation, player physics, dynamic
 lighting, water, HDR post-processing, passive wildlife, persistent world
-saves, profiling and automated visual-regression testing.
+saves, server-authoritative multiplayer, in-game server hosting, profiling
+and automated visual-regression testing.
 
 ## Features
 
@@ -41,6 +42,15 @@ saves, profiling and automated visual-regression testing.
 - CPU workload telemetry and GPU frame profiling
 - Automated offscreen visual-regression tests
 
+### Multiplayer
+- Separate CPU-only dedicated server (`ft_vox_server`) with authoritative UDP gameplay
+- Client-side movement prediction and reconciliation, interest-scoped world and entity replication
+- Persistent player identities, positions, inventories and shared world edits
+- Dockable Multiplayer panel: join, reconnect, saved profiles and favorite endpoints
+- In-game private server hosting with configurable player capacity, streaming and graceful checkpoint-confirmed shutdown
+- Per-client ping, snapshot age/loss, prediction and traffic diagnostics; authoritative hosted-server roster and health metrics
+- Durable automatic world ownership, local admin delegation, kick/ban, allowlist and audit history
+
 ## Screenshots
 
 | Sunset | Night |
@@ -61,6 +71,8 @@ graphics engineering.
 - Asynchronous chunk streaming: thread-pool generation and meshing, staged uploads
 - Procedural terrain generation with FastNoise2 noise and biome graphs
 - One voxel collision solver shared by the player and passive mobs
+- Decoupled simulation and rendering, with graphics-free server and headless targets
+- Bounded, versioned UDP transport and private inherited IPC for local administration
 - CPU workload telemetry (`FT_VOX_TELEMETRY`) and GPU timestamp profiling
 - Automated offscreen visual-regression harness with golden references
 - Cross-platform dependency management: vcpkg, system packages and FetchContent
@@ -95,6 +107,41 @@ make run
 For complete build instructions and dependency configuration, see
 [Building ft_vox](docs/building.md).
 
+## Multiplayer quick start
+
+Launch the game normally and open **Multiplayer → Show panel**.
+
+- **Join:** create or select a profile, enter the server address and port,
+  and connect. Disconnect, reconnect and switch profiles from the same panel.
+- **Host:** select or create a world, choose a profile and server options,
+  and click **Start server**. The game supervises a separate
+  `ft_vox_server` process and can join automatically. A new world binds
+  its primary owner to the selected local profile; existing ownership is preserved.
+- **Players / Network / Administration:** inspect live server status and
+  roster when hosting, view your own network diagnostics, and manage access
+  using server-verified local administrative permissions.
+
+You can also run a dedicated server without graphics:
+
+```bash
+cmake -S . -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cpu --config Release --target ft_vox_server
+./build-cpu/ft_vox_server --world dev --saves-root ./server-saves --port 7777
+```
+
+On Windows with a Visual Studio generator, use
+`.\build-cpu\Release\ft_vox_server.exe`.
+
+**Deployment scope:** loopback by default, with explicit opt-in for trusted
+private LAN/VPN connections. The gameplay transport does not provide
+authenticated encryption or public Internet security. Privileged commands
+use a separate local authenticated control channel; remote administration
+is not supported.
+
+See the [dedicated server guide](docs/dedicated-server.md),
+[multiplayer client guide](docs/multiplayer-client-smoke.md) and
+[network security limitations](docs/multiplayer-public-network-readiness.md).
+
 ## Controls
 
 | Input | Action |
@@ -118,6 +165,10 @@ Detailed technical documentation lives under [`docs/`](docs/):
 - [Simulation / render contracts](docs/simulation-render-contracts.md)
 - [Headless simulation runner](docs/headless-runner.md)
 - [Dedicated server](docs/dedicated-server.md)
+- [Authoritative multiplayer protocol](docs/adr/authoritative-wire-protocol.md)
+- [Multiplayer client and hosting guide](docs/multiplayer-client-smoke.md)
+- [Multiplayer hosting and recovery validation](docs/multiplayer-hosting-closure.md)
+- [Public-network readiness and security limits](docs/multiplayer-public-network-readiness.md)
 - [Vulkan renderer](docs/vulkan-graphics.md)
 - [Terrain generation](docs/terrain-generation.md)
 - [Player physics](docs/player-physics.md)
@@ -132,8 +183,14 @@ ft_vox is under active development. The core rendering, terrain, physics and
 tooling systems are functional, but APIs, gameplay systems and asset formats
 may still change.
 
-An experimental UDP networking prototype lives under `src/Network/`; it is
-compiled into `test_network` only and is not part of the game.
+Server-authoritative multiplayer is integrated into the game, with a separate
+CPU-only dedicated server, persistent world and player state, in-game hosting,
+network diagnostics and local administration. The legacy Boost UDP prototype
+remains a separate test target; it is not the production gameplay transport.
+
+The current multiplayer scope is trusted private networks, not public Internet
+hosting. See the [closure evidence](docs/multiplayer-hosting-closure.md) and
+[deployment limits](docs/multiplayer-public-network-readiness.md).
 
 ## License
 
