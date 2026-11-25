@@ -1330,6 +1330,7 @@ list(REMOVE_ITEM FT_VOX_ENGINE_TEST_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 add_executable(test_engine_reload
     test_engine_reload.cpp
     EngineJoinSmoke.cpp
+    UiSpikeSmoke.cpp
     ${FT_VOX_ENGINE_TEST_SOURCES}
 )
 

@@ -25,6 +25,7 @@
 
 int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
 int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
+int runUiSpikeSmoke(Engine &engine);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
 	const std::filesystem::path &evidence, bool restoring);
 
@@ -67,6 +68,8 @@ int main(int argc, char **argv)
 
 	try
 	{
+		if (argc == 2 && std::string_view(argv[1]) == "--ui-spike-smoke")
+			return runUiSpikeSmoke(*engine);
 		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")
 		{
 			engine->setSavesRootForTests(argv[4]);

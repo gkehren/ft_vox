@@ -35,6 +35,7 @@
 #include <utils.hpp>
 
 namespace net::udp { struct Address; }
+class UiSpike;
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
 class Engine
@@ -46,6 +47,7 @@ public:
 	~Engine();
 
 	void run();
+	void enableUiSpike();
 	void initializeNoiseGenerator(int seed);
 	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
 					   const net::wire::PlayerKey &key);
@@ -158,6 +160,7 @@ public:
 
 private:
 	friend struct EngineJoinProbe;
+	friend struct UiSpikeProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
 	void loadHosting();
@@ -257,7 +260,7 @@ private:
 	///     suspended by inspection itself — they keep advancing unless the
 	///     window is unfocused, a benchmark is active, or the mobs toggle is
 	///     off (m_inspectionView is not part of simulationSuspended()).
-	bool simulationSuspended() const { return paused || !windowFocused || m_benchmark.isActive(); }
+	bool simulationSuspended() const { return paused || !windowFocused || m_benchmark.isActive() || m_uiSpike; }
 
 	/// World-generation epoch barrier (issue #209, Epic #204 Phase E).
 	/// Called on EVERY authoritative world transition (initialize / reload),
@@ -354,6 +357,7 @@ private:
 	std::unique_ptr<WorldRenderer> worldRenderer;
 	std::unique_ptr<ImGuiLayer> imgui;
 	std::unique_ptr<GameUI> gameUi;
+	std::unique_ptr<UiSpike> m_uiSpike;
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
 	// Authoritative simulation + derived render projection (Epic #204,

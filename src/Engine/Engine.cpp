@@ -14,6 +14,7 @@
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
+#include <Engine/UiSpike.hpp>
 #include <World/WorldPersistence.hpp>
 #include <imgui/imgui.h>
 
@@ -182,6 +183,7 @@ Engine::~Engine()
 		m_remote->disconnect();
 	if (vkContext)
 		vkContext->waitIdle();
+	m_uiSpike.reset();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
 	// flush the save queue while the world is still alive. The simulation
@@ -662,6 +664,8 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	swapchain->recreate(width, height, desiredVSync);
 	frameCtx->onSwapchainRecreate(swapchain->getImageCount());
 	worldRenderer->onSwapchainRecreate(*swapchain);
+	if (m_uiSpike)
+		m_uiSpike->setTargetFormat(swapchain->getImageFormat());
 	if (imgui && imgui->onSwapchainRecreate(*swapchain) && gameUi)
 		gameUi->onImGuiVulkanBackendRecreate();
 
@@ -887,7 +891,15 @@ void Engine::handleEvents()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
-		if (imgui)
+		if (m_uiSpike)
+		{
+			const auto result = m_uiSpike->handleEvent(window, event);
+			if (result == UiSpike::InputResult::Exit)
+				requestExit();
+			if (result != UiSpike::InputResult::Unhandled)
+				continue;
+		}
+		else if (imgui)
 			imgui->processEvent(event);
 
 		switch (event.type)
@@ -1847,7 +1859,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 			}
 		},
 		[&](VkCommandBuffer cmd) {
-			if (imgui)
+			if (m_uiSpike)
+				m_uiSpike->record(cmd, frameIndex, window, swapchain->getExtent());
+			else if (imgui)
 				imgui->recordDraw(cmd);
 		},
 		// Biome-map upload AFTER the ImGui pass (issue #191 review
@@ -1863,6 +1877,16 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 			}
 		}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
+}
+
+void Engine::enableUiSpike()
+{
+	auto spike = std::make_unique<UiSpike>();
+	if (!SDL_SetWindowRelativeMouseMode(window, false))
+		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
+	spike->init(window, *vkContext, *immediate, swapchain->getImageFormat());
+	mouseCaptured = false;
+	m_uiSpike = std::move(spike);
 }
 
 // ===========================================================================
@@ -1917,7 +1941,7 @@ void Engine::run()
 	lastFrame = static_cast<double>(m_lastPerfCounter) / static_cast<double>(m_perfFrequency);
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
-	if (!m_inspectionView && !m_exitAfterBenchmark)
+	if (!m_uiSpike && !m_inspectionView && !m_exitAfterBenchmark)
 	{
 		loadJoinPreferences();
 		loadHosting();
@@ -1926,7 +1950,7 @@ void Engine::run()
 	// First run on this machine (no imgui.ini yet): start with the default
 	// developer layout instead of an empty workspace. Benchmark runs keep the
 	// stock UI closed so open panels cannot perturb scores (issue #183).
-	if (imgui && gameUi && !imgui->hadExistingIni() && !m_exitAfterBenchmark)
+	if (imgui && gameUi && !imgui->hadExistingIni() && !m_exitAfterBenchmark && !m_uiSpike)
 	{
 		gameUi->shell().queueDefaultLayout();
 		gameUi->enableDefaultDeveloperPanels();
@@ -1955,7 +1979,8 @@ void Engine::run()
 		// next gameplay timestep (restore = rawDt of a normal frame).
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
-		if (pixelW == 0 || pixelH == 0 || (m_remote && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
+		if (pixelW == 0 || pixelH == 0 ||
+			((m_remote || m_uiSpike) && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
 		{
 			if (m_remote)
 				pollRemote();
@@ -2060,7 +2085,7 @@ void Engine::run()
 		stagingRing.beginFrame(frameIndex);
 
 		// (12) ImGui build from sim/render snapshots (CPU only; draw later).
-		if (imgui)
+		if (imgui && !m_uiSpike)
 		{
 			PROFILE_SCOPE("ImGui");
 			imgui->beginFrame();
