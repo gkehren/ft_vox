@@ -175,6 +175,43 @@ void Renderer::init(VkContext &context, ImmediateCommands &immediate, VkExtent2D
 	setOutput(format, colorSpace);
 }
 
+bool Renderer::setFont(ImmediateCommands &immediate, VkExtent2D extent,
+				   std::span<const uint8_t> coverage)
+{
+	const uint64_t bytes = uint64_t(extent.width) * uint64_t(extent.height);
+	if (!m_context || extent.width == 0 || extent.height == 0 || bytes > 8u * 1024 * 1024 ||
+		coverage.size() != bytes)
+		return false;
+	const auto device = m_context->getDevice();
+	const auto allocator = m_context->getAllocator();
+	// Prepare the replacement completely before touching anything the frames in
+	// flight can see (R07). A failure here leaves the current atlas untouched.
+	AllocatedImage next{};
+	try
+	{
+		next = createImage2D(allocator, device, extent.width, extent.height, VK_FORMAT_R8_UNORM,
+			VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+		if (!next.image || !next.view)
+		{
+			destroyImage(allocator, device, next);
+			return false;
+		}
+		uploadImage2D(allocator, immediate, next, coverage.data(), bytes);
+	}
+	catch (const std::exception &)
+	{
+		destroyImage(allocator, device, next);
+		return false;
+	}
+	// Safe boundary: every queued sample of the current atlas has completed.
+	m_context->waitIdle();
+	for (auto &slot : m_slots)
+		bindImage(device, slot.images, 0, m_fontSampler, next.view);
+	destroyImage(allocator, device, m_font);
+	m_font = next;
+	return true;
+}
+
 void Renderer::createDescriptors()
 {
 	const auto device = m_context->getDevice();

@@ -341,6 +341,11 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUiSample.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/EngineUiInput.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUiShowcase.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUiGallery.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiGallery.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiPreferences.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiFonts.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIInventory.cpp

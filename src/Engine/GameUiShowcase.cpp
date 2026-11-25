@@ -7,9 +7,8 @@ namespace
 enum ScreenControl : ControlId
 {
 	Resume = 1, Showcase, Quit, Return, Confirm, Name, Option, Amount, Choices,
-	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled
+	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock
 };
-constexpr glm::vec4 kCard{0.052f, 0.083f, 0.103f, 0.97f};
 constexpr std::array<std::string_view, 8> kBiomes{
 	"Grassland", "Forest", "Desert", "Tundra", "Swamp", "Savanna", "Taiga", "Ocean"};
 constexpr std::array<std::string_view, 6> kMaterials{
@@ -42,9 +41,12 @@ NavKey navKey(SDL_Keycode code)
 
 void GameUiSample::invalidateLayout()
 {
+	// Geometry only (issue #302 F16): a scale or resolution change rebuilds the
+	// layout but keeps focus, selection, notifications, field values and the
+	// scroll offset. Screen entry is detected separately by m_screenRevision and
+	// is the only place that resets presentation state or cancels composition.
 	cancelPointerPress();
 	m_layoutRevision = UINT64_MAX;
-	m_widgets.cancelEditing();
 }
 
 void GameUiSample::resetScreens()
@@ -89,11 +91,19 @@ bool GameUiSample::syncInventory(bool open)
 
 void GameUiSample::buildScreen(Clip scene, float scale)
 {
-	const bool newScreen = m_layoutRevision != m_screens.revision();
-	const float offset = newScreen ? 0.f : m_widgets.viewport().offset;
+	const bool entered = m_screenRevision != m_screens.revision();
+	const bool rebuilt = m_layoutRevision != m_screens.revision();
+	const float offset = entered ? 0.f : m_widgets.viewport().offset;
+	if (entered)
+	{
+		m_screenRevision = m_screens.revision();
+		m_widgets.cancelEditing();
+	}
+	else if (rebuilt)
+		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
-	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 224.f : 164.f);
+	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 292.f : 164.f);
 	const float width = screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
@@ -133,8 +143,11 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		add(0, Label{}, 26.f, "Exit to desktop?");
 		add(0, Label{}, 27.f, "The game will use its normal shutdown path.");
 		const auto row = column.next(36.f * scale);
+		// R10: destructive actions are visually distinct. Cancel is added first,
+		// so it is also the initial focus: a stray Enter can never exit the game.
 		m_widgets.add({Return, gridCell(row, 2, 1, 0, 0, 8.f * scale), "Cancel", {}, Button{}});
-		m_widgets.add({Confirm, gridCell(row, 2, 1, 1, 0, 8.f * scale), "Exit", {}, Button{}});
+		m_widgets.add({Confirm, gridCell(row, 2, 1, 1, 0, 8.f * scale), "Exit", {}, Button{},
+			true, style::ButtonVariant::Danger});
 	}
 	else if (screen == Screen::Pause)
 	{
@@ -142,10 +155,14 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		add(Resume, Button{}, 36.f, "Resume");
 		add(Showcase, Button{}, 36.f, "Widget showcase");
 		add(Quit, Button{}, 36.f, "Exit to desktop");
+		// Design-system previews (issue #302) stay after the game actions until
+		// #303-#308 move them into the real screens.
+		add(Gallery, Button{}, 36.f, "Design system");
+		add(HudMock, Button{}, 36.f, "HUD mock");
 	}
 	auto focus = m_screens.focus();
-	m_widgets.focus(focus, focus, newScreen || moved);
-	if (newScreen && !focus)
+	m_widgets.focus(focus, focus, entered || rebuilt || moved);
+	if (entered && !focus)
 		if (const auto *initial = m_widgets.step(0, false))
 			m_widgets.focus(focus, initial->id, true);
 	m_screens.focus(focus);
@@ -154,10 +171,13 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 
 void GameUiSample::paintScreen(glm::vec2 pointer)
 {
+	const auto &theme = style::baseline();
+	auto paint = surface(m_draws.bounds());
 	if (m_screens.suppressDeveloper())
-		m_draws.panel(m_draws.bounds().rect, {0.02f, 0.03f, 0.04f, 0.68f}, m_draws.bounds());
-	m_draws.panel(m_panel.rect, kCard, m_draws.bounds());
-	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer);
+		paint.backdrop(m_draws.bounds(), theme.palette.scrim);
+	paint.card(m_panel);
+	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer, theme, m_atlasLayers,
+		m_fontScale);
 }
 
 GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
@@ -191,11 +211,15 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 	}
 	if (event.action == WidgetAction::Activate)
 	{
+		if (m_screens.top() == Screen::Gallery)
+			return applyGalleryActivate(event.id);
 		switch (event.id)
 		{
 		case Resume:
 		case Return: back(); break;
 		case Showcase: m_screens.push(Screen::Showcase); invalidateLayout(); break;
+		case Gallery: m_screens.push(Screen::Gallery); invalidateLayout(); break;
+		case HudMock: m_screens.push(Screen::HudMock); invalidateLayout(); break;
 		case Quit: m_screens.push(Screen::ConfirmExit); invalidateLayout(); break;
 		case Confirm: return InputResult::Exit;
 		default: break;
@@ -214,7 +238,9 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 {
 	auto *field = interactive && m_screens.nativeScreen() && m_layoutRevision == m_screens.revision()
 		? m_widgets.editor(m_screens.focus()) : nullptr;
-	const auto geometry = field ? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale) : TextGeometry{};
+	const auto geometry = field
+		? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale, m_fontScale)
+		: TextGeometry{};
 	if (geometry.clip.empty())
 		field = nullptr;
 	if (m_sdlEditor && m_sdlEditor != field)
@@ -230,8 +256,10 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 	const auto &clip = geometry.clip.rect;
 	const int left = int(std::floor(clip.x));
 	const int top = int(std::floor(std::clamp(geometry.origin.y, clip.y, clip.w)));
+	// The input area is the editor's own content rect and line: no hardcoded
+	// line height can drift away from the painted caret (issue #302 F01).
 	const SDL_Rect area{left, top, std::max(1, int(std::ceil(clip.z)) - left),
-		std::max(1, int(std::ceil(std::min(clip.w, geometry.origin.y + 13.f * m_screenScale))) - top)};
+		std::max(1, int(std::ceil(std::min(clip.w, geometry.origin.y + geometry.lineHeight))) - top)};
 	SDL_SetTextInputArea(window, &area, int(std::lround(geometry.caretX)) - left);
 }
 
@@ -270,14 +298,16 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		if (event.button.button == SDL_BUTTON_LEFT)
 			result = m_widgets.press({event.button.x, event.button.y}, focus, font(), m_screenScale,
-				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
+				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0, m_fontScale, style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_MOTION:
-		result = m_widgets.drag({event.motion.x, event.motion.y}, m_screenScale);
+		result = m_widgets.drag({event.motion.x, event.motion.y}, m_screenScale,
+			style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 		if (event.button.button == SDL_BUTTON_LEFT)
-			result = m_widgets.release({event.button.x, event.button.y}, m_screenScale);
+			result = m_widgets.release({event.button.x, event.button.y}, m_screenScale,
+				style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_WHEEL:
 		m_widgets.scroll({event.wheel.mouse_x, event.wheel.mouse_y},

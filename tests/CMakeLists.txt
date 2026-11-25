@@ -37,10 +37,36 @@ target_link_libraries(test_game_ui_draw_list PRIVATE glm)
 add_test(NAME GameUiDrawList COMMAND test_game_ui_draw_list)
 
 add_executable(test_game_ui_interaction test_game_ui_interaction.cpp
-    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp)
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp)
 target_include_directories(test_game_ui_interaction PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_game_ui_interaction PRIVATE glm)
 add_test(NAME GameUiInteraction COMMAND test_game_ui_interaction)
+
+# ---------------------------------------------------------------------------
+# Player design system (issue #302, Epic #298 Phase D). CPU-only: glm and the
+# pure UI headers, no SDL/Vulkan/ImGui. GameUiStyle pins the design tokens
+# (WCAG contrast on bright and dark scenes, state precedence, typography and
+# spacing scales), the independent player UI scale policy and its frame
+# boundary, plus the persisted override record (round-trip and every corruption
+# case). GameUiComponents pins the reusable components: slot-grid geometry and
+# hit testing, bounded tooltip placement, toast expiry, confirmation geometry,
+# text fitting/glyph fallback, icon fallback and the draw budget of a whole HUD
+# mock at 16:9, 21:9, small windows and 100-200% scale.
+# ---------------------------------------------------------------------------
+add_executable(test_game_ui_style test_game_ui_style.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiPreferences.cpp)
+target_include_directories(test_game_ui_style PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_game_ui_style PRIVATE glm)
+add_test(NAME GameUiStyle COMMAND test_game_ui_style)
+
+add_executable(test_game_ui_components test_game_ui_components.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiGallery.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp)
+target_include_directories(test_game_ui_components PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_game_ui_components PRIVATE glm)
+add_test(NAME GameUiComponents COMMAND test_game_ui_components)
 
 # ---------------------------------------------------------------------------
 # CPU-only simulation/render contracts (issue #205, Epic #204 Phase A).

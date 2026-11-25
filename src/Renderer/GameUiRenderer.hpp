@@ -34,6 +34,13 @@ public:
 			  std::span<const uint8_t> coverage, VkFormat format, VkColorSpaceKHR colorSpace);
 	// Use the host's swapchain recreation barrier for format-dependent pipelines.
 	void setOutput(VkFormat format, VkColorSpaceKHR colorSpace);
+	/// Replace the font atlas after a framebuffer-density change (issue #302
+	/// F11/R07). The replacement is prepared and uploaded first; the device is
+	/// idled and the published image swapped only once that succeeded, so a
+	/// failure keeps the previous working atlas and leaks nothing.
+	/// Returns false — leaving the current atlas active — on invalid dimensions,
+	/// an upload failure, or a creation failure.
+	bool setFont(ImmediateCommands &immediate, VkExtent2D extent, std::span<const uint8_t> coverage);
 	// Prepare only after waiting on this slot's fence. Atlas is borrowed.
 	void prepare(uint32_t slot, VkExtent2D extent, const DrawList &list,
 				 const TextureManager &atlas, uint64_t currentGeneration);

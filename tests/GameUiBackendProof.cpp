@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 
 namespace
@@ -423,10 +425,13 @@ struct GameUiBackendProbe
 		engine.handleEvents();
 		SDL_Rect textArea{};
 		int cursor = 0;
-		const auto textGeometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(), sample.m_screenScale);
+		const auto textGeometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(),
+			sample.m_screenScale, sample.m_fontScale);
 		CHECK(SDL_GetTextInputArea(engine.window, &textArea, &cursor) &&
 			textArea.x + cursor == int(std::lround(textGeometry.caretX)) &&
-			textGeometry.caretX == textGeometry.clip.rect.z - sample.m_screenScale,
+			textGeometry.caretX == textGeometry.clip.rect.z - 1.f &&
+			textGeometry.glyphScale == gameui::textStyle(gameui::style::TextRole::Body,
+				sample.m_screenScale, sample.m_fontScale).glyphScale(),
 			"SDL candidate location follows the visible horizontally scrolled caret");
 		click(center("Secondary level"));
 		click(center("Enable secondary name"));
@@ -508,6 +513,19 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.screens().top() == Screen::Pause && !engine.suppressDeveloperUi() &&
 			sample.screens().focus() == widget("Exit to desktop").id, "Escape dismisses only the confirmation");
+		// R10: the destructive action is visually distinct and opens with Cancel
+		// focused, so one Enter cannot exit the game.
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::ConfirmExit &&
+				widget("Exit").variant == gameui::style::ButtonVariant::Danger &&
+				widget("Cancel").variant == gameui::style::ButtonVariant::Secondary &&
+				sample.screens().focus() == widget("Cancel").id,
+			"a destructive confirmation opens with Cancel focused and the danger action styled");
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause,
+			"Enter immediately after opening a destructive confirmation activates Cancel");
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(sample.screens().top() == Screen::Hud && !engine.simulationSuspended() &&
@@ -898,6 +916,9 @@ struct GameUiBackendProbe
 			const auto result = engine.applyResourcePack(i % 2 ? (out / "pack").string() : "");
 			CHECK(result.atlasOk && (i % 2 == 0 || result.packHits > 0), "pack published a new atlas");
 			sample.m_activations = i;
+			// The player scale is its own policy now (issue #302); the reload
+			// proof still exercises four distinct scales with it.
+			sample.setScalePolicy({gameui::ScaleMode::Fixed, gameui::kUserScales[i]});
 			frames(4);
 			const auto stats = sample.renderer().stats(0);
 			CHECK(stats.descriptorSets == baseline.descriptorSets && stats.instanceBytes == baseline.instanceBytes &&
@@ -920,6 +941,241 @@ struct GameUiBackendProbe
 		}
 		else
 			std::cout << "WSI validation unavailable or disabled for this run\n";
+	}
+
+	// Player design-system evidence (issue #302): the gallery and the HUD mock
+	// captured from the production composition path at representative
+	// resolutions and player UI scales. Every capture is also checked for a
+	// bounded draw/quad budget and a clean validation counter.
+	void designSystem(const std::filesystem::path &out)
+	{
+		init();
+		auto &device = *engine.vkContext;
+		const auto before = device.validationErrorCount();
+		const auto rtssBefore = device.rtssValidationErrorCount();
+		auto &world = *engine.worldRenderer;
+		auto &sample = *engine.m_playerUi;
+		struct Case
+		{
+			const char *name;
+			int width, height;
+			gameui::ScalePolicy policy;
+			gameui::Screen screen;
+		};
+		const Case cases[] = {
+			{"gallery-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-2560x1080-100", 2560, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-1160x680-100", 1160, 680, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-1920x1080-200", 1920, 1080, {gameui::ScaleMode::Fixed, 2.f}, gameui::Screen::Gallery},
+			{"hud-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
+			{"hud-2560x1080-150", 2560, 1080, {gameui::ScaleMode::Fixed, 1.5f}, gameui::Screen::HudMock},
+			{"hud-960x540-100", 960, 540, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
+		};
+		std::filesystem::create_directories(out);
+		for (const auto &test : cases)
+		{
+			resize(test.width, test.height);
+			frames(2);
+			// Drive the real screen stack the pause menu uses; the scale policy
+			// is applied at the next frame boundary, never mid-frame.
+			sample.resetScreens();
+			sample.setScalePolicy(test.policy);
+			if (test.screen == gameui::Screen::Gallery)
+				sample.openGallery();
+			else
+				sample.openScreen(test.screen);
+			frames(3);
+			const auto extent = this->extent();
+			CHECK(sample.screens().top() == test.screen,
+				"the design-system screen is open for " << test.name);
+			CHECK(std::abs(sample.playerUiScale() - sample.scalePolicy().value) < 0.001f,
+				"the resolved player UI scale matches the requested policy for " << test.name
+					<< " (resolved=" << sample.playerUiScale() << ')');
+			if (test.screen == gameui::Screen::Gallery)
+			{
+				// R10: the gallery's destructive confirmation sample uses the same
+				// danger variant as the real exit flow.
+				const gameui::Widget *danger = nullptr, *cancel = nullptr;
+				for (const auto &item : sample.m_widgets.widgets())
+				{
+					if (item.label == "Continue")
+						danger = &item;
+					if (item.label == "Cancel")
+						cancel = &item;
+				}
+				CHECK(danger && cancel &&
+						danger->variant == gameui::style::ButtonVariant::Danger &&
+						cancel->variant == gameui::style::ButtonVariant::Secondary,
+					"the gallery confirmation styles its destructive action as danger for " << test.name);
+			}
+
+			const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+			world.resizeOutput(extent, format, kColorSpace);
+			sample.renderer().setOutput(format, kColorSpace);
+			Readback target{device};
+			const auto allocator = device.getAllocator();
+			target.output = createImage2D(allocator, device.getDevice(), extent.width, extent.height,
+				format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+			target.buffer = createBuffer(allocator, extent.width * extent.height * 4,
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+				VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+			sample.prepare(engine.window, 0, extent, {}, world.getTextureManager(),
+				engine.m_atlasVersion);
+			const auto stats = sample.renderer().stats(0);
+			const auto image = capture(target, &sample.renderer());
+			CHECK(image.width == extent.width && image.height == extent.height,
+				"the capture keeps the requested extent for " << test.name);
+			CHECK(stats.dropped == 0 && stats.draws <= 32,
+				"the design-system screen stays inside the 32-draw menu budget for " << test.name
+					<< " (draws=" << stats.draws << ", dropped=" << stats.dropped << ')');
+			std::string file = std::string(test.name) + ".png";
+			checked(visual::writePng((out / file).string(), image), "write design-system screenshot");
+		}
+		// F16: a scale change rebuilds geometry without behaving like a screen
+		// re-entry. Focus, the selected slot and the notification queue survive.
+		sample.resetScreens();
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.f});
+		sample.openGallery();
+		frames(3);
+		const auto focus = sample.screens().focus();
+		const auto slot = sample.m_gallerySlot;
+		const auto toastCount = sample.m_toasts.size();
+		const auto toastId = sample.m_toasts.newest() ? sample.m_toasts.newest()->id : 0u;
+		CHECK(focus != 0 && toastId != 0 && toastCount > 0,
+			"the gallery has focus, a selected slot and a notification before the scale change");
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.5f});
+		frames(3);
+		CHECK(std::abs(sample.playerUiScale() - 1.5f) < 0.001f,
+			"the in-session scale change is applied at the next frame boundary");
+		CHECK(sample.screens().focus() == focus && sample.m_gallerySlot == slot &&
+				sample.m_toasts.size() == toastCount && sample.m_toasts.newest() &&
+				sample.m_toasts.newest()->id == toastId,
+			"changing the player UI scale keeps focus, selection and notifications");
+
+		// S03: dynamic atlas replacement on the real GPU path — invalid input is
+		// refused without touching the working atlas, a valid density change swaps
+		// the image and its CPU metrics together, and repeated round-trips return
+		// to the same footprint.
+		{
+			auto &renderer = sample.renderer();
+			const auto baseline = renderer.stats(0);
+			const auto baselinePixels = sample.m_facePixels;
+			const auto baselineFontScale = sample.m_fontScale;
+			CHECK(baseline.draws > 0 && baseline.dropped == 0,
+				"the proof renders with the original atlas before any replacement");
+			const bool refusedEmpty = renderer.setFont(*sample.m_immediate, {0, 0}, {});
+			const std::array<uint8_t, 16> wrongSpan{};
+			const bool refusedSpan = renderer.setFont(*sample.m_immediate, {8, 8}, wrongSpan);
+			CHECK(!refusedEmpty && !refusedSpan,
+				"an invalid atlas replacement reports failure instead of publishing");
+			frames(2);
+			const auto afterFailure = renderer.stats(0);
+			CHECK(afterFailure.fontBytes == baseline.fontBytes && afterFailure.draws > 0 &&
+					afterFailure.dropped == 0 && std::abs(sample.m_facePixels - baselinePixels) < 0.001f,
+				"the original atlas stays usable after a failed replacement");
+			const float other = baselinePixels < 1.5f ? 2.f : 1.f;
+			sample.setFaceDensityOverride(other);
+			frames(2);
+			const auto replaced = renderer.stats(0);
+			CHECK(std::abs(sample.m_facePixels - other) < 0.001f && replaced.draws > 0 &&
+					replaced.dropped == 0 && replaced.descriptorSets == baseline.descriptorSets &&
+					replaced.fontBytes == VkDeviceSize(sample.m_face.width) * sample.m_face.height,
+				"a valid atlas replacement publishes matching GPU and CPU metrics");
+			CHECK(sample.m_fontScale != baselineFontScale,
+				"the framebuffer compensation follows the new density");
+			for (int round = 0; round < 3; ++round)
+			{
+				sample.setFaceDensityOverride(baselinePixels);
+				frames(1);
+				sample.setFaceDensityOverride(other);
+				frames(1);
+			}
+			sample.setFaceDensityOverride(std::nullopt);
+			sample.refreshFaceForDensity(baselinePixels);
+			frames(2);
+			const auto restored = renderer.stats(0);
+			CHECK(std::abs(sample.m_facePixels - baselinePixels) < 0.001f &&
+					sample.m_fontScale == baselineFontScale && restored.fontBytes == baseline.fontBytes &&
+					restored.descriptorSets == baseline.descriptorSets && restored.draws > 0,
+				"repeated atlas replacements leak no font or descriptor resources");
+		}
+
+		// S04: the Engine settings seam, on an isolated directory. A missing record
+		// stays silent, a corrupt one warns and stays untouched until the player
+		// selects a value, a failed write stays dirty and the next explicit
+		// selection persists.
+		{
+			namespace fs = std::filesystem;
+			const auto previousRoot = engine.m_savesRoot;
+			const auto root = fs::temp_directory_path() / "ftvox-player-ui-proof";
+			std::error_code ec;
+			fs::remove_all(root, ec);
+			engine.setSavesRootForTests(root);
+			const auto record = root / ".client-profiles" / "player-ui.txt";
+			const auto readRecord = [&record] {
+				std::ifstream in(record, std::ios::binary);
+				return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			};
+
+			engine.loadPlayerUiPreferences();
+			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto &&
+					!engine.m_playerUiDirty && engine.m_playerUiError.empty() && !fs::exists(record),
+				"a missing preference record loads Auto defaults without a warning or a write");
+			engine.applyPlayerUiScaleRequests();
+			CHECK(!fs::exists(record), "no unsolicited write happens without a selection");
+
+			fs::create_directories(record.parent_path(), ec);
+			{
+				std::ofstream out(record, std::ios::binary | std::ios::trunc);
+				out << "ftvox-player-ui 9\nscale auto\n";
+			}
+			const auto corruptBytes = readRecord();
+			engine.loadPlayerUiPreferences();
+			CHECK(engine.m_playerUiDirty && !engine.m_playerUiError.empty() &&
+					engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto,
+				"a corrupt preference record warns and asks for a repair");
+			engine.applyPlayerUiScaleRequests();
+			CHECK(readRecord() == corruptBytes,
+				"a corrupt record stays untouched while the player does not interact");
+
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Auto, 1.f};
+			engine.applyPlayerUiScaleRequests();
+			gameui::PlayerUiSettings repaired;
+			CHECK(repaired.load(record) == gameui::LoadStatus::Ok && engine.m_playerUiError.empty() &&
+					!engine.m_playerUiDirty,
+				"selecting the current default repairs the record and clears the warning");
+
+			// A destination that cannot be replaced (a directory in its place) keeps
+			// the change in memory and the store dirty.
+			fs::remove(record, ec);
+			fs::create_directories(record, ec);
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
+			engine.applyPlayerUiScaleRequests();
+			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Fixed &&
+					engine.m_playerUiSettings.scale.value == 1.5f && engine.m_playerUiDirty &&
+					!engine.m_playerUiError.empty(),
+				"a failed write keeps the in-memory preference and the dirty state");
+			fs::remove_all(record, ec);
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
+			engine.applyPlayerUiScaleRequests();
+			gameui::PlayerUiSettings persisted;
+			CHECK(persisted.load(record) == gameui::LoadStatus::Ok &&
+					persisted.scale.mode == gameui::ScaleMode::Fixed && persisted.scale.value == 1.5f &&
+					engine.m_playerUiError.empty() && !engine.m_playerUiDirty,
+				"the same selection after recovery persists and clears the warning");
+
+			engine.setSavesRootForTests(previousRoot);
+			fs::remove_all(root, ec);
+		}
+
+		sample.resetScreens();
+		sample.setScalePolicy({gameui::ScaleMode::Auto, 1.f});
+		frames(2);
+		device.waitIdle();
+		const auto errors = device.validationErrorCount() - before;
+		const auto rtss = device.rtssValidationErrorCount() - rtssBefore;
+		CHECK(errors == rtss, "design-system capture validation errors=" << errors
+			<< ", known RTSS errors=" << rtss);
 	}
 
 	void performance()
@@ -1025,6 +1281,14 @@ int runGameUiShowcaseProof(Engine &engine)
 	GameUiBackendProbe(engine).showcaseProof();
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI showcase proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output)
+{
+	GameUiBackendProbe(engine).designSystem(output);
+	if (testmain::fails == 0)
+		std::cout << "PASS: Game UI design-system proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }
 
