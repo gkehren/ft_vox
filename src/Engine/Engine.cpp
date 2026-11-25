@@ -1590,10 +1590,12 @@ void Engine::drawUi()
 	// Nothing consumes the developer frame while the workspace is hidden and no
 	// inventory is on screen: submit the dockspace alone instead of sampling
 	// biome/inventory/network/persistence state and wiring callbacks every frame
-	// (issue #303 F09).
+	// (issue #303 F09). Toggle state owned by the developer keys still reaches the
+	// overlay layer, so B and the demo players keep working without the panels.
 	if (!m_showDeveloperUi && !m_inventoryPanelOpen)
 	{
 		gameUi->maintainDockspace();
+		applyOverlayToggles();
 		return;
 	}
 
@@ -1822,10 +1824,15 @@ void Engine::drawUi()
 	}
 	if (presentedCapture != prevCapture)
 		setMouseCaptured(presentedCapture);
-	if (worldRenderer)
-		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
+	applyOverlayToggles();
+}
 
-	if (worldRenderer && !m_remote)
+void Engine::applyOverlayToggles()
+{
+	if (!worldRenderer)
+		return;
+	worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
+	if (!m_remote)
 		worldRenderer->overlays().setPlayers(showDemoPlayers ? demoPlayers : std::vector<OverlayPlayer>{});
 }
 

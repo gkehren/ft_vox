@@ -24,13 +24,26 @@ Every piece of HUD copy sits on one contrast plate built from the `hudScrim` tok
 | Degraded and ready | Normal HUD plus one warning headline/detail line. Pending action feedback is preserved. |
 | Degraded (or connected) and not ready | Synchronization headline, detail and recovery line; no hotbar, no reticle. |
 | Resyncing / joining / connecting / leaving | Pending headline; no inventory at all, so nothing stale is shown. |
-| Disconnected, rejected, timed out | Error headline, the transport detail and a recovery instruction (`Reconnect: Esc, Multiplayer, Reconnect.`), without the developer workspace. |
+| Disconnected, rejected, timed out | Error headline, the transport detail and a recovery instruction that matches the reachable controls; no hotbar, no reticle. |
 
 ### Workspace visibility (#303 F01/F04)
 
 `Ctrl+Shift+D` (Developer ▸ **Hide developer workspace**) shows and hides the complete developer workspace at runtime. `H` keeps toggling the layout tiles, and the existing developer panel shortcuts still bring the workspace back. Hiding is not "close every panel": the dockspace is still submitted, with `ImGuiDockNodeFlags_KeepAliveOnly` and the same dockspace identity (`UiShell::beginFrame(Workspace)`), so the dock node tree, the split sizes and `imgui.ini` associations survive. Hidden surfaces neither paint nor claim pointer input; gameplay keeps the cursor and the keyboard.
 
-A legacy inventory that was docked keeps working in that mode: while the workspace is hidden, `GameUI::drawInventoryPanel` forces the panel to float (a window docked into a KeepAliveOnly node is not displayed) and remembers its dock node. The node is re-applied once when the workspace returns, after which the player keeps free docking. The queued reset/default layout still runs while the workspace is hidden, so a first launch with `--no-dev-ui` still materializes the default developer layout before it is ever shown.
+A legacy inventory that was docked keeps working in that mode. A window docked into a `KeepAliveOnly` node is not displayed, so while the workspace is hidden `GameUI::drawInventoryPanel` draws the same content through a **separate** window identity (`Inventory###inventory-floating`, visible title `Inventory`) flagged `NoDocking | NoSavedSettings`. The canonical `Inventory` window is never submitted while the workspace is hidden, so `dock node`, dock order and its `imgui.ini` record are untouched for the whole hidden period: opening or closing the floating inventory, exiting with the workspace hidden and resetting the developer layout can neither lose nor overwrite a persisted association. Switching between the two identities discards the transient drag cursor, and the queued reset/default layout still runs while the workspace is hidden, so a first launch with `--no-dev-ui` still materializes the default developer layout before it is ever shown.
+
+### Multiplayer recovery (#303 F03)
+
+A blocked session keeps the transport detail and adds one instruction that names only reachable steps. `recoveryInstruction(workspaceVisible, mouseCaptured)` picks between four lines:
+
+| Workspace | Mouse | Instruction |
+| --- | --- | --- |
+| Hidden | Captured | `Ctrl+Shift+D, C, then Multiplayer > Reconnect.` |
+| Hidden | Free | `Ctrl+Shift+D, then Multiplayer > Reconnect.` |
+| Visible | Captured | `C to free the mouse, then Multiplayer > Reconnect.` |
+| Visible | Free | `Multiplayer > Reconnect.` |
+
+`Multiplayer > Reconnect` is the existing Developer ▸ Multiplayer item (`GameUIFrame::joinServer`), so recovery never requires a restart and never points at a menu that does not exist. The line is painted in the same bounded, contrast-backed feedback block as the detail, so it stays readable at 960×540 and 200% UI scale.
 
 ### Creative selection (#303 F06)
 
@@ -90,9 +103,44 @@ Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, Vulkan 1.3.290 loader wit
 
 The focused headless suites that carry the new policies ran in both builds: `GameUiComponents` (content-aware reticle collisions at 100/150/200% over five layouts, bounded multiline wrap, the `hudSession` table, the creative label, the strip-yield rule), `GameUiInteraction` (workspace visibility transitions and input ownership), `UiShell` (shortcut metadata with the `Ctrl+Shift+D` chord, workspace policy) and `InputRouting`.
 
+#### Correction pass (F08, F01, F03, F09–F12), executed
+
+Same machine, generator, driver and scene as the pass above. What changed in behavior:
+
+- `creativeLabel()` returns before `memcpy` when nothing is copied, so an empty `string_view` with a null pointer never reaches `memcpy` (F08).
+- The hidden-workspace inventory uses a separate, non-persistent identity (`Inventory###inventory-floating`, `NoDocking | NoSavedSettings`). The canonical `Inventory` window is not submitted while the workspace is hidden, so its `DockId` and its `imgui.ini` record are untouched: a hidden-workspace launch, exit or developer-layout reset cannot lose or overwrite a persisted docking association (F01).
+- `hudSession()` flags a blocked session instead of publishing a fixed menu path; the host fills the line through `recoveryInstruction(workspaceVisible, mouseCaptured)`. Hidden workspace with a captured mouse: `Ctrl+Shift+D, C, then Multiplayer > Reconnect.` Hidden with a free mouse: `Ctrl+Shift+D, then Multiplayer > Reconnect.` Visible with a captured mouse: `C to free the mouse, then Multiplayer > Reconnect.` Visible and free: `Multiplayer > Reconnect.` Every step names an existing control — the workspace chord, the mouse release and the developer menu bar item (F03).
+- `Engine::drawUi()` submits the dockspace alone when neither the developer workspace nor the legacy inventory is on screen, so the full-window path builds no player, save, biome or network snapshot and wires no callbacks (F09). The toggles owned by developer keys still reach the overlay layer on that path: `B` keeps flipping chunk borders with no panel drawn, which the proof asserts.
+- The solo terrain wait reads `Waiting for terrain` and describes the held player; the hotbar keeps the authoritative inventory and no longer announces that it will return (F10).
+- `setDeveloperWorkspaceVisible()` is gated by `ui::allowsWorkspaceToggle(m_benchmark.isActive())`, so the chord and the Developer menu item are both consumed without changing the layout during Reloading, Warmup and Running benchmarks (F11).
+
+| Check | Result |
+| --- | --- |
+| `ctest --test-dir build-cpu302 -C Release` (`FT_VOX_GRAPHICS=OFF`) | 53/53 passed |
+| `ctest --test-dir build-g302 -C Release` (graphical) | 75/75 passed, `VisualRegression` with the committed goldens; `GameUiComponents` now runs 5464 checks, including the four `recoveryInstruction` states and the blocked-session `hudSession` row |
+| `test_engine_reload.exe --player-hud-proof` | 53 checks passed (31 before this pass). New: `Ctrl+Shift+D` routed through real SDL key events in both directions, a key repeat and plain `D`/`Ctrl+D`/`Shift+D`/`Alt+D` that must not toggle the workspace, an in-flight developer drag cancelled by hiding, the benchmark guard for the chord and for the menu action, the dockspace-only frame while the workspace and inventory are both off screen (the main menu bar's last-submitted frame does not advance), a chunk-border toggle still applied on that path, and the canonical inventory `DockId` plus its settings record surviving the hidden period while the temporary window reports `DockId == 0` with `NoDocking`/`NoSavedSettings` and reopens in its original dock |
+| `tests/test_multiplayer_join_native.py` (two loopback servers, graphical client) | 47 checks passed (39 before this pass). The readiness transition is now deterministic: a genuinely unready session is observed by withholding the camera pose, so the pending row, the absent hotbar and the absent reticle are asserted instead of hoped for; the blocked row's recovery line must equal `recoveryInstruction(m_showDeveloperUi, mouseCaptured)`, and `Multiplayer > Reconnect` is then invoked and must restore the session, drop the recovery line and republish the inventory |
+| `test_engine_reload.exe --game-ui-showcase-proof` | 39 checks passed; the standalone strip behavior is unchanged |
+| `test_engine_reload.exe --ui-spike-smoke` | 10 checks passed |
+| Debian WSL, GCC, `-DFT_VOX_GRAPHICS=OFF -DFT_VOX_SANITIZERS=ON` | 54/54 passed under ASan+UBSan, including `GameUiComponents` (the F08 fix) and every graphics-off guard |
+| Debian WSL, GCC, `-DFT_VOX_GRAPHICS=OFF -DFT_VOX_TSAN=ON` | The nine `multiplayer` tests and the headless, Game UI, dependency and include guards passed under TSan. They were launched through `setarch -R`: this kernel's ASLR entropy trips the known `ThreadSanitizer: unexpected memory mapping` runtime abort, which has nothing to do with the code under test |
+
+#### Frame cost after the correction pass
+
+Re-executed `--game-ui-performance` on the corrected HEAD with the same command, scene and 600-frame measurement window. GPU timestamp coverage was 600/600 in every run and the resource footprint is unchanged: one draw, 936 vertices, four preallocated descriptor sets, 212,992 bytes of instance buffers, 32,768 bytes of font coverage and no composition image.
+
+| Run | CPU frame median / p95 (ms) | GPU frame median / p95 (ms) | HUD CPU median / p95 (ms) | HUD GPU median / p95 (ms) |
+| --- | --- | --- | --- | --- |
+| Baseline A | 0.559 / 1.287 | 0.417 / 0.813 | — | — |
+| HUD A | 0.544 / 1.283 | 0.422 / 0.655 | 0.0051 / 0.0079 | 0.0031 / 0.0041 |
+| HUD B | 0.518 / 1.202 | 0.422 / 0.653 | 0.0048 / 0.0078 | 0.0031 / 0.0041 |
+| Baseline B | 0.524 / 1.193 | 0.420 / 0.653 | — | — |
+
+The hidden-workspace path also stops paying for the developer frame: the `DevUIBuild` scope measured in the HUD proof is 0.016 ms per frame with the workspace hidden and the inventory closed against 0.032 ms with it visible, and the remainder is ImGui's own frame enumeration plus the `KeepAliveOnly` dockspace submission.
+
 #### Not executed in this correction pass
 
-Linux (GCC/Clang), macOS/MoltenVK, UNORM swapchain output and physical cross-monitor DPI transitions were not run. The per-frame screenshot capture of multiplayer feedback over bright terrain and sky was not produced physically: the copy, the `hudScrim` plate contrast and the showcase-strip yield rule are covered by the headless checks, and the transport transitions by the native join smoke. The proof's docked-inventory case floats the panel (the player had no docked inventory in the fresh scripted session); the one-shot re-dock path is covered by the workspace policy checks and exercised by the show/hide cycles that must preserve the layout.
+The graphical build was not run on Linux (GCC/Clang) or macOS/MoltenVK, and UNORM swapchain output and physical cross-monitor DPI transitions were not run. The CPU-only slice was run on Debian WSL with GCC under ASan+UBSan and under TSan. The per-frame screenshot capture of multiplayer feedback over bright terrain and sky was not produced physically: the copy, the `hudScrim` plate contrast and the showcase-strip yield rule are covered by the headless checks, and the transport transitions by the native join smoke. The proof's docked-inventory case now docks the canonical window itself (via the dockspace central node) and then withholds the workspace, so the separated identity is exercised rather than described; a player-driven dock drag onto an asymmetric side node was still not reproduced physically. The reconnect workflow was validated against the workspace and capture state the smoke session actually reaches — the two variants it does not reach are asserted in `GameUiComponents` — and a remote server that dies mid-session on physical hardware was not re-run in this pass.
 
 #### Original slice, executed before this pass
 

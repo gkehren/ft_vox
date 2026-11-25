@@ -237,6 +237,10 @@ private:
 	/// + mouse-handler seam (presentation consumers).
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
 	void drawUi();
+	/// Push the developer-key overlay toggles (chunk borders, demo players) to
+	/// the overlay layer. Called by every UI path, including the dockspace-only
+	/// frame that draws no developer surface (issue #303 F09).
+	void applyOverlayToggles();
 	void tickBenchmark(double dt);
 	void sampleBenchmarkFrame();
 	/// Publish main-thread memory/workload gauges every frame (issue #179):

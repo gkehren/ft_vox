@@ -1469,6 +1469,15 @@ struct GameUiBackendProbe
 		const auto hiddenMs = medianDevBuild(40);
 		CHECK(hiddenDockspace != 0 && hiddenBarFrame > 0 && menuBarFrame() == hiddenBarFrame,
 			"the full-window path maintains the dockspace without building the developer frame");
+		// The developer keys still own their overlay toggles on that path: B has to
+		// reach the overlay layer even though no developer panel is drawn.
+		const bool bordersBefore = engine.worldRenderer->overlays().showChunkBorders();
+		tap(SDLK_B);
+		present();
+		CHECK(engine.worldRenderer->overlays().showChunkBorders() != bordersBefore,
+			"chunk borders still toggle with the workspace hidden and the inventory closed");
+		tap(SDLK_B);
+		present();
 		engine.setDeveloperWorkspaceVisible(true);
 		frames(2);
 		const auto visibleMs = medianDevBuild(40);
