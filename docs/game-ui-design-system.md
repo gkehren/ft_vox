@@ -259,7 +259,7 @@ test_engine_reload --game-ui-showcase-proof     # existing interaction proof
   one text metric for painting/caret/hit testing at 100–200% with 1×/2×
   framebuffer density, slider track mapping at 0/25/50/75/100%, and the IME
   composition-unit normalization (UTF-16 on Windows, scalars on Linux).
-- `--game-ui-design-system` (29 checks, Vulkan validation enabled) — captures
+- `--game-ui-design-system` (32 checks, Vulkan validation enabled) — captures
   the gallery and HUD mock through the production composition path at
   1920×1080 / 2560×1080 / 1160×680 and 100% / 150% / 200%, checks the resolved
   scale against the requested policy, the ≤ 32-draw menu budget with zero
@@ -296,12 +296,12 @@ finding to code and to the check that pins it.
 | F08 | `SlotView::icon` is `std::optional<AtlasIcon>`; occupancy is `count != 0`, atlas layer 0 is a real texture, and an occupied slot with a missing/stale icon keeps its count and frame. | `PlayerUiComponents.*`, `GameUiGallery.cpp` | `GameUiComponents::slotPaintingAndFallbacks` (layer 0, no icon, empty) |
 | F09 | Composition units are normalized: UTF-16 code units on Windows, scalars on Linux; an index inside a surrogate pair rounds down and end-of-text ranges clamp. | `PlayerUiWidgets.*` | `GameUiInteraction` composition-range matrix; real OS IME pass tracked separately |
 | F10 | Notifications and the indeterminate phase advance from a monotonic clock (`presentationStep`, 250 ms cap); toast ids are monotonic, not phase-derived. | `GameUiSample.cpp`, `PlayerUiComponents.hpp` | `GameUiComponents::notifications` (30/60/144/240 Hz) |
-| F11 | The face is re-baked only when the framebuffer density changes; the renderer swaps the atlas after `waitIdle`, and every text path (standalone proofs included) applies the compensation. | `GameUiSample.cpp`, `GameUiFonts`, `GameUiRenderer.*` | GPU proof on the 1× capture, manual DPI move |
+| F11 | The face is re-baked only when the framebuffer density changes; the renderer swaps the atlas after `waitIdle`, and every text path (standalone proofs included) applies the compensation. | `GameUiSample.cpp`, `GameUiFonts`, `GameUiRenderer.*` | code review + the GPU proofs on a 1× display; a physical DPI move is not reproducible on this workstation and is called out as such in the PR |
 | F12 | Labels are fitted into their own rects, borders clamp to the box, the indeterminate band clamps to its track, and the gallery card is clipped by the viewport while its content is clipped by the body. | `PlayerUiComponents.cpp`, `GameUiGallery.cpp` | `GameUiComponents::painting` (long label, 4×4 ring, 6×4 bar) |
 | F13 | `sliderGeometry`/`sliderValueAt` are shared by painting and dragging; the legacy interaction margin is gone. | `PlayerUiWidgets.*` | `GameUiInteraction` 0/25/50/75/100% track mapping |
 | F14 | The quantity badge paints a contrast backing, owns a band above the durability/progress track, and never overlaps it. | `PlayerUiComponents.cpp` | `GameUiComponents` slot painting + captures |
 | F15 | `settleState`/`slotState` centralize precedence: disabled clears focus/hover/press but keeps selection; toggle and slider faces are token functions; the exit confirmation is a Danger action whose initial focus is Cancel. | `PlayerUiStyle.hpp`, `PlayerUiWidgets.cpp`, `GameUiShowcase.cpp` | `GameUiStyle::states`, `GameUiComponents::confirmations` |
-| F16 | Screen entry (`m_screenRevision`) is separate from layout rebuild (`m_layoutRevision`); a scale/resolution change keeps focus, selection, notifications, field values, list selection and the clamped scroll offset, and only screen entry resets them or cancels composition. | `GameUiSample.*`, `GameUiShowcase.cpp`, `GameUiGallery.cpp` | manual scale switching in the running game + proof runs |
+| F16 | Screen entry (`m_screenRevision`) is separate from layout rebuild (`m_layoutRevision`); a scale/resolution change keeps focus, selection, notifications, field values, list selection and the clamped scroll offset, and only screen entry resets them or cancels composition. | `GameUiSample.*`, `GameUiShowcase.cpp`, `GameUiGallery.cpp` | design-system proof: an in-session scale change keeps focus, the selected slot and the notification queue |
 | F17 | The Engine tracks a dirty/failed persist state: selecting the same value retries a failed write, the error clears only on success, and a failed write is never re-attempted on every frame. | `EngineUiInput.cpp`, `Engine.hpp` | manual: read-only settings path, then repair + reselect |
 
 ### IME platform facts (F09)

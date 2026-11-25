@@ -999,6 +999,27 @@ struct GameUiBackendProbe
 			std::string file = std::string(test.name) + ".png";
 			checked(visual::writePng((out / file).string(), image), "write design-system screenshot");
 		}
+		// F16: a scale change rebuilds geometry without behaving like a screen
+		// re-entry. Focus, the selected slot and the notification queue survive.
+		sample.resetScreens();
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.f});
+		sample.openGallery();
+		frames(3);
+		const auto focus = sample.screens().focus();
+		const auto slot = sample.m_gallerySlot;
+		const auto toastCount = sample.m_toasts.size();
+		const auto toastId = sample.m_toasts.newest() ? sample.m_toasts.newest()->id : 0u;
+		CHECK(focus != 0 && toastId != 0 && toastCount > 0,
+			"the gallery has focus, a selected slot and a notification before the scale change");
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.5f});
+		frames(3);
+		CHECK(std::abs(sample.playerUiScale() - 1.5f) < 0.001f,
+			"the in-session scale change is applied at the next frame boundary");
+		CHECK(sample.screens().focus() == focus && sample.m_gallerySlot == slot &&
+				sample.m_toasts.size() == toastCount && sample.m_toasts.newest() &&
+				sample.m_toasts.newest()->id == toastId,
+			"changing the player UI scale keeps focus, selection and notifications");
+
 		sample.resetScreens();
 		sample.setScalePolicy({gameui::ScaleMode::Auto, 1.f});
 		frames(2);
