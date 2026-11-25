@@ -14,7 +14,7 @@
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
-#include <Engine/UiSpike.hpp>
+#include <Engine/GameUiSample.hpp>
 #include <World/WorldPersistence.hpp>
 #include <imgui/imgui.h>
 
@@ -183,7 +183,7 @@ Engine::~Engine()
 		m_remote->disconnect();
 	if (vkContext)
 		vkContext->waitIdle();
-	m_uiSpike.reset();
+	m_playerUi.reset();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
 	// flush the save queue while the world is still alive. The simulation
@@ -664,8 +664,8 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	swapchain->recreate(width, height, desiredVSync);
 	frameCtx->onSwapchainRecreate(swapchain->getImageCount());
 	worldRenderer->onSwapchainRecreate(*swapchain);
-	if (m_uiSpike)
-		m_uiSpike->setTargetFormat(swapchain->getImageFormat());
+	if (m_playerUi)
+		m_playerUi->renderer().setOutput(swapchain->getImageFormat(), swapchain->getColorSpace());
 	if (imgui && imgui->onSwapchainRecreate(*swapchain) && gameUi)
 		gameUi->onImGuiVulkanBackendRecreate();
 
@@ -891,15 +891,17 @@ void Engine::handleEvents()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
-		if (m_uiSpike)
+		if (m_playerUi)
 		{
-			const auto result = m_uiSpike->handleEvent(window, event);
-			if (result == UiSpike::InputResult::Exit)
+			const bool canClick = !mouseCaptured && !m_benchmark.locksInput() &&
+				!(imgui && imgui->wantCaptureMouse()) && !(gameUi && gameUi->isFileDialogOpen());
+			const auto result = m_playerUi->handleEvent(window, event, canClick);
+			if (result == GameUiSample::InputResult::Exit)
 				requestExit();
-			if (result != UiSpike::InputResult::Unhandled)
+			if (result != GameUiSample::InputResult::Unhandled)
 				continue;
 		}
-		else if (imgui)
+		if (imgui && !m_uiSpike)
 			imgui->processEvent(event);
 
 		switch (event.type)
@@ -1510,7 +1512,7 @@ void Engine::sampleBenchmarkFrame()
 		.scopeStreaming = prof.lastScopeMs("Streaming"),
 		.scopeAcquire = prof.lastScopeMs("Acquire"),
 		.scopeRecord = prof.lastScopeMs("Record"),
-		.scopeImGui = prof.lastScopeMs("ImGui"),
+		.scopeImGui = prof.lastScopeMs("DevUIBuild"),
 		.scopePresent = prof.lastScopeMs("Present"),
 		.scopeVisibility = prof.lastScopeMs("Visibility"),
 		.scopeMeshUpload = prof.lastScopeMs("MeshUpload"),
@@ -1649,6 +1651,8 @@ void Engine::drawUi()
 	}
 	f.inventoryPanelOpen = &m_inventoryPanelOpen;
 	f.atlasVersion = m_atlasVersion;
+	if (m_playerUi)
+		f.gameUiStats = m_playerUi->renderer().stats(frameCtx->frameIndex());
 	f.seed = worldSeed();
 	f.worldGenerationId = worldGenerationId();
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
@@ -1830,6 +1834,23 @@ void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, do
 void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget)
 {
 	PROFILE_SCOPE("Record");
+	if (m_playerUi)
+	{
+		PROFILE_SCOPE("GameUIBuild");
+		gameui::Clip view{};
+		if (gameUi && !m_uiSpike && !m_inspectionView)
+		{
+			const auto area = gameUi->shell().gameViewRect();
+			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
+			const float x = area.pos.x - origin.x, y = area.pos.y - origin.y;
+			view = {{x, y, x + area.size.x, y + area.size.y}};
+		}
+		m_playerUi->prepare(window, frameIndex, swapchain->getExtent(), view,
+			worldRenderer->getTextureManager(), m_atlasVersion);
+	}
+	std::function<void(VkCommandBuffer)> devUiDraw;
+	if (imgui && !m_uiSpike && !m_inspectionView)
+		devUiDraw = [&](VkCommandBuffer cmd) { imgui->recordDraw(cmd); };
 	worldRenderer->recordFrame(
 		frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, kClearColor,
 		[&](VkCommandBuffer cmd) {
@@ -1858,12 +1879,7 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				}
 			}
 		},
-		[&](VkCommandBuffer cmd) {
-			if (m_uiSpike)
-				m_uiSpike->record(cmd, frameIndex, window, swapchain->getExtent());
-			else if (imgui)
-				imgui->recordDraw(cmd);
-		},
+		devUiDraw,
 		// Biome-map upload AFTER the ImGui pass (issue #191 review
 		// round 2): ImGui samples this texture directly, so this
 		// frame's draw lists must record against the previous
@@ -1876,17 +1892,20 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				PROFILE_SCOPE("BiomeMapUpload");
 				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 			}
-		}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
+		}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag(),
+		m_playerUi ? &m_playerUi->renderer() : nullptr);
 }
 
-void Engine::enableUiSpike()
+void Engine::enableGameUi(bool standalone)
 {
-	auto spike = std::make_unique<UiSpike>();
-	if (!SDL_SetWindowRelativeMouseMode(window, false))
+	auto sample = std::make_unique<GameUiSample>();
+	if (standalone && !SDL_SetWindowRelativeMouseMode(window, false))
 		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
-	spike->init(window, *vkContext, *immediate, swapchain->getImageFormat());
-	mouseCaptured = false;
-	m_uiSpike = std::move(spike);
+	sample->init(window, *vkContext, *immediate, swapchain->getImageFormat(), swapchain->getColorSpace(), standalone);
+	if (standalone)
+		mouseCaptured = false;
+	m_uiSpike = standalone;
+	m_playerUi = std::move(sample);
 }
 
 // ===========================================================================
@@ -1980,7 +1999,7 @@ void Engine::run()
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
 		if (pixelW == 0 || pixelH == 0 ||
-			((m_remote || m_uiSpike) && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
+			((m_remote || m_playerUi) && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
 		{
 			if (m_remote)
 				pollRemote();
@@ -2087,7 +2106,7 @@ void Engine::run()
 		// (12) ImGui build from sim/render snapshots (CPU only; draw later).
 		if (imgui && !m_uiSpike)
 		{
-			PROFILE_SCOPE("ImGui");
+			PROFILE_SCOPE("DevUIBuild");
 			imgui->beginFrame();
 			drawUi();
 			imgui->endFrame();
@@ -2134,7 +2153,7 @@ void Engine::run()
 		renderTiming.chunkGeneration = GetProfiler().lastScopeMs("GenDispatch");
 		renderTiming.meshGeneration = GetProfiler().lastScopeMs("MeshDispatch");
 		renderTiming.chunkRendering = GetProfiler().lastScopeMs("MeshUpload");
-		renderTiming.uiRendering = GetProfiler().lastScopeMs("ImGui");
+		renderTiming.uiRendering = GetProfiler().lastScopeMs("DevUIBuild") + GetProfiler().lastScopeMs("GameUIBuild");
 		renderTiming.totalFrame = GetProfiler().lastFrameMs();
 
 		sampleBenchmarkFrame();

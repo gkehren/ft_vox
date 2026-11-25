@@ -1331,6 +1331,8 @@ add_executable(test_engine_reload
     test_engine_reload.cpp
     EngineJoinSmoke.cpp
     UiSpikeSmoke.cpp
+    GameUiBackendProof.cpp
+    VisualImage.cpp
     ${FT_VOX_ENGINE_TEST_SOURCES}
 )
 

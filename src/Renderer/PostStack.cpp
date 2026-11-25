@@ -2,6 +2,7 @@
 #include "Renderer/PostDefaults.hpp"
 #include "Renderer/Lighting.hpp"
 #include "Renderer/ColorSpace.hpp"
+#include "Renderer/GameUiRenderer.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "Vulkan/VkUpload.hpp"
@@ -550,6 +551,11 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		// attachment, so the AA-on path gets its own pipeline.
 		makeFS(compF, m_compositeLayout, VK_FORMAT_R8G8B8A8_UNORM, m_compositeLdrPipe);
 		makeFS(fxaaF, m_postLayout1, swapchainFormat, m_fxaaPipe);
+		if (m_swapchainRequiresSrgbEncode)
+		{
+			makeFS(compF, m_compositeLayout, gameui::kLinearTargetFormat, m_compositeUiPipe);
+			makeFS(fxaaF, m_postLayout1, gameui::kLinearTargetFormat, m_fxaaUiPipe);
+		}
 		const VkFormat lumFmt = VK_FORMAT_R32_SFLOAT;
 		makeFS(downF, m_postLayout1, lumFmt, m_downsamplePipe);
 		if (adaptF)
@@ -593,6 +599,8 @@ void PostStack::destroyPipelines()
 	d(m_compositePipe);
 	d(m_compositeLdrPipe);
 	d(m_fxaaPipe);
+	d(m_compositeUiPipe);
+	d(m_fxaaUiPipe);
 	d(m_downsamplePipe);
 	d(m_adaptPipe);
 	// Pipeline layouts are owned by createLayoutsAndDescriptors and survive a
@@ -718,7 +726,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 						   VkDescriptorSet frameSet0,
 						   const PostProcessSettings &settings, const glm::vec2 &sunScreen,
 						   float sunVisibility, float time, const glm::mat4 &projection,
-						   float frameDt, VkGpuProfiler *profiler)
+						   float frameDt, VkGpuProfiler *profiler, bool linearUiTarget)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -846,9 +854,15 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// views bypass AA too: diagnostics must show the raw data unfiltered.
 	const int ssaoDebugView = effectiveSsaoDebugView(settings);
 	const bool aaEnabled = settings.fxaaEnabled && ssaoDebugView == 0;
+	// The WSI acquire wait is at COLOR_ATTACHMENT_OUTPUT. The first swapchain
+	// transition must have the same source stage to be chained to that wait.
+	const auto outputStage = linearUiTarget ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT :
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	vkbar::cmdTransitionColor(cmd, aaEnabled ? m_ldr.image : swapchainImage,
 					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+							0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+							aaEnabled ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : outputStage,
+							VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 	CompPC cpc{};
 	cpc.p0 = glm::vec4(settings.exposure, settings.bloomIntensity, settings.gamma,
 					   static_cast<float>(settings.toneMapper));
@@ -868,7 +882,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// UNORM path, and the AA-source target ALWAYS stores encoded values so
 	// the FXAA pass sees perceptual luma.
 	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette,
-					   (m_swapchainRequiresSrgbEncode || aaEnabled) ? 1.0f : 0.0f,
+					   ((m_swapchainRequiresSrgbEncode && !linearUiTarget) || aaEnabled) ? 1.0f : 0.0f,
 					   static_cast<float>(ssaoDebugView));
 	cpc.p5 = glm::vec4(autoExposureActive(settings) ? 1.0f : 0.0f, 0.f, 0.f, 0.f);
 	// Camera-underwater medium transport (issue #144): local surface height
@@ -886,7 +900,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 			   frameSet0, m_ldr.view, extent,
 			   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
 	else
-		fsDraw(cmd, m_compositePipe, m_compositeLayout,
+		fsDraw(cmd, linearUiTarget ? m_compositeUiPipe : m_compositePipe, m_compositeLayout,
 			   frameSet0, swapchainView, extent,
 			   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
 	if (profiler)
@@ -899,7 +913,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 		vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+							0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, outputStage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		// FXAA 3.11 spatial AA (issue #143), timed as its own GpuPass. For a
 		// hardware-sRGB swapchain the shader decodes its blend result back to
 		// display-linear so the attachment's fixed-function encode round-trips
@@ -910,8 +924,8 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 		FxaaPC fpc{};
 		fpc.p0 = glm::vec4(1.f / static_cast<float>(extent.width),
 						   1.f / static_cast<float>(extent.height),
-						   m_swapchainRequiresSrgbEncode ? 0.0f : 1.0f, 0.f);
-		fsDraw(cmd, m_fxaaPipe, m_postLayout1, m_setFxaa, swapchainView, extent,
+								   m_swapchainRequiresSrgbEncode && !linearUiTarget ? 0.0f : 1.0f, 0.f);
+		fsDraw(cmd, linearUiTarget ? m_fxaaUiPipe : m_fxaaPipe, m_postLayout1, m_setFxaa, swapchainView, extent,
 			   &fpc, sizeof(fpc));
 		if (profiler)
 			profiler->endPass(cmd, GpuPass::SpatialAA);

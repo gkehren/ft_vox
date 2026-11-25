@@ -37,6 +37,7 @@ static void printUsage(const char *argv0)
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --ui-spike                  Run the standalone Game UI prototype over a solo scene\n"
+			  << "  --game-ui                   Show the Game UI sample alongside the existing interface\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
 			  << "  --quality <name|0-3>        Graphics preset: low|medium|high|cinematic\n"
@@ -74,6 +75,7 @@ int main(int argc, char **argv)
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
 	bool uiSpike = false;
+	bool gameUi = false;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
 	std::optional<int> qualityPreset;
@@ -86,6 +88,11 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
+		if (arg == "--game-ui")
+		{
+			gameUi = true;
+			continue;
+		}
 		if (arg == "--ui-spike")
 		{
 			uiSpike = true;
@@ -452,8 +459,8 @@ int main(int argc, char **argv)
 			engine.benchmark().requestStart();
 			engine.setExitAfterBenchmark(true);
 		}
-		if (uiSpike)
-			engine.enableUiSpike();
+		if (uiSpike || gameUi)
+			engine.enableGameUi(uiSpike);
 		engine.run();
 	}
 	catch (const std::exception &e)
