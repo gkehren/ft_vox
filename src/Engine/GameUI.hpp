@@ -202,6 +202,7 @@ struct GameUIFrame
 	std::function<void(hosting::Options, bool, std::string_view)> startHostedServer;
 	std::function<void()> stopHostedServer, forceStopHostedServer;
 	std::function<void(std::string_view)> joinHostedServer;
+	std::function<std::string(uint64_t, localcontrol::Operation, sim::PlayerId, std::string_view)> administerHostedServer;
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
 	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
@@ -432,6 +433,7 @@ private:
 	void drawJoinPanel(const GameUIFrame &frame);
 	void drawHostPanel(const GameUIFrame &frame);
 	void drawHostedPlayers(const hosting::Snapshot *server);
+	void drawHostedAdministration(const GameUIFrame &frame);
 	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
@@ -482,6 +484,16 @@ private:
 	std::array<char, 64> m_hostWorld{}, m_hostAddress{};
 	std::array<char, 128> m_hostProfile{};
 	sim::PlayerId m_hostPlayerSelection;
+	struct AdminConfirmation
+	{
+		localcontrol::Operation operation;
+		sim::PlayerId target;
+		std::string profile;
+	};
+	std::optional<AdminConfirmation> m_adminConfirmation;
+	uint64_t m_adminLaunch{};
+	sim::PlayerId m_adminSelection, m_lastAdminRosterSelection;
+	std::string m_adminProfile, m_adminError;
 	uint64_t m_hostSelectionLaunch{};
 	bool m_hostAutoJoin{true}, m_focusHostPanel{}, m_hostProfileInitialized{};
 

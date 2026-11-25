@@ -66,7 +66,7 @@ std::vector<fs::path> launchArguments(const Options &options, const fs::path &sa
 		"--port", std::to_string(options.port), "--player-cap", std::to_string(options.playerSlots + 1),
 		"--interest-radius", std::to_string(options.interestRadius), "--workers", std::to_string(options.workers),
 		"--load-budget", std::to_string(streams.loads), "--generation-budget", std::to_string(streams.generations),
-		"--eviction-budget", std::to_string(streams.evictions), "--launcher-control", bootstrap ? "bootstrap" : "stdin"};
+		"--eviction-budget", std::to_string(streams.evictions), "--launcher-control", bootstrap ? "admin" : "stdin"};
 }
 
 std::string_view field(std::string_view line, std::string_view key)
@@ -115,8 +115,11 @@ struct ServerOutput
 			}
 		}
 		if (record.starts_with("SERVER status=stopped "))
+		{
 			committed = field(record, "saved=") == "1" && field(record, "exit_code=") == "0" &&
 				readNumber(field(record, "checkpoint_generation="), checkpoint) && checkpoint > 0;
+			controlStop = field(record, "reason=") == "control";
+		}
 		if (record.starts_with("SERVER status=stopping ") && snapshot.state != State::Stopping)
 		{
 			snapshot.state = State::Stopping;
@@ -164,35 +167,66 @@ struct ServerOutput
 	}
 
 	std::string line, error;
-	bool truncated{}, committed{};
+	bool truncated{}, committed{}, controlStop{};
 	uint64_t checkpoint{};
 };
 
 struct MonitorInput
 {
+	std::optional<localcontrol::Reply> reply;
+
 	bool drain(ChildProcess &child, Snapshot &snapshot, int capacity)
 	{
-		if (snapshot.state != State::Ready)
-			return static_cast<bool>(std::exchange(snapshot.status, {}));
+		bool changed = false;
 
 		std::optional<monitoring::Status> latest;
-		for (unsigned batch = 0; batch < 8; ++batch)
+		for (unsigned batch = 0; batch < 24; ++batch)
 		{
-			const auto read = child.readMonitoring({reinterpret_cast<char *>(frame.data()) + used, frame.size() - used});
+			const auto read = child.readMonitoring({reinterpret_cast<char *>(frame.data()) + used, needed - used});
 			if (!read)
 				break;
 			used += read;
-			if (used != frame.size())
+			if (used != needed)
 				continue;
-			used = 0;
-			auto decoded = monitoring::decode(frame);
-			if (decoded && decoded->transport.capacity == capacity && decoded->sampledMs > lastSample &&
-				monitoring::fresh(decoded->sampledMs, monitoring::monotonicMs()))
+			if (needed == localcontrol::kReplyHeaderSize)
 			{
-				lastSample = decoded->sampledMs;
-				latest = std::move(decoded);
+				admin = std::equal(localcontrol::kReplyMagic.begin(), localcontrol::kReplyMagic.end(), frame.begin());
+				if (admin)
+				{
+					const auto size = localcontrol::replySize(std::span{frame}.first(used));
+					if (!size)
+					{
+						changed = !std::exchange(snapshot.adminChannelFailed, true);
+						break;
+					}
+					needed = *size;
+				}
+				else
+					needed = monitoring::kFrameSize;
+				continue;
 			}
+			if (admin)
+			{
+				if (auto decoded = localcontrol::decodeReply(std::span{frame}.first(used)))
+					reply = std::move(decoded);
+			}
+			else
+			{
+				monitoring::Frame sample;
+				std::copy_n(frame.begin(), sample.size(), sample.begin());
+				auto decoded = monitoring::decode(sample);
+				if (decoded && decoded->transport.capacity == capacity && decoded->sampledMs > lastSample &&
+					monitoring::fresh(decoded->sampledMs, monitoring::monotonicMs()))
+				{
+					lastSample = decoded->sampledMs;
+					latest = std::move(decoded);
+				}
+			}
+			used = 0;
+			needed = localcontrol::kReplyHeaderSize;
 		}
+		if (snapshot.state != State::Ready)
+			return static_cast<bool>(std::exchange(snapshot.status, {})) || changed;
 		if (latest)
 		{
 			snapshot.checkpoint = latest->checkpoint;
@@ -204,11 +238,12 @@ struct MonitorInput
 			snapshot.status.reset();
 			return true;
 		}
-		return false;
+		return changed;
 	}
 
-	monitoring::Frame frame{};
-	size_t used{};
+	std::array<uint8_t, localcontrol::kMaxReplySize> frame{};
+	size_t used{}, needed{localcontrol::kReplyHeaderSize};
+	bool admin{};
 	uint64_t lastSample{};
 };
 }
@@ -276,6 +311,8 @@ bool ServerSupervisor::start(Options options, fs::path executable, fs::path save
 	if (m_snapshot.active())
 		return false;
 	m_snapshot = {};
+	m_adminRequest.reset();
+	m_adminInFlight = false;
 	m_snapshot.launch = m_revision.load(std::memory_order_relaxed) + 1;
 	m_snapshot.world = options.world;
 	m_snapshot.address = options.lan ? options.address : "127.0.0.1";
@@ -318,6 +355,19 @@ bool ServerSupervisor::forceStop()
 	if (m_snapshot.state != State::Stopping || !m_snapshot.delayed)
 		return false;
 	m_command.store(Command::Force);
+	return true;
+}
+
+bool ServerSupervisor::administer(uint64_t launch, AdminAction action)
+{
+	std::lock_guard lock(m_mutex);
+	if (m_snapshot.launch != launch || m_snapshot.state != State::Ready || !m_snapshot.administration ||
+		m_snapshot.adminChannelFailed || !localcontrol::permitted(m_snapshot.administration->role, action.operation) ||
+		(localcontrol::targeted(action.operation) ? !localcontrol::validActor(action.target) : action.target.valid()) ||
+		(action.delegate && action.operation != localcontrol::Operation::GrantAdmin) ||
+		m_adminRequest || m_adminInFlight)
+		return false;
+	m_adminRequest = std::move(action);
 	return true;
 }
 
@@ -383,7 +433,16 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 		MonitorInput monitor;
 		const auto started = Clock::now();
 		std::optional<Clock::time_point> stopping, ownerGone;
+		std::optional<Clock::time_point> adminDeadline, adminHelloDeadline;
+		uint64_t adminSequence = 0;
 		bool forced = false;
+		const auto completeAdmin = [&](localcontrol::Result result) {
+			next.adminResult = result;
+			next.adminPending = false;
+			adminDeadline.reset();
+			std::lock_guard lock(m_mutex);
+			m_adminInFlight = false;
+		};
 		for (;;)
 		{
 			const auto now = Clock::now();
@@ -402,6 +461,76 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 			}
 			bool changed = output.drain(child, next, options.port, 4);
 			changed |= monitor.drain(child, next, options.playerSlots);
+			if (auto reply = std::exchange(monitor.reply, std::nullopt); owner && reply)
+			{
+				if (!next.administration && !reply->sequence && reply->result == localcontrol::Result::Ready)
+				{
+					next.administration = std::make_shared<const localcontrol::Reply>(std::move(*reply));
+					changed = true;
+				}
+				else if (adminDeadline && next.administration && reply->world == next.administration->world &&
+					reply->epoch == next.administration->epoch &&
+					(reply->sequence == adminSequence || (!reply->sequence && reply->result == localcontrol::Result::Malformed)))
+				{
+					completeAdmin(reply->result);
+					next.administration = std::make_shared<const localcontrol::Reply>(std::move(*reply));
+					changed = true;
+				}
+			}
+			if (adminDeadline && now >= *adminDeadline)
+			{
+				next.adminChannelFailed = true;
+				completeAdmin(localcontrol::Result::ChannelError);
+				changed = true;
+			}
+			if (owner && next.state == State::Ready && !next.administration && !next.adminChannelFailed)
+			{
+				if (!adminHelloDeadline)
+					adminHelloDeadline = now + m_notice;
+				else if (now >= *adminHelloDeadline)
+				{
+					next.adminChannelFailed = true;
+					changed = true;
+				}
+			}
+			std::optional<AdminAction> action;
+			if (next.state == State::Ready && !next.adminChannelFailed && !adminDeadline && next.administration &&
+				command == Command::None && !ownerGone)
+			{
+				std::lock_guard lock(m_mutex);
+				action = std::exchange(m_adminRequest, std::nullopt);
+				m_adminInFlight |= action.has_value();
+			}
+			if (action)
+			{
+				next.adminOperation = action->operation;
+				next.adminResult.reset();
+				localcontrol::Request request{next.administration->world, next.administration->epoch, adminSequence + 1,
+					action->operation, action->target, std::nullopt};
+				if (action->delegate)
+				{
+					if (const auto key = localcontrol::loadOrCreateControlKey(action->delegate->controlFile);
+						key && localcontrol::validBootstrap({action->delegate->player, *key}))
+						request.delegation = localcontrol::Bootstrap{action->delegate->player, *key};
+					else
+						completeAdmin(localcontrol::Result::InvalidCredential);
+				}
+				if (!next.adminResult)
+				{
+					if (request.sequence && child.writeControl(localcontrol::encodeRequest(request)))
+					{
+						adminSequence = request.sequence;
+						adminDeadline = now + m_notice;
+						next.adminPending = true;
+					}
+					else
+					{
+						next.adminChannelFailed = true;
+						completeAdmin(localcontrol::Result::ChannelError);
+					}
+				}
+				changed = true;
+			}
 			if (!stopping && next.state == State::Stopping)
 			{
 				stopping = now;
@@ -412,6 +541,9 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 				output.drain(child, next, options.port, 64);
 				next.checkpoint = output.committed ? output.checkpoint : next.checkpoint;
 				next.state = !forced && output.committed && *exit == 0 ? State::Stopped : State::Failed;
+				if (next.adminPending)
+					completeAdmin(next.state == State::Stopped && output.controlStop && next.adminOperation == localcontrol::Operation::Stop ?
+						localcontrol::Result::Applied : localcontrol::Result::ChannelError);
 				next.delayed = false;
 				if (next.state == State::Stopped)
 					next.message = "Server stopped. World checkpoint committed.";
@@ -452,8 +584,12 @@ void ServerSupervisor::run(std::stop_token lifetime, const Options &options, con
 	{
 		next.state = State::Failed;
 		next.message = error.what();
+		if (next.adminPending)
+			next.adminResult = localcontrol::Result::ChannelError;
 	}
+	next.adminPending = false;
 	next.status.reset();
+	next.administration.reset();
 	publish(next);
 }
 }

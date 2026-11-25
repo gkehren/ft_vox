@@ -109,6 +109,8 @@ public:
 	void poll(Clock::time_point now);
 	void rethrowIoError();
 	void stop(SessionOwner &owner);
+	// Simulation owner only. Prevent further intents and have IO close the slot.
+	void disconnectPlayer(sim::PlayerId player);
 
 	// Call before stepping the next simulation tick. Drain one batch of
 	// intents in PlayerId order and publish snapshots of the completed state.

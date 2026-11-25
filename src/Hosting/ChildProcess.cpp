@@ -218,6 +218,8 @@ ChildProcess::ChildProcess(const std::filesystem::path &executable,
 	Descriptor childInput, childOutput, childMonitor;
 	makePipe(childInput, m_impl->control);
 	makePipe(m_impl->output, childOutput);
+	if (::fcntl(m_impl->control.value, F_SETFL, O_NONBLOCK) == -1)
+		check(errno, "set server control pipe nonblocking");
 	if (::fcntl(m_impl->output.value, F_SETFL, O_NONBLOCK) == -1)
 		check(errno, "set server log pipe nonblocking");
 	if (monitor)
@@ -270,8 +272,8 @@ size_t ChildProcess::readMonitoring(std::span<char> buffer)
 
 bool ChildProcess::writeControl(std::span<const uint8_t> buffer)
 {
-	// Startup records fit within the minimum POSIX PIPE_BUF, and this is
-	// the first write to an empty pipe.
+	// Records fit within the minimum POSIX PIPE_BUF. The launcher permits
+	// one request at a time and waits for its reply before writing again.
 	if (buffer.empty() || buffer.size() > 512)
 		return false;
 #ifdef _WIN32

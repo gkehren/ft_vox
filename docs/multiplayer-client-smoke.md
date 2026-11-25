@@ -67,10 +67,11 @@ The CPU `UdpTransport` regression covers a 12-player roster with
 interest-scoped guest snapshots and simulated timeouts. `ServerSupervisor`
 exercises the inherited pipe, live counters, reconnects, stale samples,
 crashes, maximum-size records and a reader that stops draining the feed.
-The opt-in Vulkan `--hosting-smoke` drives Start, auto-join and a
-window-close event against a real child. It checks the assigned port,
-profile, suspended solo state, roster, and final checkpoint. Pass a
-fresh temporary directory for the smoke's saves.
+The opt-in Vulkan `--hosting-smoke` drives Start, auto-join,
+Administration callbacks, and a window-close event against a real child.
+It checks the assigned port, profile, suspended solo state, roster, owner
+permission, delegated grant, ban, audit and final checkpoint. Pass a fresh
+temporary directory for the smoke's saves.
 
 ```powershell
 $smokeRoot = Join-Path $env:TEMP ("ft-vox-host-" + [guid]::NewGuid())
@@ -81,6 +82,23 @@ try {
     Pop-Location
 }
 ```
+
+### Manual Administration panel check (#288)
+
+1. Launch a newly hosted loopback world and connect a second profile. In
+   **Multiplayer → Administration**, confirm local Owner permission.
+   Refresh players and select the guest's persistent ID.
+2. Open Ban, confirm the displayed player and world, and cancel. Check
+   that the guest stays connected. Open Ban again and confirm. Check the
+   result and audit, then try reconnecting with that guest profile.
+3. Unban the guest, add it to the allowlist, and authorize local control
+   for its matching saved profile. Enable the allowlist. Confirm a third
+   unknown profile cannot join. Use **Stop and save server** and wait for
+   the checkpoint confirmation.
+4. Reopen with the delegated local profile. Confirm it can moderate
+   ordinary players and has no role-management, allowlist, or save-stop
+   controls. Join with another client and confirm its Administration
+   section has no actionable controls.
 
 ## In-game join (#284)
 

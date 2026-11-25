@@ -31,6 +31,7 @@ struct Options
 	std::filesystem::path stopFile;
 	bool launcherControl{};
 	bool launcherBootstrap{};
+	bool launcherAdmin{};
 	std::optional<uintptr_t> monitorPipe;
 };
 
@@ -86,7 +87,7 @@ void printUsage()
 		"  --eviction-budget N       chunk evictions per tick, 0..64 (default 16)\n"
 		"  --metrics-every N         completed ticks between log records, 0..1000000 (default 600; 0 disables)\n"
 		"  --stop-file PATH          save and stop when PATH exists\n"
-		"  --launcher-control MODE   inherited stdin: stdin for EOF only, bootstrap for owner startup\n"
+		"  --launcher-control MODE   inherited stdin: stdin, bootstrap or admin (with monitoring)\n"
 		"  --launcher-monitor ID     optional inherited write-only status pipe\n"
 		"  --help                    show this help\n";
 	server::printRolesUsage();
@@ -151,10 +152,12 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 			number(options.metricsEvery, 0u, 1000000u);
 		else if (option == "--stop-file")
 			options.stopFile = value;
-		else if (option == "--launcher-control" && (value == "stdin" || value == "bootstrap"))
+		else if (option == "--launcher-control" && !options.launcherControl &&
+			(value == "stdin" || value == "bootstrap" || value == "admin"))
 		{
 			options.launcherControl = true;
-			options.launcherBootstrap = value == "bootstrap";
+			options.launcherBootstrap = value != "stdin";
+			options.launcherAdmin = value == "admin";
 		}
 		else if (option == "--launcher-monitor" && !options.monitorPipe)
 			number(options.monitorPipe.emplace(), uintptr_t{1}, std::numeric_limits<uintptr_t>::max());
@@ -169,6 +172,8 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 		error = "--launcher-control requires live mode";
 	else if (options.monitorPipe && !options.launcherControl)
 		error = "--launcher-monitor requires launcher control";
+	else if (options.launcherAdmin && !options.monitorPipe)
+		error = "--launcher-control admin requires an inherited reply pipe";
 	return error.empty();
 }
 
@@ -196,12 +201,48 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 	auto nextSample = started;
 	unsigned batchRemaining = 0;
 	const auto timing = deterministic ? server::TerrainTiming::QuiescePerTick : server::TerrainTiming::Background;
+	server::AdminReader admin;
+	const auto epoch = options.launcherAdmin ? net::udp::randomId() : 0;
+	uint64_t sequence = 0;
+	if (epoch)
+		monitor.offerAdmin(host.adminStatus(epoch));
 	for (;;)
 	{
 		bool discardInput = false;
 		if (stopRequested.load(std::memory_order_relaxed))
 			return "signal";
-		if (options.launcherControl)
+		if (epoch)
+		{
+			const auto event = admin.poll(monitor.adminReady());
+			if (event == server::AdminReader::Event::Closed)
+				return "launcher";
+			if (event == server::AdminReader::Event::Request || event == server::AdminReader::Event::Malformed)
+			{
+				const auto request = event == server::AdminReader::Event::Request ?
+					localcontrol::decodeRequest(admin.frame()) : std::nullopt;
+				if (request)
+				{
+					auto reply = host.administer(*request, epoch, sequence, *transport);
+					const bool stopping = request->operation == localcontrol::Operation::Stop &&
+						reply.result == localcontrol::Result::Applied;
+					monitor.offerAdmin(std::move(reply));
+					if (stopping)
+						return "control";
+					if (!host.adminHealthy())
+					{
+						error = "role authority publication is incomplete";
+						return "runtime_error";
+					}
+				}
+				else if (monitor.adminReady())
+				{
+					auto reply = host.adminStatus(epoch);
+					reply.result = localcontrol::Result::Malformed;
+					monitor.offerAdmin(std::move(reply));
+				}
+			}
+		}
+		else if (options.launcherControl)
 		{
 			switch (server::pollLauncherPipe())
 			{

@@ -30,6 +30,7 @@ public:
 	uint64_t roleRevision() const { return m_roleRevision; }
 	uint64_t worldId() const { return m_worldId; }
 	size_t size() const { return m_profiles.size(); }
+	const auto &profiles() const { return m_profiles; }
 	bool contains(sim::PlayerId id) const { return m_profiles.contains(id); }
 	bool includesItemWatermark(uint64_t next) const { return next <= m_itemLimit; }
 	sim::PlayerId find(const net::wire::PlayerKey &key) const;

@@ -3,6 +3,7 @@
 #include <World/WorldCheckpoint.hpp>
 
 #include <algorithm>
+#include <iostream>
 #include <ostream>
 #include <set>
 #include <string_view>
@@ -15,10 +16,12 @@ namespace fs = std::filesystem;
 namespace ws = worldsave;
 using net::wire::PlayerKey;
 constexpr std::array<uint8_t, 4> kMagic{'F', 'T', 'R', 'L'};
-constexpr uint32_t kVersion = 1;
-constexpr size_t kFixedBytes = 108; // header, owner binding, counts and checksum
-constexpr size_t kAdminBytes = 36, kAuditBytes = 17, kMaxAudit = 64;
-constexpr size_t kMaxState = kFixedBytes + ws::kMaxPersistentPlayers * kAdminBytes + kMaxAudit * kAuditBytes;
+constexpr uint32_t kVersion = 2;
+constexpr size_t kLegacyFixedBytes = 108; // header, owner binding, counts and checksum
+constexpr size_t kFixedBytes = kLegacyFixedBytes + 12;
+constexpr size_t kAdminBytes = 36, kAccessBytes = 13;
+constexpr size_t kMaxState = kFixedBytes + ws::kMaxPersistentPlayers * (2 * kAdminBytes + kAccessBytes) +
+	localcontrol::kMaxAudit * localcontrol::kAuditSize;
 
 bool isActor(sim::PlayerId id)
 {
@@ -29,20 +32,6 @@ bool fail(std::string &error, std::string_view message)
 {
 	error = message;
 	return false;
-}
-
-std::string_view name(RoleOperation operation)
-{
-	switch (operation)
-	{
-	case RoleOperation::Bootstrap: return "bootstrap";
-	case RoleOperation::Provision: return "provision";
-	case RoleOperation::GrantAdmin: return "grant-admin";
-	case RoleOperation::RevokeAdmin: return "revoke-admin";
-	case RoleOperation::Transfer: return "transfer";
-	case RoleOperation::Recover: return "recover";
-	}
-	return "invalid";
 }
 }
 
@@ -104,7 +93,7 @@ WorldRoles::Load WorldRoles::read(const fs::path &path, State &state) const
 
 bool WorldRoles::decode(const std::vector<uint8_t> &bytes, uint64_t &worldId, State &next) const
 {
-	if (bytes.size() < kFixedBytes)
+	if (bytes.size() < kLegacyFixedBytes)
 		return false;
 	const auto payloadSize = bytes.size() - sizeof(uint64_t);
 	ws::ByteReader checksum(bytes.data() + payloadSize, sizeof(uint64_t));
@@ -113,7 +102,8 @@ bool WorldRoles::decode(const std::vector<uint8_t> &bytes, uint64_t &worldId, St
 	ws::ByteReader reader(bytes.data(), payloadSize);
 	std::array<uint8_t, kMagic.size()> foundMagic{};
 	reader.raw(foundMagic.data(), foundMagic.size());
-	if (foundMagic != kMagic || reader.u32() != kVersion)
+	const auto version = reader.u32();
+	if (foundMagic != kMagic || (version != 1 && version != kVersion))
 		return false;
 	worldId = reader.u64();
 	next.revision = reader.u64();
@@ -121,10 +111,17 @@ bool WorldRoles::decode(const std::vector<uint8_t> &bytes, uint64_t &worldId, St
 	reader.raw(next.ownerProfile.data(), next.ownerProfile.size());
 	reader.raw(next.control.data(), next.control.size());
 	const auto admins = reader.u32(), events = reader.u32();
+	const auto delegates = version == kVersion ? reader.u32() : 0;
+	const auto policies = version == kVersion ? reader.u32() : 0;
+	const auto allowlist = version == kVersion ? reader.u32() : 0;
+	next.allowlist = allowlist != 0;
+	const auto fixedBytes = version == kVersion ? kFixedBytes : kLegacyFixedBytes;
 	if (!worldId || !next.revision || (next.owner.valid() && !isActor(next.owner)) ||
 		!localcontrol::validBootstrap({next.ownerProfile, next.control}) ||
-		admins >= ws::kMaxPersistentPlayers || (admins && !next.owner.valid()) || !events || events > kMaxAudit ||
-		bytes.size() != kFixedBytes + admins * kAdminBytes + events * kAuditBytes)
+		admins >= ws::kMaxPersistentPlayers || delegates > admins || policies >= ws::kMaxPersistentPlayers ||
+		allowlist > 1 || ((admins || policies || allowlist) && !next.owner.valid()) ||
+		!events || events > localcontrol::kMaxAudit || bytes.size() != fixedBytes +
+		(admins + delegates) * kAdminBytes + policies * kAccessBytes + events * localcontrol::kAuditSize)
 		return false;
 	uint32_t previous = ws::kFirstRemotePlayerId - 1;
 	std::set<PlayerKey> keys{next.ownerProfile};
@@ -139,14 +136,45 @@ bool WorldRoles::decode(const std::vector<uint8_t> &bytes, uint64_t &worldId, St
 		next.admins.emplace(id, key);
 		previous = id.value;
 	}
+	keys.insert(next.control);
+	previous = ws::kFirstRemotePlayerId - 1;
+	for (uint32_t i = 0; i < delegates; ++i)
+	{
+		const sim::PlayerId id{reader.u32()};
+		localcontrol::ControlKey key{};
+		reader.raw(key.data(), key.size());
+		if (id.value <= previous || !next.admins.contains(id) || key == localcontrol::ControlKey{} ||
+			!keys.insert(key).second)
+			return false;
+		next.delegates.emplace(id, key);
+		previous = id.value;
+	}
+	previous = ws::kFirstRemotePlayerId - 1;
+	for (uint32_t i = 0; i < policies; ++i)
+	{
+		const sim::PlayerId id{reader.u32()};
+		const auto flags = reader.u8();
+		const auto until = reader.u64();
+		if (id.value <= previous || !isActor(id) || id == next.owner || flags > 3 ||
+			(!flags && !until) || ((flags & 1) && until))
+			return false;
+		next.access.emplace(id, Access{(flags & 1) != 0, (flags & 2) != 0, until});
+		previous = id.value;
+	}
 	for (uint32_t i = 0; i < events; ++i)
 	{
-		const Audit event{reader.u64(), static_cast<RoleOperation>(reader.u8()), {reader.u32()}, {reader.u32()}};
-		if (!event.revision || event.revision > next.revision || name(event.operation) == "invalid" ||
-			(event.previousOwner.valid() && !isActor(event.previousOwner)) ||
-			(!isActor(event.target) && (event.target.valid() || event.operation != RoleOperation::Bootstrap)) ||
+		localcontrol::Audit event{reader.u64(), static_cast<RoleOperation>(reader.u8()), {reader.u32()}, {reader.u32()}};
+		const auto lastOperation = version == 1 ? RoleOperation::Recover : RoleOperation::Stop;
+		const bool optionalTarget = event.operation == RoleOperation::Bootstrap || event.operation >= RoleOperation::EnableAllowlist;
+		if (!event.revision || event.revision > next.revision || event.operation < RoleOperation::Bootstrap ||
+			event.operation > lastOperation || (event.actor.valid() && !isActor(event.actor)) ||
+			(!isActor(event.target) && (event.target.valid() || !optionalTarget)) ||
+			(event.operation >= RoleOperation::EnableAllowlist && event.target.valid()) ||
+			(event.operation >= RoleOperation::Kick && !event.actor.valid()) ||
 			(i && event.revision != next.audit.back().revision + 1))
 			return false;
+		if (version == 1 && (event.operation == RoleOperation::Bootstrap || event.operation == RoleOperation::Recover))
+			event.actor = {};
 		next.audit.push_back(event);
 	}
 	if (reader.failed() || next.audit.back().revision != next.revision ||
@@ -163,7 +191,8 @@ bool WorldRoles::identitiesMatch(const State &state) const
 		return registered && *registered == key;
 	};
 	return (!state.owner.valid() || matches(state.owner, state.ownerProfile)) &&
-		std::ranges::all_of(state.admins, [&](const auto &entry) { return matches(entry.first, entry.second); });
+		std::ranges::all_of(state.admins, [&](const auto &entry) { return matches(entry.first, entry.second); }) &&
+		std::ranges::all_of(state.access, [&](const auto &entry) { return m_identities.contains(entry.first); });
 }
 
 bool WorldRoles::promotePending()
@@ -178,12 +207,19 @@ bool WorldRoles::promotePending()
 
 bool WorldRoles::commit(State next, RoleOperation operation, sim::PlayerId target, std::string &error)
 {
+	const bool ownerCommand = operation == RoleOperation::GrantAdmin || operation == RoleOperation::RevokeAdmin ||
+		operation == RoleOperation::Transfer;
+	return commit(std::move(next), operation, target, ownerCommand ? m_state.owner : sim::PlayerId{}, error);
+}
+
+bool WorldRoles::commit(State next, RoleOperation operation, sim::PlayerId target, sim::PlayerId actor, std::string &error)
+{
 	if (next.revision == UINT64_MAX)
 		return fail(error, "role revision space exhausted");
 	++next.revision;
-	if (next.audit.size() == kMaxAudit)
+	if (next.audit.size() == localcontrol::kMaxAudit)
 		next.audit.erase(next.audit.begin());
-	next.audit.push_back({next.revision, operation, m_load == Load::Present ? m_state.owner : sim::PlayerId{}, target});
+	next.audit.push_back({next.revision, operation, actor, target});
 	ws::ByteWriter writer;
 	writer.raw(kMagic.data(), kMagic.size());
 	writer.u32(kVersion);
@@ -194,16 +230,30 @@ bool WorldRoles::commit(State next, RoleOperation operation, sim::PlayerId targe
 	writer.raw(next.control.data(), next.control.size());
 	writer.u32(static_cast<uint32_t>(next.admins.size()));
 	writer.u32(static_cast<uint32_t>(next.audit.size()));
+	writer.u32(static_cast<uint32_t>(next.delegates.size()));
+	writer.u32(static_cast<uint32_t>(next.access.size()));
+	writer.u32(next.allowlist);
 	for (const auto &[id, key] : next.admins)
 	{
 		writer.u32(id.value);
 		writer.raw(key.data(), key.size());
 	}
+	for (const auto &[id, key] : next.delegates)
+	{
+		writer.u32(id.value);
+		writer.raw(key.data(), key.size());
+	}
+	for (const auto &[id, access] : next.access)
+	{
+		writer.u32(id.value);
+		writer.u8((access.banned ? 1 : 0) | (access.allowed ? 2 : 0));
+		writer.u64(access.kickedUntil);
+	}
 	for (const auto &event : next.audit)
 	{
 		writer.u64(event.revision);
 		writer.u8(static_cast<uint8_t>(event.operation));
-		writer.u32(event.previousOwner.value);
+		writer.u32(event.actor.value);
 		writer.u32(event.target.value);
 	}
 	auto bytes = writer.take();
@@ -225,7 +275,10 @@ bool WorldRoles::commit(State next, RoleOperation operation, sim::PlayerId targe
 	if (!m_identities.advanceRoleRevision(next.revision))
 		return fail(error, "could not advance the role revision in the identity registry");
 	if (!promotePending())
+	{
+		m_load = Load::Invalid;
 		return fail(error, "role revision recorded but publication could not finish; inspect offline status before retrying");
+	}
 	m_state = std::move(next);
 	m_load = Load::Present;
 	return true;
@@ -290,6 +343,143 @@ Role WorldRoles::role(sim::PlayerId id) const
 	return Role::Player;
 }
 
+sim::PlayerId WorldRoles::controller(const std::optional<localcontrol::Bootstrap> &proof) const
+{
+	if (m_load != Load::Present || !proof)
+		return {};
+	if (proof->player == m_state.ownerProfile && localcontrol::matches(proof->control, m_state.control))
+		return m_state.owner;
+	const auto actor = m_identities.find(proof->player);
+	const auto delegate = m_state.delegates.find(actor);
+	return delegate != m_state.delegates.end() && localcontrol::matches(proof->control, delegate->second) &&
+		admits(actor, localcontrol::unixSeconds()) ? actor : sim::PlayerId{};
+}
+
+bool WorldRoles::isControlKey(const localcontrol::ControlKey &key) const
+{
+	return m_load == Load::Present && (localcontrol::matches(key, m_state.control) ||
+		std::ranges::any_of(m_state.delegates, [&](const auto &entry) { return localcontrol::matches(key, entry.second); }));
+}
+
+bool WorldRoles::admits(sim::PlayerId id, uint64_t now) const
+{
+	if (!healthy())
+		return false;
+	if (role(id) == Role::Owner)
+		return true;
+	const auto access = m_state.access.find(id);
+	if (access == m_state.access.end())
+		return !m_state.allowlist;
+	return !access->second.banned && access->second.kickedUntil <= now &&
+		(!m_state.allowlist || access->second.allowed);
+}
+
+void WorldRoles::fillAdminState(localcontrol::Reply &reply, sim::PlayerId actor) const
+{
+	reply.role = role(actor);
+	if (reply.role == Role::Player)
+		return;
+	reply.revision = m_state.revision;
+	reply.allowlist = m_state.allowlist;
+	reply.audit = m_state.audit;
+	reply.players.reserve(m_identities.size());
+	for (const auto &[id, key] : m_identities.profiles())
+	{
+		const auto position = m_state.access.find(id);
+		const auto access = position == m_state.access.end() ? Access{} : position->second;
+		reply.players.push_back({id, role(id), access.banned, access.allowed, m_state.delegates.contains(id), access.kickedUntil});
+	}
+}
+
+localcontrol::Result WorldRoles::moderate(sim::PlayerId actor, const localcontrol::Request &request, bool online, uint64_t now)
+{
+	using localcontrol::Operation;
+	using localcontrol::Result;
+	const auto operation = request.operation;
+	const auto actorRole = role(actor);
+	if (!localcontrol::permitted(actorRole, operation))
+		return Result::Forbidden;
+	if (operation == Operation::List)
+		return Result::Applied;
+	const auto targetRole = role(request.target);
+	if (!localcontrol::permitted(actorRole, operation, targetRole))
+		return Result::ProtectedRole;
+	const auto *profile = m_identities.keyFor(request.target);
+	if (localcontrol::targeted(operation) && !profile)
+		return Result::UnknownPlayer;
+	if (operation == Operation::Kick && !online)
+		return Result::Offline;
+
+	State next = m_state;
+	if (operation == Operation::GrantAdmin)
+	{
+		const bool added = next.admins.emplace(request.target, *profile).second;
+		if (request.delegation)
+		{
+			const auto &proof = *request.delegation;
+			const auto existing = next.delegates.find(request.target);
+			if (proof.player == *profile && existing != next.delegates.end() &&
+				localcontrol::matches(proof.control, existing->second))
+				return Result::NoChange;
+			if (!localcontrol::validBootstrap(proof) || proof.player != *profile ||
+				m_identities.find(proof.control).valid() || isControlKey(proof.control))
+				return Result::InvalidCredential;
+			next.delegates.insert_or_assign(request.target, proof.control);
+		}
+		else if (!added)
+			return Result::NoChange;
+	}
+	else if (operation == Operation::RevokeAdmin)
+	{
+		if (!next.admins.erase(request.target))
+			return Result::NoChange;
+		next.delegates.erase(request.target);
+	}
+	else if (operation >= Operation::Kick && operation <= Operation::Unallow)
+	{
+		auto &access = next.access[request.target];
+		if (access.kickedUntil <= now)
+			access.kickedUntil = 0;
+		switch (operation)
+		{
+		case Operation::Kick:
+			if (access.banned || access.kickedUntil)
+				return Result::NoChange;
+			access.kickedUntil = now + localcontrol::kKickSeconds;
+			break;
+		case Operation::Ban:
+		case Operation::Unban:
+			if (access.banned == (operation == Operation::Ban))
+				return Result::NoChange;
+			access.banned = operation == Operation::Ban;
+			access.kickedUntil = 0;
+			break;
+		case Operation::Allow:
+		case Operation::Unallow:
+			if (access.allowed == (operation == Operation::Allow))
+				return Result::NoChange;
+			access.allowed = operation == Operation::Allow;
+			break;
+		default: break;
+		}
+		if (!access.banned && !access.allowed && !access.kickedUntil)
+			next.access.erase(request.target);
+	}
+	else if (operation == Operation::EnableAllowlist || operation == Operation::DisableAllowlist)
+	{
+		const bool enabled = operation == Operation::EnableAllowlist;
+		if (next.allowlist == enabled)
+			return Result::NoChange;
+		next.allowlist = enabled;
+	}
+
+	std::string error;
+	if (commit(std::move(next), operation, request.target, actor, error))
+		return Result::Applied;
+	std::cerr << "[server] " << error << '\n';
+	return Result::StorageError;
+}
+
 bool WorldRoles::apply(const RoleRequest &request, std::string &error)
 {
 	if (request.worldId != m_identities.worldId() || m_load == Load::WrongWorld)
@@ -319,13 +509,16 @@ bool WorldRoles::operatorChange(const RoleRequest &request, std::string &error)
 	if (request.target.valid() || request.authorization || !request.profile || !request.newControl ||
 		!localcontrol::validBootstrap({*request.profile, *request.newControl}) ||
 		m_identities.find(*request.newControl).valid() ||
-		(m_state.revision && localcontrol::matches(m_state.control, *request.newControl)))
+		(m_state.revision && localcontrol::matches(m_state.control, *request.newControl)) ||
+		isControlKey(*request.newControl))
 		return fail(error, "operation requires a profile key and a distinct new local owner credential");
 	State next;
 	if (m_load == Load::Present)
 	{
 		next.revision = m_state.revision;
 		next.audit = m_state.audit;
+		next.access = m_state.access;
+		next.allowlist = m_state.allowlist;
 	}
 	else
 		next.revision = m_identities.roleRevision();
@@ -338,6 +531,7 @@ bool WorldRoles::operatorChange(const RoleRequest &request, std::string &error)
 		return fail(error, "could not enroll the requested owner identity");
 	next.ownerProfile = *request.profile;
 	next.control = *request.newControl;
+	next.access.erase(next.owner);
 	const auto owner = next.owner;
 	return commit(std::move(next), request.operation, owner, error);
 }
@@ -363,16 +557,19 @@ bool WorldRoles::ownerChange(const RoleRequest &request, std::string &error)
 	{
 		if (!next.admins.erase(request.target))
 			return fail(error, "player is not an admin");
+		next.delegates.erase(request.target);
 	}
 	else
 	{
 		if (*request.newControl == localcontrol::ControlKey{} ||
-			localcontrol::matches(next.control, *request.newControl) || m_identities.find(*request.newControl).valid())
+			isControlKey(*request.newControl) || m_identities.find(*request.newControl).valid())
 			return fail(error, "transfer requires a distinct new local owner credential");
 		next.owner = request.target;
 		next.ownerProfile = *target;
 		next.control = *request.newControl;
 		next.admins.erase(request.target);
+		next.delegates.erase(request.target);
+		next.access.erase(request.target);
 	}
 	return commit(std::move(next), request.operation, request.target, error);
 }
@@ -391,7 +588,7 @@ void WorldRoles::printStatus(std::ostream &output) const
 	for (const auto &entry : m_state.admins)
 		output << "ROLES admin_id=" << entry.first.value << '\n';
 	for (const auto &event : m_state.audit)
-		output << "ROLE_AUDIT revision=" << event.revision << " operation=" << name(event.operation)
-			   << " previous_owner_id=" << event.previousOwner.value << " target_id=" << event.target.value << '\n';
+		output << "ROLE_AUDIT revision=" << event.revision << " operation=" << localcontrol::label(event.operation)
+			   << " actor_id=" << event.actor.value << " target_id=" << event.target.value << '\n';
 }
 }

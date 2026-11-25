@@ -1,7 +1,8 @@
 #pragma once
 
-#include <Hosting/RoleCredentials.hpp>
+#include <Hosting/AdminProtocol.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -13,6 +14,7 @@
 #else
 #include <cerrno>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -31,7 +33,7 @@ inline bool hasLauncherPipe()
 #endif
 }
 
-// Once started, the only accepted control signal is EOF.
+// Bootstrap and legacy EOF-only launches accept no buffered input here.
 inline LauncherInput pollLauncherPipe()
 {
 #ifdef _WIN32
@@ -92,4 +94,80 @@ inline std::optional<localcontrol::Bootstrap> readLauncherBootstrap()
 	}
 	return std::nullopt;
 }
+
+class AdminReader
+{
+public:
+	enum class Event { Idle, Closed, Request, Malformed };
+
+	Event poll(bool ready)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		size_t available = 0;
+#ifdef _WIN32
+		const auto pipe = GetStdHandle(STD_INPUT_HANDLE);
+		DWORD pending = 0;
+		if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &pending, nullptr))
+			return Event::Closed;
+		available = pending;
+#else
+		pollfd pending{STDIN_FILENO, POLLIN, 0};
+		const auto polled = ::poll(&pending, 1, 0);
+		if (polled < 0 && errno == EINTR)
+			return Event::Idle;
+		if (polled < 0 || (pending.revents & (POLLHUP | POLLERR | POLLNVAL)))
+			return Event::Closed;
+		int count = 0;
+		if ((pending.revents & POLLIN) && ::ioctl(STDIN_FILENO, FIONREAD, &count) != 0)
+			return Event::Closed;
+		available = static_cast<size_t>(count);
+#endif
+		const bool malformed = !m_disabled && (available > m_frame.size() - m_used ||
+			(m_used && now - m_started >= std::chrono::seconds(2)));
+		m_disabled |= malformed;
+		m_reportMalformed |= malformed;
+		if (available && (ready || m_disabled))
+		{
+			std::array<uint8_t, 512> junk{};
+			auto *output = m_disabled ? junk.data() : m_frame.data() + m_used;
+			const auto wanted = std::min(available, m_disabled ? junk.size() : m_frame.size() - m_used);
+#ifdef _WIN32
+			DWORD actual = 0;
+			if (!ReadFile(pipe, output, static_cast<DWORD>(wanted), &actual, nullptr) || !actual)
+				return Event::Closed;
+#else
+			const auto actual = ::read(STDIN_FILENO, output, wanted);
+			if (actual < 0 && errno == EINTR)
+				return Event::Idle;
+			if (actual <= 0)
+				return Event::Closed;
+#endif
+			if (!m_disabled)
+			{
+				if (!m_used)
+					m_started = now;
+				m_used += static_cast<size_t>(actual);
+				if (m_used == m_frame.size())
+				{
+					m_used = 0;
+					return Event::Request;
+				}
+			}
+		}
+		if (ready && m_reportMalformed)
+		{
+			m_reportMalformed = false;
+			return Event::Malformed;
+		}
+		return Event::Idle;
+	}
+
+	const localcontrol::RequestFrame &frame() const { return m_frame; }
+
+private:
+	localcontrol::RequestFrame m_frame{};
+	size_t m_used{};
+	std::chrono::steady_clock::time_point m_started{};
+	bool m_disabled{}, m_reportMalformed{};
+};
 }

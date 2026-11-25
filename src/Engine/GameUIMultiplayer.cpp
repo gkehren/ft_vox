@@ -166,7 +166,7 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 		ui::drawMultiplayerNetworkStats(frame.networkStats);
 	drawHostedPlayers(frame.hostedServer);
 	if (ImGui::CollapsingHeader("Administration"))
-		ImGui::TextWrapped("Server controls are unavailable.");
+		drawHostedAdministration(frame);
 	ImGui::End();
 }
 
@@ -227,6 +227,203 @@ void GameUI::drawHostedPlayers(const hosting::Snapshot *server)
 				ImGui::TextUnformatted(sessionLabel(row.state));
 			}
 		ImGui::EndTable();
+	}
+}
+
+void GameUI::drawHostedAdministration(const GameUIFrame &frame)
+{
+	using namespace localcontrol;
+	const auto *server = frame.hostedServer;
+	const auto launch = server ? server->launch : 0;
+	if (m_adminLaunch != launch)
+	{
+		m_adminLaunch = launch;
+		m_adminSelection = {};
+		m_lastAdminRosterSelection = {};
+		m_adminConfirmation.reset();
+		m_adminProfile.clear();
+		m_adminError.clear();
+	}
+	const auto *state = server && server->state == hosting::State::Ready && !server->adminChannelFailed ?
+		server->administration.get() : nullptr;
+	if (!state || state->role == Role::Player)
+	{
+		m_adminConfirmation.reset();
+		if (ImGui::BeginPopupModal("Confirm server action", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
+	}
+	if (server && server->adminOperation == Operation::Stop &&
+		(server->state == hosting::State::Stopping || server->state == hosting::State::Stopped ||
+			server->state == hosting::State::Failed))
+		ImGui::TextWrapped("%s", server->message.c_str());
+	else if (!server || server->state != hosting::State::Ready)
+	{
+		ImGui::TextWrapped("Administration is available for a locally hosted server.");
+		return;
+	}
+	if (server->state != hosting::State::Ready)
+		return;
+	if (server->adminChannelFailed)
+	{
+		ImGui::TextWrapped("%s", label(Result::ChannelError).data());
+		return;
+	}
+	if (!state)
+	{
+		ImGui::TextWrapped("Waiting for local administration permissions.");
+		return;
+	}
+	if (state->role == Role::Player)
+	{
+		ImGui::TextWrapped("Player access. This launch has no verified local administration credential.");
+		return;
+	}
+	ImGui::Text("Local permission: %s", label(state->role).data());
+	ImGui::TextWrapped("Hosted world: %s", server->world.c_str());
+	ImGui::TextWrapped("Remote profiles cannot send administration commands.");
+	if (server->adminPending)
+		ImGui::Text("Waiting for %s…", label(server->adminOperation).data());
+	else if (server->adminResult)
+		ImGui::TextWrapped("%s: %s", label(server->adminOperation).data(), label(*server->adminResult).data());
+	if (!m_adminError.empty())
+		ImGui::TextWrapped("%s", m_adminError.c_str());
+
+	const auto submit = [&](Operation op, sim::PlayerId id, std::string_view profile = {}) {
+		m_adminError = frame.administerHostedServer(launch, op, id, profile);
+	};
+	const auto confirmButton = [&](const char *caption, Operation op, sim::PlayerId id = {}, std::string_view profile = {}) {
+		if (ImGui::Button(caption))
+		{
+			m_adminConfirmation = AdminConfirmation{op, id, std::string(profile)};
+			ImGui::OpenPopup("Confirm server action");
+		}
+	};
+	const auto findPlayer = [&](sim::PlayerId id) -> const Player * {
+		const auto found = std::ranges::lower_bound(state->players, id.value, {}, [](const auto &row) { return row.id.value; });
+		return found != state->players.end() && found->id == id ? &*found : nullptr;
+	};
+	const auto online = [&](sim::PlayerId id) {
+		return server->status && std::ranges::any_of(server->status->transport.roster(), [&](const auto &row) {
+			return row.id == id && row.state != monitoring::SessionState::Disconnecting;
+		});
+	};
+	if (m_lastAdminRosterSelection != m_hostPlayerSelection)
+	{
+		m_lastAdminRosterSelection = m_hostPlayerSelection;
+		if (m_hostPlayerSelection.valid())
+			m_adminSelection = m_hostPlayerSelection;
+	}
+	const auto *target = findPlayer(m_adminSelection);
+	char preview[64] = "Select a registered player";
+	if (target)
+		std::snprintf(preview, sizeof(preview), "Player #%u · %s", target->id.value, label(target->role).data());
+
+	ImGui::BeginDisabled(server->adminPending || !frame.administerHostedServer);
+	if (ImGui::Button("Refresh players and audit"))
+		submit(Operation::List, {});
+	ImGui::SetNextItemWidth(-1.f);
+	if (ImGui::BeginCombo("##admin-target", preview))
+	{
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(state->players.size()));
+		while (clipper.Step())
+			for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+			{
+				const auto &player = state->players[static_cast<size_t>(i)];
+				char row[96];
+				std::snprintf(row, sizeof(row), "Player #%u · %s%s", player.id.value,
+					label(player.role).data(), player.banned ? " · Banned" : "");
+				if (ImGui::Selectable(row, player.id == m_adminSelection))
+					m_adminSelection = player.id;
+			}
+		ImGui::EndCombo();
+	}
+	if (target)
+	{
+		const auto id = target->id;
+		const auto now = unixSeconds();
+		if (target->banned)
+			ImGui::TextUnformatted("Admission denied by ban.");
+		if (target->kickedUntil > now)
+			ImGui::Text("Kick cooldown: %llu seconds", static_cast<unsigned long long>(target->kickedUntil - now));
+		if (target->role == Role::Admin)
+			ImGui::TextUnformatted(target->localAdmin ? "Local control authorized" : "Role assigned without local control");
+		if (permitted(state->role, Operation::Kick, target->role) && online(id))
+			confirmButton("Kick for 60 seconds…", Operation::Kick, id);
+		if (permitted(state->role, Operation::Ban, target->role))
+			confirmButton(target->banned ? "Unban…" : "Ban…", target->banned ? Operation::Unban : Operation::Ban, id);
+		if (permitted(state->role, Operation::Allow, target->role))
+			confirmButton(target->allowed ? "Remove from allowlist…" : "Add to allowlist…",
+				target->allowed ? Operation::Unallow : Operation::Allow, id);
+		if (permitted(state->role, Operation::GrantAdmin, target->role))
+		{
+			confirmButton(target->role == Role::Admin ? "Revoke admin…" : "Grant admin role…",
+				target->role == Role::Admin ? Operation::RevokeAdmin : Operation::GrantAdmin, id);
+			if (frame.joinProfiles && !frame.joinProfiles->empty())
+			{
+				if (const auto *profile = profileChoice("##admin-profiles", *frame.joinProfiles, m_adminProfile))
+					m_adminProfile = *profile;
+				ImGui::BeginDisabled(m_adminProfile.empty());
+				ImGui::TextWrapped("Local control profile: %s", m_adminProfile.empty() ? "Select a saved profile" : m_adminProfile.c_str());
+				confirmButton("Authorize local control…", Operation::GrantAdmin, id, m_adminProfile);
+				ImGui::EndDisabled();
+			}
+		}
+	}
+	ImGui::Text("Allowlist: %s", state->allowlist ? "Enabled" : "Disabled");
+	if (state->role == Role::Owner)
+	{
+		confirmButton(state->allowlist ? "Disable allowlist…" : "Enable allowlist…",
+			state->allowlist ? Operation::DisableAllowlist : Operation::EnableAllowlist);
+		confirmButton("Stop and save server…", Operation::Stop);
+	}
+	ImGui::EndDisabled();
+
+	if (ImGui::BeginPopupModal("Confirm server action", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		if (!m_adminConfirmation)
+			ImGui::CloseCurrentPopup();
+		else
+		{
+			const auto &action = *m_adminConfirmation;
+			const auto *subject = findPlayer(action.target);
+			ImGui::Text("World: %s", server->world.c_str());
+			if (subject)
+				ImGui::Text("Target: Player #%u (%s)", subject->id.value, label(subject->role).data());
+			if (!action.profile.empty())
+				ImGui::Text("Local control profile: %s", action.profile.c_str());
+			ImGui::Text("Confirm action: %s", label(action.operation).data());
+			if (action.operation == Operation::EnableAllowlist || action.operation == Operation::Unallow ||
+				action.operation == Operation::RevokeAdmin || action.operation == Operation::Ban)
+				ImGui::TextWrapped("This can disconnect active sessions.");
+			const bool eligible = (!action.target.valid() || subject) &&
+				permitted(state->role, action.operation, subject ? subject->role : Role::Player);
+			ImGui::BeginDisabled(!eligible || server->adminPending || !frame.administerHostedServer);
+			if (ImGui::Button("Confirm"))
+			{
+				submit(action.operation, action.target, action.profile);
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel"))
+				ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	if (ImGui::TreeNode("Recent audit history"))
+	{
+		for (auto it = state->audit.rbegin(); it != state->audit.rend(); ++it)
+		{
+			const auto actor = it->actor.valid() ? "Player #" + std::to_string(it->actor.value) : "Local setup";
+			const auto subject = it->target.valid() ? " → Player #" + std::to_string(it->target.value) : "";
+			ImGui::TextWrapped("%llu · %s · %s%s", static_cast<unsigned long long>(it->revision),
+				actor.c_str(), label(it->operation).data(), subject.c_str());
+		}
+		ImGui::TreePop();
 	}
 }
 
