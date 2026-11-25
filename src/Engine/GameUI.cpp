@@ -309,6 +309,14 @@ void GameUI::drawWithoutWorkspace(GameUIFrame &frame)
 	drawInventoryPanel(frame);
 }
 
+void GameUI::maintainDockspace()
+{
+	// Hidden workspace with no inventory on screen (issue #303 F09): the frame
+	// carries nothing but the dockspace maintenance submission, so Engine can skip
+	// building a GameUIFrame entirely.
+	m_shell.beginFrame(ui::Workspace::Hidden);
+}
+
 void GameUI::drawStatusOverlay(GameUIFrame &frame)
 {
 	// True gameplay overlay (issue #184): compact, read-only, semi-

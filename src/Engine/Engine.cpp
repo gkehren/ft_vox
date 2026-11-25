@@ -1587,6 +1587,16 @@ void Engine::drawUi()
 	if (!gameUi || !developerUiPresent())
 		return;
 
+	// Nothing consumes the developer frame while the workspace is hidden and no
+	// inventory is on screen: submit the dockspace alone instead of sampling
+	// biome/inventory/network/persistence state and wiring callbacks every frame
+	// (issue #303 F09).
+	if (!m_showDeveloperUi && !m_inventoryPanelOpen)
+	{
+		gameUi->maintainDockspace();
+		return;
+	}
+
 	const bool prevCapture = mouseCaptured;
 	bool presentedCapture = mouseCaptured;
 	bool presentedPause = paused || nativePause();
@@ -1943,6 +1953,13 @@ gameui::HudView Engine::playerHudView() const
 		view.statusKind = session.kind;
 		view.activity = session.activity;
 		view.recovery = session.recovery;
+		if (session.blocked)
+		{
+			// Only the host knows whether the menu bar is reachable right now, so
+			// the recovery line follows the actual workspace and capture state
+			// (issue #303 F03). It names the existing Multiplayer > Reconnect path.
+			view.recovery = gameui::recoveryInstruction(m_showDeveloperUi, mouseCaptured);
+		}
 		if (session.showHotbar && synchronized)
 		{
 			if (const auto snapshot = m_remote->transport.inventory())
@@ -1963,10 +1980,13 @@ gameui::HudView Engine::playerHudView() const
 		canAim = !player.waitingForTerrain;
 		if (!canAim)
 		{
+			// The solo hotbar keeps the authoritative inventory, so this is not a
+			// "bar returns" state: the body is held until the terrain around the
+			// player exists and interaction resumes (issue #303 F10).
 			view.status = "Waiting for terrain";
 			view.statusKind = Status::Pending;
-			view.activity = "The surrounding chunks are still being generated.";
-			view.recovery = "The hotbar returns as soon as the world is ready.";
+			view.activity = "The player is held until the surrounding terrain loads; "
+							"interaction resumes when it does.";
 		}
 		view.creative = player.flight;
 		if (view.creative && size_t(player.selectedBlock) < textureTypeString.size())

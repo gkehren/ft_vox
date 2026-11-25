@@ -85,10 +85,28 @@ HudSession hudSession(HudSessionState state, bool ready, std::string_view label,
 		out.status = label;
 		out.kind = style::Status::Error;
 		out.activity = detail.empty() ? std::string_view{"The session ended."} : detail;
-		out.recovery = "Reconnect: Esc, Multiplayer, Reconnect.";
+		// The recovery line depends on how the player can reach the menu bar, so
+		// the host fills it (recoveryInstruction) instead of a fixed literal.
+		out.blocked = true;
 		break;
 	}
 	return out;
+}
+
+std::string_view recoveryInstruction(bool workspaceVisible, bool mouseCaptured)
+{
+	// The developer menu bar is the only owner of Multiplayer > Reconnect: show
+	// the workspace with the global chord, then release the mouse if it is still
+	// captured. Each branch names exactly the steps that are missing.
+	if (!workspaceVisible)
+	{
+		if (mouseCaptured)
+			return "Ctrl+Shift+D, C, then Multiplayer > Reconnect.";
+		return "Ctrl+Shift+D, then Multiplayer > Reconnect.";
+	}
+	if (mouseCaptured)
+		return "C to free the mouse, then Multiplayer > Reconnect.";
+	return "Multiplayer > Reconnect.";
 }
 
 HudLayout hudLayout(Clip scene, Clip safeArea, const style::Theme &theme, float scale)
@@ -185,6 +203,11 @@ std::string_view creativeLabel(std::string_view block, char (&buffer)[48])
 	size_t written = 0;
 	const auto append = [&](std::string_view text) {
 		const size_t count = std::min(text.size(), capacity - written);
+		// A zero-length copy must never reach memcpy: an empty view may carry a
+		// null data pointer, and memcpy(dst, nullptr, 0) is undefined behavior
+		// (issue #303 F08, UBSan).
+		if (count == 0)
+			return;
 		std::memcpy(buffer + written, text.data(), count);
 		written += count;
 	};

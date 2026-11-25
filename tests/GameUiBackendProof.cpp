@@ -1356,11 +1356,173 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "active benchmarks skip player UI preparation");
 		engine.m_benchmark.cancel();
+		workspaceProof();
 		context.waitIdle();
 		const auto errors = context.validationErrorCount() - errorsBefore;
 		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;
 		std::cout << "HUD validation errors=" << errors << " known_rtss_errors=" << rtss << '\n';
 		CHECK(errors == rtss, "HUD adds no validation errors outside known RTSS messages");
+	}
+
+	/// The persisted inventory record of the canonical window, straight out of the
+	/// settings blob ImGui would write (issue #303 F01/F12). Empty when the record
+	/// is absent.
+	std::string inventoryIniRecord()
+	{
+		const char *ini = ImGui::SaveIniSettingsToMemory();
+		const std::string text = ini ? ini : "";
+		const auto start = text.find("[Window][Inventory]\n");
+		if (start == std::string::npos)
+			return {};
+		const auto end = text.find("\n[", start + 1);
+		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
+	}
+
+	/// F04/F09/F11/F12: the workspace visibility chord, its benchmark guard,
+	/// developer-input cancellation and the inventory docking identity are
+	/// exercised through real SDL events, not through direct setter calls.
+	void workspaceProof()
+	{
+		auto &shell = engine.gameUi->shell();
+		const SDL_Keymod chord = SDL_KMOD_CTRL | SDL_KMOD_SHIFT;
+		engine.setDeveloperWorkspaceVisible(true);
+		engine.setInventoryOpen(false);
+		frames(3);
+		CHECK(engine.developerWorkspaceVisible() && shell.dockspaceId() != 0,
+			"the workspace proof starts with a visible workspace and a live dockspace");
+
+		// (1) One press, one transition, both directions.
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible(), "Ctrl+Shift+D hides the whole workspace");
+		tap(SDLK_D, chord);
+		present();
+		CHECK(engine.developerWorkspaceVisible(), "Ctrl+Shift+D shows it again");
+
+		// (2) Repeats and incomplete chords are not the shortcut.
+		key(SDLK_D, SDL_EVENT_KEY_DOWN, true, chord);
+		present();
+		key(SDLK_D, SDL_EVENT_KEY_UP, false, chord);
+		present();
+		CHECK(engine.developerWorkspaceVisible(), "a key repeat does not toggle the workspace again");
+		for (const auto partial : std::array<SDL_Keymod, 4>{SDL_KMOD_NONE, SDL_KMOD_CTRL, SDL_KMOD_SHIFT,
+				 SDL_KMOD_ALT})
+		{
+			tap(SDLK_D, partial);
+			present();
+			CHECK(engine.developerWorkspaceVisible(),
+				"plain D and incomplete chords stay plain keys (mods=" << int(partial) << ')');
+		}
+
+		// (3) Hiding cancels developer-owned input instead of leaking it.
+		constexpr size_t kDevButton = 1;
+		engine.m_inputRouter.button(kDevButton, true, gameui::InputOwner::DeveloperUi);
+		checked(engine.m_inputRouter.pointerOwner() == gameui::InputOwner::DeveloperUi &&
+			engine.m_inputRouter.activeButton(kDevButton), "a developer pointer drag owns the surface");
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible() && !engine.m_inputRouter.activeButton(kDevButton) &&
+			engine.m_inputRouter.pointerOwner() != gameui::InputOwner::DeveloperUi,
+			"hiding the workspace cancels the in-flight developer drag");
+		tap(SDLK_D, chord);
+		frames(2);
+		checked(engine.developerWorkspaceVisible(), "the workspace is back for the docking proof");
+
+		// (4) The benchmark guard covers both the chord and the menu action.
+		engine.m_benchmark.requestStart();
+		const bool benchmarkActive = engine.m_benchmark.isActive();
+		tap(SDLK_D, chord);
+		present();
+		CHECK(benchmarkActive && engine.developerWorkspaceVisible(),
+			"the chord is consumed without changing visibility during a benchmark");
+		engine.setDeveloperWorkspaceVisible(false);
+		CHECK(!engine.m_benchmark.isActive() || engine.developerWorkspaceVisible(),
+			"the menu action obeys the same benchmark guard");
+		engine.m_benchmark.cancel();
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible(),
+			"the chord works again once the benchmark ended");
+
+		// (5) F09: with the workspace hidden and the inventory closed only the
+		// dockspace is maintained, so the developer frame is not built at all.
+		// The main menu bar belongs to that frame, so the last frame it was
+		// submitted in makes the difference observable.
+		const auto menuBarFrame = [] {
+			const ImGuiWindow *bar = ImGui::FindWindowByName("##MainMenuBar");
+			return bar ? bar->LastFrameActive : 0;
+		};
+		engine.setInventoryOpen(false);
+		engine.setDeveloperWorkspaceVisible(false);
+		frames(4);
+		const int hiddenBarFrame = menuBarFrame();
+		const auto hiddenDockspace = shell.dockspaceId();
+		const auto medianDevBuild = [&](int samples) {
+			std::vector<float> values;
+			for (int i = 0; i < samples; ++i)
+			{
+				present();
+				values.push_back(GetProfiler().lastScopeMs("DevUIBuild"));
+			}
+			return percentile(values, 0.5f);
+		};
+		const auto hiddenMs = medianDevBuild(40);
+		CHECK(hiddenDockspace != 0 && hiddenBarFrame > 0 && menuBarFrame() == hiddenBarFrame,
+			"the full-window path maintains the dockspace without building the developer frame");
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(2);
+		const auto visibleMs = medianDevBuild(40);
+		std::cout << "DevUIBuild median: hidden=" << hiddenMs << "ms visible=" << visibleMs << "ms\n";
+		CHECK(menuBarFrame() >= ImGui::GetFrameCount() - 1,
+			"the developer frame is built again as soon as the workspace returns");
+
+		// (6) F01: the hidden-workspace inventory is a separate, non-persistent
+		// identity, so the canonical window keeps its dock and its settings record.
+		tap(SDLK_E);
+		frames(2);
+		checked(engine.inventoryPanelOpen(), "the inventory opens in the visible workspace");
+		const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(shell.dockspaceId());
+		checked(central && central->ID != 0, "the dockspace exposes a central node to dock into");
+		ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : shell.dockspaceId());
+		ImGui::DockBuilderFinish(shell.dockspaceId());
+		frames(2);
+		const ImGuiWindow *canonical = ImGui::FindWindowByName("Inventory");
+		checked(canonical != nullptr, "the canonical inventory window exists");
+		const ImGuiID dockedId = canonical ? canonical->DockId : 0;
+		const auto recordBefore = inventoryIniRecord();
+		CHECK(dockedId != 0 && recordBefore.find("DockId=") != std::string::npos,
+			"the inventory is docked with a persisted association before hiding (dock=" << dockedId
+				<< " record=[" << recordBefore << "])");
+		tap(SDLK_D, chord);
+		present();
+		frames(2);
+		const ImGuiWindow *floating = ImGui::FindWindowByName("Inventory###inventory-floating");
+		CHECK(engine.inventoryPanelOpen() && floating != nullptr,
+			"the hidden workspace keeps the inventory open through its temporary identity");
+		CHECK(floating && floating->DockId == 0 &&
+			(floating->Flags & ImGuiWindowFlags_NoDocking) &&
+			(floating->Flags & ImGuiWindowFlags_NoSavedSettings),
+			"the temporary inventory refuses docking and the settings file");
+		const ImGuiWindow *stillCanonical = ImGui::FindWindowByName("Inventory");
+		CHECK(stillCanonical && stillCanonical->DockId == dockedId,
+			"opening the floating inventory does not undock the canonical window");
+		const auto recordWhileHidden = inventoryIniRecord();
+		CHECK(recordWhileHidden == recordBefore &&
+			recordWhileHidden.find("inventory-floating") == std::string::npos,
+			"the persisted inventory record is untouched while the workspace is hidden");
+		tap(SDLK_E);
+		present();
+		CHECK(!engine.inventoryPanelOpen(), "the floating inventory still closes normally");
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(2);
+		tap(SDLK_E);
+		frames(2);
+		const ImGuiWindow *restored = ImGui::FindWindowByName("Inventory");
+		CHECK(engine.inventoryPanelOpen() && restored && restored->DockId == dockedId &&
+			inventoryIniRecord() == recordBefore,
+			"restoring the workspace reopens the inventory in its original dock");
+		tap(SDLK_E);
+		present();
 	}
 
 	void performance()

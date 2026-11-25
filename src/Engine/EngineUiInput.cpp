@@ -124,6 +124,14 @@ void Engine::setInventoryOpen(bool open)
 
 void Engine::setDeveloperWorkspaceVisible(bool visible)
 {
+	if (!ui::allowsWorkspaceToggle(m_benchmark.isActive()))
+	{
+		// A benchmark owns the composition: the request is consumed (the caller
+		// already swallowed the key) but the workspace state does not change, so a
+		// measurement can never be perturbed by chrome appearing or disappearing
+		// (issue #303 F11).
+		return;
+	}
 	if (m_showDeveloperUi == visible)
 		return;
 	if (ui::endsDeveloperInput(m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,

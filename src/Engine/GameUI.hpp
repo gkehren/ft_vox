@@ -306,6 +306,9 @@ public:
 	/// previously docked inventory floats while the workspace is hidden and is
 	/// re-docked when it returns, so the persisted layout is never destroyed.
 	void drawWithoutWorkspace(GameUIFrame &frame);
+	/// Hidden workspace with nothing on screen (issue #303 F09): submit the
+	/// maintenance dockspace only, without a frame or any snapshot work.
+	void maintainDockspace();
 	void resetInventoryInteraction() { m_drag = {}; }
 	/// Close developer-owned modal surfaces when the workspace is hidden
 	/// (issue #303 F04): a file browser must not survive as an invisible open
@@ -517,14 +520,11 @@ private:
 
 	/// Application shell (dockspace, main menu, status strip, layout).
 	ui::UiShell m_shell{};
-	/// Dock node the legacy inventory belonged to before the workspace was
-	/// hidden (issue #303 F01): captured while visible, re-applied once when the
-	/// workspace returns, then released so the player keeps free docking.
-	ImGuiID m_inventoryDockId{0};
-	/// Last dock node the inventory was actually in while the workspace was
-	/// visible (0 = floating), so hiding the workspace neither loses a docked
-	/// association nor invents one.
-	ImGuiID m_inventoryLastDockId{0};
+	/// True while the legacy inventory is drawn through its temporary
+	/// non-persistent identity because the developer workspace is hidden
+	/// (issue #303 F01). The canonical "Inventory" window and its imgui.ini
+	/// record are left untouched for the whole hidden period.
+	bool m_inventoryFloating{};
 
 	// Biome map
 	int m_mapSize{256};

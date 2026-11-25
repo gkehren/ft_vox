@@ -106,6 +106,10 @@ public:
 	/// (issue #303 F01).
 	void beginFrame(Workspace workspace = Workspace::Visible);
 	bool workspaceHidden() const { return keepDockSpaceAliveOnly(m_workspace); }
+	/// Identity of the root dockspace node, available after beginFrame has
+	/// submitted it (0 before the first frame). Tests use it to dock windows
+	/// and to read back persisted associations (issue #303 F12).
+	ImGuiID dockspaceId() const { return m_dockspaceId; }
 
 	/// Main menu bar: ft_vox / World / View / Developer / Help + right-side
 	/// status strip with graceful degradation at narrow widths.

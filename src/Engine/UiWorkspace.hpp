@@ -67,4 +67,13 @@ inline constexpr bool endsDeveloperInput(Workspace before, Workspace after)
 {
 	return visible(before) && !visible(after);
 }
+
+/// Workspace visibility is a UI-only transition, so it is withheld while a
+/// benchmark owns the frame (issue #303 F11): Reloading, Warmup and Running must
+/// never be perturbed by a new window/chrome composition, and the shortcut is
+/// consumed either way. Menu and keyboard transitions share this rule.
+inline constexpr bool allowsWorkspaceToggle(bool benchmarkActive)
+{
+	return !benchmarkActive;
+}
 } // namespace ui

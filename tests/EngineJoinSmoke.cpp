@@ -536,28 +536,37 @@ struct EngineJoinProbe
 	{
 		frame().connectServer({endpoint, profile, seed});
 		pump();
-		// Readiness transition (issue #303 F07): until the session is confirmed the
-		// HUD shows pending synchronization and neither a bar nor a reticle, so no
-		// stale or invented inventory is ever presented. One check per join keeps
-		// the assertion count independent of how many frames the join takes.
-		bool sampled = false, pendingOk = true;
 		until([&] {
 			const bool joined = !engine.switchingSession() && engine.m_remote &&
 				engine.m_remote->endpoint == endpoint && engine.m_remote->namedProfile == profile;
-			const bool ready = joined && engine.m_remote->ready();
-			if (joined && !ready && !sampled)
-			{
-				const auto hud = engine.playerHudView();
-				pendingOk = !hud.hotbar.available && !hud.aim && !hud.status.empty();
-				sampled = true;
-			}
-			return ready;
+			return joined && engine.m_remote->ready();
 		}, "remote projection did not become ready");
-		CHECK(pendingOk,
-			"an unready remote session presents synchronization instead of an inventory");
+		checkReadinessPresentation();
 		const auto readyHud = engine.playerHudView();
 		CHECK(readyHud.hotbar.available && readyHud.status.empty(),
 			"the ready session presents the confirmed inventory and drops the session copy");
+	}
+
+	/// Readiness transition (issue #303 F07/F12). The join can complete inside a
+	/// single pump, so instead of hoping to catch a transient unready frame the
+	/// gate that ready() requires is dropped for one observation while the
+	/// transport stays Connected — the exact state a slow terrain sync produces.
+	void checkReadinessPresentation()
+	{
+		auto &remote = *engine.m_remote;
+		const bool ready = remote.ready();
+		remote.hasCameraPose = false;
+		const bool gateObserved = !remote.ready();
+		const auto synchronizing = engine.playerHudView();
+		remote.hasCameraPose = true;
+		const auto restored = engine.playerHudView();
+		CHECK(ready && gateObserved, "the camera-pose gate is what readiness exposes");
+		CHECK(!synchronizing.hotbar.available && !synchronizing.aim &&
+			synchronizing.statusKind == gameui::style::Status::Pending && !synchronizing.status.empty(),
+			"an unready session presents pending synchronization, no bar and no reticle ("
+				<< synchronizing.status << ')');
+		CHECK(restored.hotbar.available && restored.aim && restored.status.empty(),
+			"restoring readiness returns the confirmed inventory and the reticle");
 	}
 
 	void checkRetiredProjection()
@@ -573,8 +582,9 @@ struct EngineJoinProbe
 		const auto hud = engine.playerHudView();
 		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
 			"leaving or switching replaces the old HUD with session feedback");
-		CHECK(!hud.recovery.empty() || hud.statusKind == gameui::style::Status::Pending,
-			"a session that ended keeps an actionable recovery line on the HUD");
+		CHECK(hud.statusKind == gameui::style::Status::Pending ||
+			hud.recovery == gameui::recoveryInstruction(engine.m_showDeveloperUi, engine.mouseCaptured),
+			"an ended session publishes the reconnect steps reachable from this workspace/capture state");
 	}
 
 	void run(const char *first, const char *second)
@@ -637,11 +647,22 @@ struct EngineJoinProbe
 		pump();
 		checkRetiredProjection();
 		until([&] { return static_cast<bool>(frame().joinServer); }, "Disconnect did not complete");
+		// Reconnect workflow (issue #303 F03/F12): the row the player reads names
+		// the steps that are reachable from here, and doing them actually restores
+		// the session — verified end to end, not as a non-empty string.
+		const auto blockedHud = engine.playerHudView();
+		CHECK(blockedHud.statusKind == gameui::style::Status::Error && !blockedHud.hotbar.available &&
+			blockedHud.recovery == gameui::recoveryInstruction(engine.m_showDeveloperUi, engine.mouseCaptured),
+			"the blocked HUD publishes the reconnect steps for the current workspace and mouse state");
 		frame().joinServer();
 		pump();
 		until([&] { return engine.m_remote->ready(); }, "Reconnect did not restore the session");
 		CHECK(engine.m_remote->welcome->player == aliceId && engine.selectedHotbarSlot() == 4,
 			"Reconnect uses the same endpoint and profile");
+		const auto reconnectedHud = engine.playerHudView();
+		CHECK(reconnectedHud.hotbar.available && reconnectedHud.recovery.empty() &&
+			reconnectedHud.status.empty(),
+			"a reconnected session drops the recovery line and republishes the inventory");
 
 		frame().connectServer({first, "alice", "43"});
 		pump();

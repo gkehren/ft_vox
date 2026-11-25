@@ -854,7 +854,7 @@ void liveHud()
 	HudView occupied = blank;
 	occupied.status = "Timed out";
 	occupied.activity = "The server did not respond in time.";
-	occupied.recovery = "Reconnect: Esc, Multiplayer, Reconnect.";
+	occupied.recovery = recoveryInstruction(false, true);
 	resolved = resolveHud(overlapped, occupied);
 	CHECK(resolved.reticle && !resolved.status && !resolved.activity && !resolved.recovery,
 		"secondary copy yields to the reticle instead of hiding it");
@@ -962,13 +962,14 @@ void hudSessionRows()
 	session = hudSession(Degraded, false, "Degraded network",
 		"Player snapshots or input acknowledgments are delayed.");
 	CHECK(!session.showHotbar && !session.allowAim && session.kind == style::Status::Pending &&
-			session.status == "Synchronizing session" && !session.activity.empty() &&
-			!session.recovery.empty(),
+			session.status == "Synchronizing session" &&
+			session.recovery == "The hotbar returns when the session is ready.",
 		"degraded and not ready replaces the HUD with synchronization feedback");
 
 	session = hudSession(Connected, false, "Connected", {});
 	CHECK(!session.showHotbar && !session.allowAim && session.kind == style::Status::Pending &&
-			session.status == "Synchronizing session" && !session.recovery.empty(),
+			session.status == "Synchronizing session" &&
+			session.recovery == "The hotbar returns when the session is ready.",
 		"readiness outranks the connected label: synchronization, no bar, no reticle");
 
 	session = hudSession(Pending, false, "Resyncing", "Rejoining to refresh the world replica.");
@@ -988,13 +989,15 @@ void hudSessionRows()
 	for (const auto &end : endStates)
 	{
 		session = hudSession(Blocked, false, end.label, end.detail);
+		// The steps depend on the presentation state only the host knows, so the
+		// row flags the block and the host fills `recovery` (F03/F12).
 		CHECK(session.kind == style::Status::Error && session.status == end.label &&
-				session.activity == end.detail && !session.recovery.empty() &&
+				session.activity == end.detail && session.blocked && session.recovery.empty() &&
 				!session.showHotbar && !session.allowAim,
-			"a blocked session keeps its actionable detail and recovery: " << end.label);
+			"a blocked session keeps its actionable detail and flags recovery: " << end.label);
 	}
 	session = hudSession(Blocked, false, "Disconnected", {});
-	CHECK(session.activity == "The session ended.",
+	CHECK(session.activity == "The session ended." && session.blocked,
 		"a blocked session without transport detail still explains itself");
 
 	// F05: the optional showcase strip yields to real session copy only.
@@ -1003,32 +1006,67 @@ void hudSessionRows()
 	quiet.status = "Synchronizing session";
 	CHECK(hudHasSessionFeedback(quiet), "a status headline suppresses the demonstration strip");
 	quiet.status = {};
-	quiet.recovery = "Reconnect: Esc, Multiplayer, Reconnect.";
+	quiet.recovery = recoveryInstruction(false, false);
 	CHECK(hudHasSessionFeedback(quiet), "a recovery line alone also suppresses the strip");
 
-	// F03: the error copy fits the bounded feedback block at every supported
-	// scale, without a drop and without leaving the gameplay rectangle.
+	// F03: the blocked copy plus its reconnect steps fit the bounded feedback
+	// block at every supported scale and in both workspace states, without a
+	// drop and without leaving the gameplay rectangle.
 	for (const float scale : {1.f, 1.5f, 2.f})
 	{
-		const auto layout = hudLayout({{0.f, 0.f, 960.f, 540.f}}, {{0.f, 0.f, 960.f, 540.f}}, theme(), scale);
-		const auto timedOut = hudSession(Blocked, false, "Timed out",
-			"The server did not respond in time. Check the endpoint or try Reconnect.");
-		HudView view{};
-		view.status = timedOut.status;
-		view.activity = timedOut.activity;
-		view.recovery = timedOut.recovery;
-		view.statusKind = timedOut.kind;
-		DrawList draws;
-		draws.reset({960.f, 540.f}, 16);
-		paintHud(Surface(draws, kFont, theme(), layout.scale, layout.view), layout, view);
-		CHECK(draws.dropped() == 0 && !draws.quads().empty(),
-			"the timeout copy paints at " << scale * 100.f << "% scale");
-		for (const auto &quad : draws.quads())
-			CHECK(inside({quad.rect}, layout.view),
-				"session feedback never leaves the gameplay rectangle at " << scale * 100.f << "%");
-		const auto resolved = resolveHud(layout, view);
-		CHECK(resolved.status && resolved.activity && resolved.recovery && !resolved.reticle,
-			"a blocked session shows all three feedback bands and no reticle");
+		for (const bool workspaceVisible : {true, false})
+		{
+			const auto layout =
+				hudLayout({{0.f, 0.f, 960.f, 540.f}}, {{0.f, 0.f, 960.f, 540.f}}, theme(), scale);
+			const auto timedOut = hudSession(Blocked, false, "Timed out",
+				"The server did not respond in time. Check the endpoint or try Reconnect.");
+			HudView view{};
+			view.status = timedOut.status;
+			view.activity = timedOut.activity;
+			view.recovery = recoveryInstruction(workspaceVisible, true);
+			view.statusKind = timedOut.kind;
+			DrawList draws;
+			draws.reset({960.f, 540.f}, 16);
+			paintHud(Surface(draws, kFont, theme(), layout.scale, layout.view), layout, view);
+			CHECK(draws.dropped() == 0 && !draws.quads().empty(),
+				"the timeout copy paints at " << scale * 100.f << "% scale");
+			for (const auto &quad : draws.quads())
+				CHECK(inside({quad.rect}, layout.view),
+					"session feedback never leaves the gameplay rectangle at " << scale * 100.f << "%");
+			const auto resolved = resolveHud(layout, view);
+			CHECK(resolved.status && resolved.activity && resolved.recovery && !resolved.reticle,
+				"a blocked session shows all three feedback bands and no reticle");
+		}
+	}
+}
+
+// Issue #303 F03/F12: the reconnect steps follow the actual presentation state
+// instead of a fixed menu path, and only name controls that exist.
+void recoveryInstructions()
+{
+	const auto hiddenCaptured = recoveryInstruction(false, true);
+	const auto hiddenFree = recoveryInstruction(false, false);
+	const auto visibleCaptured = recoveryInstruction(true, true);
+	const auto visibleFree = recoveryInstruction(true, false);
+	CHECK(hiddenCaptured == "Ctrl+Shift+D, C, then Multiplayer > Reconnect." &&
+			hiddenFree == "Ctrl+Shift+D, then Multiplayer > Reconnect." &&
+			visibleCaptured == "C to free the mouse, then Multiplayer > Reconnect." &&
+			visibleFree == "Multiplayer > Reconnect.",
+		"each workspace/capture state names exactly the steps it still needs");
+	CHECK(hiddenCaptured != hiddenFree && hiddenCaptured != visibleCaptured &&
+			visibleCaptured != visibleFree && hiddenFree != visibleFree,
+		"the instruction follows the state instead of being a fixed literal");
+	for (const auto text : {hiddenCaptured, hiddenFree, visibleCaptured, visibleFree})
+	{
+		const auto menu = text.find("Multiplayer > Reconnect");
+		const auto chord = text.find("Ctrl+Shift+D");
+		const auto mouse = text.find("free the mouse");
+		CHECK(menu != std::string_view::npos && text.size() <= 52,
+			"the recovery line stays one short sentence: " << text);
+		CHECK((chord == std::string_view::npos || chord < menu) &&
+				(mouse == std::string_view::npos || mouse < menu) &&
+				text.find("Esc") == std::string_view::npos,
+			"the steps are ordered and never point at a menu that does not exist: " << text);
 	}
 }
 
@@ -1116,6 +1154,7 @@ int main()
 	hudMock();
 	liveHud();
 	hudSessionRows();
+	recoveryInstructions();
 	gallery();
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI components (" << testmain::checks << " checks)" << std::endl;;
