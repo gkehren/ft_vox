@@ -511,6 +511,19 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.screens().top() == Screen::Pause && !engine.suppressDeveloperUi() &&
 			sample.screens().focus() == widget("Exit to desktop").id, "Escape dismisses only the confirmation");
+		// R10: the destructive action is visually distinct and opens with Cancel
+		// focused, so one Enter cannot exit the game.
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::ConfirmExit &&
+				widget("Exit").variant == gameui::style::ButtonVariant::Danger &&
+				widget("Cancel").variant == gameui::style::ButtonVariant::Secondary &&
+				sample.screens().focus() == widget("Cancel").id,
+			"a destructive confirmation opens with Cancel focused and the danger action styled");
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause,
+			"Enter immediately after opening a destructive confirmation activates Cancel");
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(sample.screens().top() == Screen::Hud && !engine.simulationSuspended() &&
@@ -976,6 +989,23 @@ struct GameUiBackendProbe
 			CHECK(std::abs(sample.playerUiScale() - sample.scalePolicy().value) < 0.001f,
 				"the resolved player UI scale matches the requested policy for " << test.name
 					<< " (resolved=" << sample.playerUiScale() << ')');
+			if (test.screen == gameui::Screen::Gallery)
+			{
+				// R10: the gallery's destructive confirmation sample uses the same
+				// danger variant as the real exit flow.
+				const gameui::Widget *danger = nullptr, *cancel = nullptr;
+				for (const auto &item : sample.m_widgets.widgets())
+				{
+					if (item.label == "Continue")
+						danger = &item;
+					if (item.label == "Cancel")
+						cancel = &item;
+				}
+				CHECK(danger && cancel &&
+						danger->variant == gameui::style::ButtonVariant::Danger &&
+						cancel->variant == gameui::style::ButtonVariant::Secondary,
+					"the gallery confirmation styles its destructive action as danger for " << test.name);
+			}
 
 			const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
 			world.resizeOutput(extent, format, kColorSpace);

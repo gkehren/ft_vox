@@ -143,8 +143,11 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		add(0, Label{}, 26.f, "Exit to desktop?");
 		add(0, Label{}, 27.f, "The game will use its normal shutdown path.");
 		const auto row = column.next(36.f * scale);
+		// R10: destructive actions are visually distinct. Cancel is added first,
+		// so it is also the initial focus: a stray Enter can never exit the game.
 		m_widgets.add({Return, gridCell(row, 2, 1, 0, 0, 8.f * scale), "Cancel", {}, Button{}});
-		m_widgets.add({Confirm, gridCell(row, 2, 1, 1, 0, 8.f * scale), "Exit", {}, Button{}});
+		m_widgets.add({Confirm, gridCell(row, 2, 1, 1, 0, 8.f * scale), "Exit", {}, Button{},
+			true, style::ButtonVariant::Danger});
 	}
 	else if (screen == Screen::Pause)
 	{

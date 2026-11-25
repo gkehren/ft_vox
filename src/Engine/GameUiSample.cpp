@@ -50,19 +50,24 @@ gameui::ScaleInputs scaleInputsFor(SDL_Window *window)
 {
 	int w = 0, h = 0;
 	SDL_GetWindowSize(window, &w, &h);
-	return {{static_cast<float>(w), static_cast<float>(h)},
-		gameui::contentScale(SDL_GetWindowDisplayScale(window), SDL_GetWindowPixelDensity(window))};
+	// R02: pass the raw queries through, so a failed DPI read stays invalid and
+	// the controller keeps the last valid Auto scale instead of seeing 100%.
+	return gameui::scaleInputs({static_cast<float>(w), static_cast<float>(h)},
+		SDL_GetWindowDisplayScale(window), SDL_GetWindowPixelDensity(window));
 }
 
 /// Framebuffer pixels per logical point, used to bake the face at device
 /// resolution (the player UI equivalent of ImGuiLayer's FontGlobalScale).
-float framebufferScaleFor(SDL_Window *window)
+/// `nullopt` when the window cannot report both sizes (minimized, mid-resize,
+/// query failure): R02, an unknown density must not be mistaken for 1x and
+/// trigger a pointless atlas rebuild.
+std::optional<float> framebufferScaleFor(SDL_Window *window)
 {
 	int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
 	SDL_GetWindowSize(window, &logicalW, &logicalH);
 	if (!SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH) || logicalW <= 0 || logicalH <= 0 ||
 		pixelW <= 0 || pixelH <= 0)
-		return 1.f;
+		return std::nullopt;
 	return static_cast<float>(pixelW) / static_cast<float>(logicalW);
 }
 
@@ -86,18 +91,31 @@ void GameUiSample::advancePresentation()
 
 void GameUiSample::refreshFace(SDL_Window *window)
 {
-	const float pixels = framebufferScaleFor(window);
-	if (!(pixels > 0.f) || std::abs(pixels - m_facePixels) < 0.01f)
+	const auto pixels = framebufferScaleFor(window);
+	if (!pixels)
 		return;
+	// R07: a density whose replacement already failed is not retried every frame;
+	// a new density (or a restore) clears the tombstone.
+	if (m_faceFailedPixels && std::abs(*pixels - *m_faceFailedPixels) < 0.001f)
+		return;
+	if (std::abs(*pixels / m_facePixels - 1.f) < 0.01f)
+	{
+		m_faceFailedPixels.reset();
+		return;
+	}
+	// Bake and upload into locals; nothing is published until the GPU accepted it.
 	gameui::BakedFace next;
-	// A failed bake keeps the previous face: the UI degrades, it never blanks.
-	if (!gameui::bakeFace(pixels, next))
+	if (!gameui::bakeFace(*pixels, next) ||
+		(m_immediate &&
+			!m_renderer.setFont(*m_immediate, {next.width, next.height}, next.coverage)))
+	{
+		m_faceFailedPixels = pixels;
 		return;
+	}
 	m_face = std::move(next);
-	m_facePixels = pixels;
+	m_facePixels = *pixels;
 	m_fontScale = m_face.fontScale;
-	if (m_immediate)
-		m_renderer.setFont(*m_immediate, {m_face.width, m_face.height}, m_face.coverage);
+	m_faceFailedPixels.reset();
 	// Glyph metrics changed with the density: rebuild the geometry, keep state.
 	invalidateLayout();
 }
@@ -108,7 +126,7 @@ void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommand
 	m_windowFlags = SDL_GetWindowFlags(window);
 	m_standalone = standalone;
 	// One audited face (PlayerUiFonts.hpp), baked once at device resolution.
-	const float pixels = framebufferScaleFor(window);
+	const float pixels = framebufferScaleFor(window).value_or(1.f);
 	if (!gameui::bakeFace(pixels, m_face))
 		throw std::runtime_error("Game UI font atlas bake failed");
 	m_fontScale = m_face.fontScale;

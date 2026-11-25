@@ -1,6 +1,7 @@
 #include <Engine/PlayerUiPreferences.hpp>
 
 #include <atomic>
+#include <thread>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -192,17 +193,42 @@ bool PlayerUiSettings::parse(std::string_view record)
 
 LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 {
-	std::error_code ec;
-	const auto size = std::filesystem::file_size(path, ec);
-	if (ec)
-		return ec == std::errc::no_such_file_or_directory ? LoadStatus::Missing : LoadStatus::Corrupt;
-	if (size > kMaxPlayerUiSettingsBytes)
-		return LoadStatus::Corrupt;
-	std::ifstream in(path, std::ios::binary);
-	if (!in)
-		return LoadStatus::Corrupt;
-	std::string record(static_cast<size_t>(size), '\0');
-	if (!record.empty() && !in.read(record.data(), static_cast<std::streamsize>(record.size())))
+	if (path.empty())
+		return LoadStatus::Missing;
+	// Open first, then read bounded chunks from that same handle (issue #302
+	// R03). Asking for the size separately would describe one record while the
+	// handle pointed at another once a concurrent writer replaces the file.
+	std::ifstream in;
+	for (int attempt = 0; attempt < 5 && !in.is_open(); ++attempt)
+	{
+		in.open(path, std::ios::binary);
+		if (!in.is_open())
+		{
+			// A concurrent writer holds the record for a moment while it renames;
+			// that transient sharing violation is not corruption.
+			in.clear();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	if (!in.is_open())
+	{
+		// A record that simply is not there (including a not-yet-created parent
+		// directory) is a fresh install, not corruption.
+		std::error_code ec;
+		const bool present = std::filesystem::exists(path, ec);
+		return (!present && !ec) ? LoadStatus::Missing : LoadStatus::Corrupt;
+	}
+	std::string record;
+	char chunk[512];
+	while (record.size() <= kMaxPlayerUiSettingsBytes)
+	{
+		in.read(chunk, static_cast<std::streamsize>(sizeof(chunk)));
+		const auto got = static_cast<size_t>(in.gcount());
+		record.append(chunk, got);
+		if (got < sizeof(chunk))
+			break;
+	}
+	if (in.bad() || record.size() > kMaxPlayerUiSettingsBytes)
 		return LoadStatus::Corrupt;
 	return parse(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
 }

@@ -325,7 +325,10 @@ void Engine::loadPlayerUiPreferences()
 		const auto status = m_playerUiSettings.load(m_savesRoot / ".client-profiles" / "player-ui.txt");
 		if (status == gameui::LoadStatus::Corrupt)
 		{
+			// R09: the defaults are shown, but the record stays on disk untouched
+			// until the player makes an explicit choice, which then repairs it.
 			m_playerUiSettings = {};
+			m_playerUiDirty = true;
 			m_playerUiError = "Could not read the saved player interface settings. Defaults apply.";
 			std::cerr << "[ui] " << m_playerUiError << '\n';
 		}
@@ -335,9 +338,9 @@ void Engine::loadPlayerUiPreferences()
 	catch (const std::exception &)
 	{
 		// Same message and log on the exception path: a read failure is never
-		// silent, whichever way it surfaced (F17).
+		// silent, whichever way it surfaced (F17), and it also needs repair (R09).
 		m_playerUiSettings = {};
-		m_playerUiDirty = false;
+		m_playerUiDirty = true;
 		m_playerUiError = "Could not read the saved player interface settings. Defaults apply.";
 		std::cerr << "[ui] " << m_playerUiError << '\n';
 	}

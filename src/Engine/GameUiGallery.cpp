@@ -206,8 +206,10 @@ void GameUiSample::buildGallery(Clip scene, float scale)
 		const auto &layout = m_confirmation;
 		m_widgets.add({ConfirmCancel, layout.cancel, "Cancel", {}, Button{}, true,
 			style::ButtonVariant::Secondary});
+		// R10: the destructive action uses the danger variant, exactly like the
+		// real exit confirmation; Cancel stays first so it holds the initial focus.
 		m_widgets.add({ConfirmContinue, layout.confirm, "Continue", {}, Button{}, true,
-			style::ButtonVariant::Primary});
+			style::ButtonVariant::Danger});
 	}
 	// 8 — Inventory slots: painted from the contract, one strip of nine.
 	{

@@ -166,10 +166,14 @@ SliderGeometry sliderGeometry(Clip bounds, const style::Theme &theme, float scal
 	const float s = scale > 0.f ? scale : 1.f;
 	const auto metric = gameui::textStyle(style::TextRole::Body, s);
 	SliderGeometry geometry{};
-	geometry.label = {{bounds.rect.x, bounds.rect.y, bounds.rect.z, bounds.rect.y + metric.lineHeight()}};
-	const float readout = 48.f * s;
-	geometry.value = {{std::max(bounds.rect.x, bounds.rect.z - readout), geometry.label.rect.y,
-		bounds.rect.z, geometry.label.rect.w}};
+	const float readout = std::min(48.f * s, size(bounds).x * 0.5f);
+	const float gap = theme.space.sm * s;
+	const float labelRight = std::max(bounds.rect.x, bounds.rect.z - readout - gap);
+	// R04: the label and the percentage readout own disjoint rectangles, so a
+	// long label elides instead of painting over the value.
+	geometry.label = {{bounds.rect.x, bounds.rect.y, labelRight, bounds.rect.y + metric.lineHeight()}};
+	geometry.value = {{labelRight + gap, geometry.label.rect.y, bounds.rect.z,
+		geometry.label.rect.w}};
 	const float top = std::min(bounds.rect.w, geometry.label.rect.w + theme.space.xs * s);
 	geometry.track = {{bounds.rect.x, top, bounds.rect.z,
 		std::min(bounds.rect.w, top + std::max(2.f, theme.space.xs * s))}};
@@ -540,18 +544,21 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 			const auto live = std::string_view(field->value());
 			const auto preedit = focused ? std::string_view(field->composition()) : std::string_view{};
 			const auto fg = widget.enabled ? p.ink : p.inkDisabled;
+			// R01: build the final rect (with the horizontal offset) first, then
+			// test it. Testing the un-offset rect made a visible selection
+			// disappear whenever the editor was scrolled.
 			const auto highlight = [&](std::string_view text, glm::vec2 pos, size_t first, size_t last) {
 				if (!focused || first >= last)
 					return;
 				const float x = font.measure(text.substr(0, first), layout.glyphScale);
 				const float width = font.measure(text.substr(first, last - first), layout.glyphScale);
-				const auto fillRect = rectangle(pos, {width, layout.lineHeight}).intersect(editorClip);
+				const auto fillRect =
+					rectangle({pos.x + x, pos.y}, {width, layout.lineHeight}).intersect(editorClip);
 				if (fillRect.empty())
 					return;
 				glm::vec4 selection = p.accent;
 				selection.a = 0.32f;
-				surface.fill(rectangle({pos.x + x, pos.y}, {width, layout.lineHeight}).intersect(editorClip),
-					selection, 0.f);
+				surface.fill(fillRect, selection, 0.f);
 			};
 			if (preedit.empty())
 			{
@@ -602,7 +609,8 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 			surface.fittedLabel(geometry.label, widget.label, style::TextRole::Body,
 				widget.enabled ? p.ink : p.inkDisabled, 0.f);
 			surface.fittedLabel(geometry.value, value, style::TextRole::Body, p.inkMuted, 1.f);
-			surface.fill(geometry.track, p.surfaceSunken, theme.size.radiusSmall * s);
+			surface.fill(geometry.track, style::sliderTrackFace(theme, state),
+				theme.size.radiusSmall * s);
 			surface.fill(progressFill(geometry.track, slider->value),
 				style::sliderFill(theme, state), theme.size.radiusSmall * s);
 			if (focused)

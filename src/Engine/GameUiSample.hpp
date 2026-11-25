@@ -110,6 +110,8 @@ private:
 	float m_fontScale{1.f};
 	/// Framebuffer pixels per logical point the current face was baked at.
 	float m_facePixels{1.f};
+	/// Density whose atlas replacement failed; not retried while unchanged (R07).
+	std::optional<float> m_faceFailedPixels;
 	ImmediateCommands *m_immediate{};
 	SDL_WindowFlags m_windowFlags{};
 	glm::vec4 m_button{};

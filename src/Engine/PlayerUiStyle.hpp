@@ -390,25 +390,43 @@ inline RowTokens rowTokens(const Theme &theme, State state)
 /// yet" presentation (inventory/admin commands), Error the rejected one.
 enum class Validation : uint8_t { None = 0, Pending, Error };
 
+/// Toggle indicator face: off is the sunken well, on is the accent, disabled is
+/// never accent (it reads as unavailable, not as "on"). Hover raises the off
+/// face and pressed darkens the on face (R06).
+inline glm::vec4 toggleFace(const Theme &theme, State state, bool on)
+{
+	state = settleState(state);
+	if (disabled(state))
+		return theme.palette.surfaceSunken;
+	if (!on)
+		return has(state, State::Hovered) || has(state, State::Pressed) ? theme.palette.surfaceRaised
+																		: theme.palette.surfaceSunken;
+	return has(state, State::Pressed) ? theme.palette.accentPressed : theme.palette.accent;
+}
+
+/// Slider fill: the accent, the pressed accent while dragging, or the disabled
+/// ink so a dead slider never looks draggable (R06).
+inline glm::vec4 sliderFill(const Theme &theme, State state)
+{
+	state = settleState(state);
+	if (disabled(state))
+		return theme.palette.inkDisabled;
+	return has(state, State::Pressed) ? theme.palette.accentPressed : theme.palette.accent;
+}
+
+/// Slider track: the sunken well, raised on hover and while dragging (R06).
+inline glm::vec4 sliderTrackFace(const Theme &theme, State state)
+{
+	state = settleState(state);
+	if (disabled(state))
+		return theme.palette.surfaceSunken;
+	return has(state, State::Hovered) || has(state, State::Pressed) ? theme.palette.surfaceRaised
+																	: theme.palette.surfaceSunken;
+}
+
 /// Field: sunken well, border color carries the validation state. A focused
 /// field with no validation feedback keeps the neutral focus ink so validation
 /// outranks focus (a rejected value must stay visibly rejected while typing).
-/// Toggle indicator face: off is the sunken well, on is the accent, disabled is
-/// never accent (it reads as unavailable, not as "on").
-inline glm::vec4 toggleFace(const Theme &theme, State state, bool on)
-{
-	if (disabled(state))
-		return theme.palette.surfaceSunken;
-	return on ? theme.palette.accent : theme.palette.surfaceSunken;
-}
-
-/// Slider fill: the accent, or the disabled ink so a dead slider never looks
-/// draggable.
-inline glm::vec4 sliderFill(const Theme &theme, State state)
-{
-	return disabled(state) ? theme.palette.inkDisabled : theme.palette.accent;
-}
-
 inline ControlTokens fieldTokens(const Theme &theme, State state, Validation validation)
 {
 	const Palette &p = theme.palette;
@@ -424,6 +442,52 @@ inline ControlTokens fieldTokens(const Theme &theme, State state, Validation val
 	else
 		out.border = p.border;
 	return out;
+}
+
+/// Resolved slot presentation (issue #302 R06). One precedence for combined
+/// Selected / Disabled / Focused / Error / Pending states:
+///
+///   1. disabled clears the interaction flags (see settleState) and dims the
+///      content; it keeps the selection marker because selection is a fact, not
+///      an affordance;
+///   2. validation (Error > Pending) owns the border COLOR, so focus can never
+///      hide a rejected or in-flight value;
+///   3. focus owns the border WIDTH (the ring), which stays visible on top of a
+///      validation color;
+///   4. selection owns the resting border strength.
+struct SlotTokens
+{
+	glm::vec4 face;
+	glm::vec4 border;
+	float borderWidth;
+	glm::vec4 tint;      // icon tint
+	glm::vec4 indicator; // badge / foreground ink
+};
+
+inline SlotTokens slotTokens(const Theme &theme, State requested)
+{
+	const auto &p = theme.palette;
+	const auto state = settleState(requested);
+	SlotTokens tokens{p.surfaceSunken, p.border, theme.size.borderWidth, glm::vec4(1.f), p.ink};
+	const bool selected = has(state, State::Selected);
+	tokens.border = selected ? p.borderStrong : p.border;
+	tokens.borderWidth = selected ? theme.size.borderStrongWidth : theme.size.borderWidth;
+	if (has(state, State::Error))
+		tokens.border = p.error;
+	else if (has(state, State::Pending))
+		tokens.border = p.pending;
+	if (has(state, State::Focused))
+	{
+		if (!has(state, State::Error) && !has(state, State::Pending))
+			tokens.border = p.focus;
+		tokens.borderWidth = theme.size.focusRing;
+	}
+	if (disabled(state))
+	{
+		tokens.tint = {1.f, 1.f, 1.f, 0.45f};
+		tokens.indicator = p.inkDisabled;
+	}
+	return tokens;
 }
 
 inline glm::vec4 validationColor(const Theme &theme, Validation validation)

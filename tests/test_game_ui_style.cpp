@@ -180,6 +180,35 @@ void states()
 	CHECK(sliderFill(theme(), State::Rest) == p.accent &&
 			sliderFill(theme(), State::Disabled) == p.inkDisabled,
 		"a disabled slider fill is the disabled ink, not the accent");
+	CHECK(sliderFill(theme(), State::Pressed) == p.accentPressed &&
+			sliderTrackFace(theme(), State::Hovered) == p.surfaceRaised &&
+			sliderTrackFace(theme(), State::Rest) == p.surfaceSunken,
+		"a slider shows pressed and hover feedback from the tokens");
+	CHECK(toggleFace(theme(), State::Pressed, true) == p.accentPressed &&
+			toggleFace(theme(), State::Hovered, false) == p.surfaceRaised,
+		"a toggle shows pressed and hover feedback from the tokens");
+
+	// R06: the resolved slot visuals for combined states, not just the flags.
+	const auto resting = slotTokens(theme(), State::Rest);
+	const auto selectedSlot = slotTokens(theme(), State::Selected);
+	const auto slotRejected = slotTokens(theme(), State::Error | State::Focused);
+	const auto slotPending = slotTokens(theme(), State::Pending | State::Focused);
+	const auto disabledSlot = slotTokens(theme(), State::Selected | State::Disabled | State::Focused);
+	CHECK(resting.border == p.border && resting.borderWidth == theme().size.borderWidth,
+		"a resting slot uses the resting border token");
+	CHECK(selectedSlot.border == p.borderStrong &&
+			selectedSlot.borderWidth == theme().size.borderStrongWidth,
+		"a selected slot is stronger than a resting one");
+	CHECK(slotRejected.border == p.error && slotRejected.borderWidth == theme().size.focusRing,
+		"focus widens the ring but never hides a rejected value");
+	CHECK(slotPending.border == p.pending && slotPending.borderWidth == theme().size.focusRing,
+		"focus widens the ring but never hides a pending value");
+	CHECK(disabledSlot.border == p.borderStrong &&
+			disabledSlot.borderWidth == theme().size.borderStrongWidth &&
+			disabledSlot.indicator == p.inkDisabled && disabledSlot.tint.a < 1.f,
+		"a disabled slot keeps its selection marker, drops the focus ring and dims its content");
+	CHECK(slotTokens(theme(), State::Disabled | State::Error).border == p.error,
+		"validation still colours a disabled slot's border");
 }
 
 void scaling()
@@ -227,6 +256,35 @@ void scaling()
 	CHECK(contentScale(1.5f, 1.f) == 1.5f && contentScale(2.f, 2.f) == 1.f &&
 			contentScale(0.f, 1.f) == 1.f,
 		"content scale is the display/pixel-density ratio with a 100% fallback");
+
+	// R02: a failed DPI query stays invalid all the way to the controller instead
+	// of being laundered into a valid 100% by the platform conversion.
+	const auto queried = scaleInputs({1600.f, 900.f}, 2.f, 1.f);
+	const auto failed = scaleInputs({1600.f, 900.f}, 0.f, 1.f);
+	const auto nanScale = scaleInputs({1600.f, 900.f}, std::numeric_limits<float>::quiet_NaN(), 1.f);
+	const auto zeroDensity = scaleInputs({1600.f, 900.f}, 2.f, 0.f);
+	CHECK(queried.contentScale == 2.f && queried.contentScaleValid && validScaleInputs(queried),
+		"a successful DPI query produces exact, valid controller inputs");
+	CHECK(!failed.contentScaleValid && !validScaleInputs(failed) && !nanScale.contentScaleValid &&
+			!zeroDensity.contentScaleValid,
+		"a failed, non-finite or zero DPI query is reported as invalid input");
+
+	ScaleController dpi;
+	CHECK(dpi.resolve(queried) && dpi.effective() == 1.75f,
+		"a 1600x900 window at 200% resolves to the 175% step");
+	const auto dpiRevision = dpi.revision();
+	CHECK(!dpi.resolve(failed) && dpi.effective() == 1.75f && dpi.revision() == dpiRevision,
+		"a temporary DPI query failure does not change the effective Auto scale");
+	CHECK(!dpi.resolve(nanScale) && dpi.revision() == dpiRevision,
+		"a non-finite DPI value is treated exactly like a failed query");
+	CHECK(!dpi.resolve(queried) && dpi.revision() == dpiRevision,
+		"restoring identical DPI information does not invalidate the layout");
+	dpi.setPolicy({ScaleMode::Fixed, 1.25f});
+	CHECK(dpi.resolve(failed) && dpi.effective() == 1.25f,
+		"a Fixed override stays independent of DPI query failures");
+	dpi.setPolicy({ScaleMode::Auto, 1.f});
+	CHECK(dpi.resolve(failed) && dpi.effective() == 1.75f,
+		"Auto after a Fixed override restores the last valid Auto scale from invalid inputs");
 
 	CHECK(resolveScale({ScaleMode::Fixed, 1.4f}, {{800.f, 480.f}, 2.f}) == 1.5f,
 		"a fixed policy ignores the window size (that is the point of the override)");
@@ -333,6 +391,16 @@ void preferences()
 	CHECK(untouched.load(path) == LoadStatus::Corrupt && untouched.scale.value == 1.25f,
 		"a corrupt record is reported and never mutates the running session");
 
+	// R09: a corrupted record is repaired only by an explicit write of the
+	// defaults; a missing record stays a fresh-install case.
+	{
+		PlayerUiSettings repair;
+		CHECK(repair.save(path), "an explicit selection writes a repair record");
+		PlayerUiSettings repaired;
+		CHECK(repaired.load(path) == LoadStatus::Ok && repaired.scale.mode == ScaleMode::Auto,
+			"the repaired record parses and holds the default policy");
+	}
+
 	// F06: the write is atomic and concurrent-safe. Four writers, staggered
 	// values: the record always parses, and no staging file is left behind.
 	{
@@ -375,6 +443,64 @@ void preferences()
 			std::istreambuf_iterator<char>());
 		CHECK(current == previous && !current.empty(),
 			"a failed write leaves the last valid record untouched");
+	}
+
+	// R03: readers can never observe a half-replaced record, because the read
+	// opens the file before sizing it and reads from that same handle.
+	{
+		std::atomic<bool> stop{false};
+		std::atomic<int> falseCorrupt{0};
+		std::atomic<int> badValues{0};
+		std::vector<std::thread> readers;
+		for (int i = 0; i < 2; ++i)
+			readers.emplace_back([&path, &stop, &falseCorrupt, &badValues] {
+				while (!stop.load())
+				{
+					PlayerUiSettings seen;
+					const auto status = seen.load(path);
+					if (status != LoadStatus::Ok && status != LoadStatus::Missing)
+						++falseCorrupt;
+					else if (status == LoadStatus::Ok && seen.scale.mode == ScaleMode::Fixed &&
+							 !isUserScale(seen.scale.value))
+						++badValues;
+				}
+			});
+		PlayerUiSettings autoRecord, fixedRecord;
+		autoRecord.scale = {ScaleMode::Auto, 1.f};
+		fixedRecord.scale = {ScaleMode::Fixed, 1.5f};
+		for (int i = 0; i < 40; ++i)
+			CHECK((i % 2 ? fixedRecord : autoRecord).save(path),
+				"a writer alternating records succeeds while readers load");
+		stop = true;
+		for (auto &reader : readers)
+			reader.join();
+		CHECK(falseCorrupt.load() == 0 && badValues.load() == 0,
+			"concurrent readers never report a false corrupt record or a partial value");
+	}
+
+	// R03: an injected replacement failure against the real destination keeps the
+	// previous record and leaves no staging file behind.
+	{
+		PlayerUiSettings kept;
+		kept.scale = {ScaleMode::Fixed, 1.25f};
+		CHECK(kept.save(path), "the record to preserve is on disk");
+		std::ifstream before(path, std::ios::binary);
+		const std::string previous((std::istreambuf_iterator<char>(before)),
+			std::istreambuf_iterator<char>());
+		// The destination's parent is a regular file, so staging cannot be created.
+		const auto blocked = path / "nested" / "player-ui.txt";
+		PlayerUiSettings replacement;
+		replacement.scale = {ScaleMode::Fixed, 2.f};
+		CHECK(!replacement.save(blocked), "an injected replacement failure is reported");
+		std::ifstream after(path, std::ios::binary);
+		const std::string current((std::istreambuf_iterator<char>(after)),
+			std::istreambuf_iterator<char>());
+		CHECK(current == previous && !current.empty(),
+			"the previous valid record survives an injected replacement failure");
+		bool stagingLeft = false;
+		for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+			stagingLeft = stagingLeft || entry.path().filename().string().find(".tmp.") != std::string::npos;
+		CHECK(!stagingLeft, "an injected replacement failure leaves no staging file behind");
 	}
 
 	// Locale independence: formatting is integer-based and parsing accepts only

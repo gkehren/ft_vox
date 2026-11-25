@@ -156,15 +156,22 @@ void ToastQueue::advance(float dt)
 {
 	if (!(dt > 0.f))
 		return;
+	// R08: age in place. Nothing is copied or moved while no entry expires, and
+	// an expiring entry is compacted with moves only (never a self-move).
 	size_t write = 0;
 	for (size_t read = 0; read < m_count; ++read)
 	{
-		Toast entry = m_toasts[read];
+		Toast &entry = m_toasts[read];
 		entry.age += dt;
 		if (entry.lifetime > 0.f && entry.age >= entry.lifetime)
 			continue;
-		m_toasts[write++] = entry;
+		if (write != read)
+			m_toasts[write] = std::move(entry);
+		++write;
 	}
+	// Release the retired slots so their text does not outlive the notification.
+	for (size_t index = write; index < m_count; ++index)
+		m_toasts[index] = {};
 	m_count = write;
 }
 
@@ -238,9 +245,12 @@ void Surface::fill(Clip rect, glm::vec4 color, float radius) const
 	}
 	const float half = std::max(1.f, std::floor(r * 0.5f));
 	const auto band = [&](float y0, float y1, float insetX) {
-		if (y1 <= y0)
+		const float x0 = rect.rect.x + insetX;
+		const float x1 = rect.rect.z - insetX;
+		// R05: a fractional or very narrow rect must not produce an inverted band.
+		if (y1 <= y0 || x1 <= x0)
 			return;
-		m_out.panel({rect.rect.x + insetX, y0, rect.rect.z - insetX, y1}, color, m_clip);
+		m_out.panel({x0, y0, x1, y1}, color, m_clip);
 	};
 	band(rect.rect.y, rect.rect.y + half, r);
 	band(rect.rect.y + half, rect.rect.y + r, half);
@@ -254,8 +264,11 @@ void Surface::ring(Clip rect, glm::vec4 color, float width, float radius) const
 	(void)radius;
 	if (size(rect).x <= 0.f || size(rect).y <= 0.f)
 		return;
-	// A border can never be wider than the geometry it frames (F12).
-	const float w = std::clamp(width, 1.f, std::max(1.f, std::min(size(rect).x, size(rect).y) * 0.5f));
+	// R05: a border can never be wider than the geometry it frames — including a
+	// fractional rectangle, where a 1 px minimum would otherwise overflow.
+	const float w = std::min({std::max(1.f, width), size(rect).x * 0.5f, size(rect).y * 0.5f});
+	if (!(w > 0.f))
+		return;
 	m_out.panel({rect.rect.x, rect.rect.y, rect.rect.z, rect.rect.y + w}, color, m_clip);
 	m_out.panel({rect.rect.x, rect.rect.w - w, rect.rect.z, rect.rect.w}, color, m_clip);
 	m_out.panel({rect.rect.x, rect.rect.y + w, rect.rect.x + w, rect.rect.w - w}, color, m_clip);
@@ -289,18 +302,20 @@ float Surface::fittedWidth(std::string_view text, style::TextRole role, float av
 void Surface::labelAligned(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
 						   float alignX) const
 {
-	if (text.empty())
-		return;
-	const float roleScale = glyphScale(role);
-	const float width = m_font.measure(text, roleScale);
-	const float x = rect.rect.x + (size(rect).x - width) * std::clamp(alignX, 0.f, 1.f);
-	m_font.paint(m_out, {x, centeredLineTop(rect, role, m_scale)}, text, color, roleScale, m_clip);
+	// R05: an aligned label is fitted into its own rectangle as well, so a
+	// right-aligned readout can never spill to the left over its neighbour.
+	fittedLabel(rect, text, role, color, alignX);
 }
 
 void Surface::fittedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
 						  float alignX) const
 {
-	if (text.empty() || size(rect).x <= 0.f)
+	// R05: a rectangle that cannot show even half a line paints no text at all,
+	// instead of a glyph band spilling over the neighbouring component. Half a
+	// line is the floor: a badge squeezed below its line height still renders
+	// (a quantity is worth reading), a sub-pixel band does not.
+	const float line = style::lineHeight(role) * m_scale;
+	if (text.empty() || size(rect).x <= 0.f || size(rect).y + 0.001f < line * 0.5f)
 		return;
 	FittedText fitted{};
 	const float width = fittedWidth(text, role, size(rect).x, fitted);
@@ -341,15 +356,19 @@ void Surface::sectionHeader(Clip rect, std::string_view title) const
 	Clip line = {{rect.rect.x, rect.rect.y, rect.rect.z,
 		std::min(rect.rect.w, rect.rect.y + style::lineHeight(style::TextRole::Heading) * m_scale)}};
 	fittedLabel(line, title, style::TextRole::Heading, m_theme.palette.ink, 0.f);
-	const float rule = std::min(rect.rect.w, line.rect.w + px(m_theme.space.xs));
-	fill({{rect.rect.x, rule, rect.rect.z, rule + px(m_theme.size.borderWidth)}},
-		m_theme.palette.border, 0.f);
+	const float ruleWidth = px(m_theme.size.borderWidth);
+	const float rule = std::min(rect.rect.w - ruleWidth, line.rect.w + px(m_theme.space.xs));
+	if (rule >= rect.rect.y)
+		fill({{rect.rect.x, rule, rect.rect.z, rule + ruleWidth}}, m_theme.palette.border, 0.f);
 }
 
 void Surface::divider(Clip rect) const
 {
-	const float y = rect.rect.y + size(rect).y * 0.5f;
-	fill({{rect.rect.x, y, rect.rect.z, y + px(m_theme.size.borderWidth)}}, m_theme.palette.border, 0.f);
+	const float thickness = px(m_theme.size.borderWidth);
+	if (size(rect).y < thickness)
+		return;
+	const float y = std::min(rect.rect.y + size(rect).y * 0.5f, rect.rect.w - thickness);
+	fill({{rect.rect.x, y, rect.rect.z, y + thickness}}, m_theme.palette.border, 0.f);
 }
 
 void Surface::button(Clip rect, std::string_view text, style::ButtonVariant variant,
@@ -509,26 +528,10 @@ void Surface::confirmation(const ConfirmationLayout &layout, std::string_view ti
 void Surface::slot(Clip rect, const SlotView &entry) const
 {
 	const auto &p = m_theme.palette;
-	// One precedence for combined slot states (F15): disabled clears the focus
-	// ring, validation outranks selection, selection outranks focus.
-	const auto state = style::slotState(entry.state);
-	auto border = p.border;
-	float borderWidth = px(m_theme.size.borderWidth);
-	if (style::has(state, style::State::Selected))
-	{
-		border = p.borderStrong;
-		borderWidth = px(m_theme.size.borderStrongWidth);
-	}
-	if (style::has(state, style::State::Error))
-		border = p.error;
-	if (style::has(state, style::State::Pending))
-		border = p.pending;
-	if (style::has(state, style::State::Focused))
-	{
-		border = p.focus;
-		borderWidth = px(m_theme.size.focusRing);
-	}
-	frame(rect, p.surfaceSunken, border, borderWidth, px(m_theme.size.radiusSmall));
+	// One resolver for combined states (R06): disabled never paints a focus ring,
+	// validation always wins the border color, focus keeps its width.
+	const auto tokens = style::slotTokens(m_theme, entry.state);
+	frame(rect, tokens.face, tokens.border, px(tokens.borderWidth), px(m_theme.size.radiusSmall));
 	const Clip iconRect = inset(rect, px(m_theme.space.xs));
 	const uint32_t layers = m_atlasLayers ? m_atlasLayers : UINT32_MAX;
 	// Occupancy is `count != 0`; an icon is an optional, generation-tagged
@@ -537,20 +540,18 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 	const bool occupied = !entry.empty();
 	const auto status = entry.icon ? iconStatus(*entry.icon, m_out.atlasGeneration(), layers)
 								   : IconStatus::MissingLayer;
-	const glm::vec4 tint = style::disabled(state) ? glm::vec4(1.f, 1.f, 1.f, 0.45f) : glm::vec4(1.f);
 	if (occupied && entry.icon && drawable(status))
-		m_out.icon(iconRect.rect, *entry.icon, tint, m_clip);
+		m_out.icon(iconRect.rect, *entry.icon, tokens.tint, m_clip);
 	else if (occupied)
 	{
 		// Missing/stale icon fallback: keep the slot, mark it, never drop it.
 		fill(iconRect, p.surfaceRaised, px(m_theme.size.radiusSmall));
 		labelAligned(iconRect, std::string_view(&kFallbackGlyph, 1), style::TextRole::Body,
-			style::disabled(state) ? p.inkDisabled : p.inkMuted, 0.5f);
+			tokens.indicator, 0.5f);
 	}
 
 	// Durability/progress owns a reserved band at the bottom; the quantity badge
-	// sits above it and always paints a contrast backing, so a count stays
-	// readable over a bright texture and never collides with the bar (F14).
+	// sits above it and always paints a contrast backing (F14).
 	const float barInset = px(m_theme.space.xxs);
 	const float barHeight = std::max(px(2.f), px(m_theme.size.borderWidth) * 2.f);
 	const Clip track = {{rect.rect.x + barInset, rect.rect.w - barHeight - barInset,
@@ -574,7 +575,7 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 			backing.a = m_theme.overlay.card;
 			fill(badgeRect, backing, px(m_theme.size.radiusSmall));
 			fittedLabel(inset(badgeRect, px(m_theme.space.xxs)), count, style::TextRole::Caption,
-				style::disabled(state) ? p.inkDisabled : p.ink, 1.f);
+				tokens.indicator, 1.f);
 		}
 	}
 	if (bar)

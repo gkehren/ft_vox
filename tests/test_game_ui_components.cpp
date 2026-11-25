@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cmath>
+#include <string>
 
 #include "TestMain.hpp"
 
@@ -414,6 +415,125 @@ void painting()
 	CHECK(bandInside, "an indeterminate band is clamped to its progress track");
 }
 
+void notificationLifetime()
+{
+	// R08: ageing a live queue updates the entries in place — no copy, no move,
+	// no allocation — and only an actual expiry compacts the array.
+	ToastQueue queue;
+	Toast first;
+	first.title = "First toast title that is long enough to heap allocate";
+	first.body = "Body text that also lives on the heap for this entry";
+	first.lifetime = 30.f;
+	Toast second;
+	second.title = "Second toast";
+	second.status = style::Status::Error;
+	second.lifetime = 30.f;
+	queue.push(first);
+	queue.push(second);
+	const char *title0 = queue.at(0)->title.data();
+	const char *title1 = queue.at(1)->title.data();
+	const auto capacity0 = queue.at(0)->title.capacity();
+	for (int i = 0; i < 20; ++i)
+		queue.advance(presentationStep(1.f / 60.f));
+	CHECK(queue.size() == 2 && queue.at(0)->title.data() == title0 &&
+			queue.at(1)->title.data() == title1 && queue.at(0)->title.capacity() == capacity0,
+		"ageing a live notification queue performs no string copy, move or reallocation");
+	CHECK(queue.at(0)->title == second.title && queue.at(1)->title == first.title,
+		"in-place ageing preserves the newest-first ordering");
+	CHECK(std::abs(queue.at(0)->age - queue.at(1)->age) < 0.0001f && queue.at(0)->age > 0.f,
+		"both entries age by the same monotonic step");
+
+	// Expiry still retires the right entry and keeps the survivors intact.
+	ToastQueue expiring;
+	Toast quick, sticky;
+	quick.title = "Quick";
+	quick.lifetime = 0.1f;
+	sticky.title = "Sticky";
+	sticky.lifetime = 0.f;
+	expiring.push(quick);
+	expiring.push(sticky);
+	expiring.advance(0.05f);
+	CHECK(expiring.size() == 2, "a notification shorter than its lifetime survives");
+	expiring.advance(0.06f);
+	CHECK(expiring.size() == 1 && expiring.newest()->title == "Sticky",
+		"expiry removes only the aged entry and keeps the sticky one");
+	expiring.advance(10.f);
+	CHECK(expiring.size() == 1 && expiring.newest()->title == "Sticky",
+		"a sticky notification never expires");
+	CHECK(expiring.dismiss(expiring.newest()->id) && expiring.size() == 0,
+		"dismissing the last notification empties the queue");
+
+	// The bounded capacity still drops the oldest entry.
+	ToastQueue bounded;
+	for (int i = 0; i < int(ToastQueue::kCapacity) + 2; ++i)
+	{
+		Toast toast;
+		toast.title = "Toast " + std::to_string(i);
+		toast.lifetime = 30.f;
+		bounded.push(toast);
+	}
+	CHECK(bounded.size() == ToastQueue::kCapacity && bounded.newest()->title == "Toast 5" &&
+			bounded.at(ToastQueue::kCapacity - 1)->title == "Toast 2",
+		"the bounded queue keeps the newest capacity entries in order");
+}
+
+void degenerateGeometry()
+{
+	// R05: every component clamps to its own rectangle, including empty,
+	// fractional, narrow and vertically constrained geometry.
+	const auto &t = theme();
+	const auto outside = [](const DrawList &list, Clip box) {
+		for (const auto &quad : list.quads())
+			if (quad.rect.x < box.rect.x - 0.01f || quad.rect.y < box.rect.y - 0.01f ||
+				quad.rect.z > box.rect.z + 0.01f || quad.rect.w > box.rect.w + 0.01f)
+				return true;
+		return false;
+	};
+	struct Case
+	{
+		const char *name;
+		Clip box;
+	};
+	const Case cases[] = {
+		{"an empty", {{40.f, 40.f, 40.f, 40.f}}},
+		{"an inverted", {{60.f, 60.f, 40.f, 40.f}}},
+		{"a fractional", {{20.f, 20.f, 20.5f, 20.5f}}},
+		{"a narrow", {{0.f, 0.f, 3.f, 60.f}}},
+		{"a flat", {{0.f, 0.f, 60.f, 0.5f}}},
+	};
+	for (const auto &test : cases)
+	{
+		DrawList draws;
+		draws.reset({640.f, 480.f}, 3);
+		Surface surface(draws, kFont, t, 1.f, {{0.f, 0.f, 640.f, 480.f}}, 16);
+		surface.fill(test.box, t.palette.surface, 4.f);
+		surface.ring(test.box, t.palette.border, 20.f, 4.f);
+		surface.frame(test.box, t.palette.surface, t.palette.border, 9.f, 3.f);
+		surface.sectionHeader(test.box, "A section header that cannot fit");
+		surface.divider(test.box);
+		surface.labelAligned(test.box, "A long aligned label", style::TextRole::Body, t.palette.ink,
+			1.f);
+		surface.fittedLabel(test.box, "A long fitted label", style::TextRole::Body, t.palette.ink,
+			0.f);
+		surface.progress(test.box, 0.5f, false, 0.f);
+		surface.progress(test.box, 0.f, true, 1.f);
+		CHECK(!outside(draws, test.box),
+			"no primitive leaves " << test.name << " component rectangle");
+		CHECK(draws.dropped() == 0, "degenerate geometry never exhausts the draw budget");
+	}
+
+	// A section header and a divider keep their rules inside a short rect.
+	DrawList shortDraws;
+	shortDraws.reset({640.f, 480.f}, 3);
+	Surface shortSurface(shortDraws, kFont, t, 1.f, {{0.f, 0.f, 640.f, 480.f}}, 16);
+	const Clip header{{10.f, 10.f, 130.f, 34.f}};
+	const Clip rule{{10.f, 60.f, 130.f, 61.f}};
+	shortSurface.sectionHeader(header, "Streaming");
+	shortSurface.divider(rule);
+	CHECK(!outside(shortDraws, {{10.f, 10.f, 130.f, 61.f}}),
+		"section separators and dividers stay inside their bounds");
+}
+
 void slotPaintingAndFallbacks()
 {
 	const auto paint = [](const SlotView &entry, DrawList &draws) {
@@ -607,6 +727,8 @@ int main()
 	slotGeometry();
 	tooltips();
 	notifications();
+	notificationLifetime();
+	degenerateGeometry();
 	confirmations();
 	progressAndIcons();
 	textFitting();

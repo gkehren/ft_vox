@@ -65,6 +65,10 @@ struct ScaleInputs
 {
 	glm::vec2 logicalSize{}; // SDL logical window size (not framebuffer pixels)
 	float contentScale{1.f};
+	/// False when the platform could not report the DPI (query failure,
+	/// non-positive or non-finite value). Auto then keeps the last valid scale
+	/// instead of being handed a laundered 100% (issue #302 R02).
+	bool contentScaleValid{true};
 };
 
 inline float clampScale(float scale)
@@ -77,12 +81,29 @@ inline float clampScale(float scale)
 /// OS content scale from the two SDL queries the host already performs:
 /// display scale (DPI) divided by pixel density. Non-positive or non-finite
 /// inputs fall back to 100%.
+inline bool contentScaleValid(float displayScale, float pixelDensity)
+{
+	return displayScale > 0.f && pixelDensity > 0.f && std::isfinite(displayScale) &&
+		std::isfinite(pixelDensity);
+}
+
+/// Value-only helper (100% fallback). Hosts that must distinguish "100%" from
+/// "the query failed" use `scaleInputs` instead.
 inline float contentScale(float displayScale, float pixelDensity)
 {
-	if (!(displayScale > 0.f) || !(pixelDensity > 0.f) || !std::isfinite(displayScale) ||
-		!std::isfinite(pixelDensity))
+	if (!contentScaleValid(displayScale, pixelDensity))
 		return 1.f;
 	return displayScale / pixelDensity;
+}
+
+/// Platform queries -> controller inputs, preserving invalidity (R02).
+inline ScaleInputs scaleInputs(glm::vec2 logicalSize, float displayScale, float pixelDensity)
+{
+	ScaleInputs inputs{};
+	inputs.logicalSize = logicalSize;
+	inputs.contentScaleValid = contentScaleValid(displayScale, pixelDensity);
+	inputs.contentScale = inputs.contentScaleValid ? displayScale / pixelDensity : 1.f;
+	return inputs;
 }
 
 /// Largest step at or below `scale` (clamped into the grid).
@@ -124,7 +145,7 @@ inline bool isUserScale(float scale)
 /// lost DPI query are "no information", not "tiny window".
 inline bool validScaleInputs(ScaleInputs inputs)
 {
-	return inputs.logicalSize.x > 0.f && inputs.logicalSize.y > 0.f &&
+	return inputs.contentScaleValid && inputs.logicalSize.x > 0.f && inputs.logicalSize.y > 0.f &&
 		std::isfinite(inputs.logicalSize.x) && std::isfinite(inputs.logicalSize.y) &&
 		inputs.contentScale > 0.f && std::isfinite(inputs.contentScale);
 }

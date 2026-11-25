@@ -65,7 +65,7 @@ pressed, focused, selected)` is the single producer. Resolution:
 | Button | disabled → pressed → primary/danger accent → hover → rest. Focus never changes a fill; it replaces the border with `focus` at ring width. |
 | List row | disabled → selected (ink text + accent marker) → hovered (raised face, muted text) |
 | Form field | validation (`error`, `pending`) → focused (`focus` border) → rest (`border`). Disabled keeps muted text and its validation border. |
-| Slot | disabled → error/pending border → selected (`borderStrong`) → focused ring; the icon dims when disabled |
+| Slot | `style::slotTokens` resolves the whole appearance, one rule each: disabled clears focus/hover/press and dims the icon; validation (`error` > `pending`) owns the border colour; focus owns the border width (ring); selection owns the resting border strength. Focus therefore widens an error/pending border without hiding it. |
 
 ### Readability contract
 
@@ -142,6 +142,11 @@ Details:
   keep the last valid **Auto** scale without bumping the layout revision; a
   fresh controller falls back to the snapped content scale. Restoring the window
   re-resolves to the same value, so no layout is invalidated.
+- A failed DPI query is passed through as **invalid**, never laundered into a
+  valid 100%: `ScaleInputs::contentScaleValid` (produced by `scaleInputs`) tells
+  the controller the truth, Auto keeps the last valid value, `Fixed` stays
+  independent of the query, and the host skips the font-atlas refresh while the
+  framebuffer density is unknown (the previous face stays active).
 - 75% is auto-only: an override may not make text smaller than 100%.
 - `ScaleController::resolve(inputs)` runs **once per frame, before any screen is
   built**. A changed value cancels the in-flight press and rebuilds the layout on
@@ -243,27 +248,35 @@ test_engine_reload --game-ui-design-system docs/images/game-ui-design-system
 test_engine_reload --game-ui-showcase-proof     # existing interaction proof
 ```
 
-- `GameUiStyle` (107 checks) — palette contrast on bright/dark scenes, state
+- `GameUiStyle` (170 checks) — palette contrast on bright/dark scenes, state
   precedence, type/spacing scales, auto/fixed scale policy incl. degenerate
-  windows, controller frame boundary, preference round-trip and every corruption
-  case.
-- `GameUiComponents` (165 checks) — slot grid geometry/hit testing, tooltip
+  windows and invalid DPI inputs, controller frame boundary, resolved slot /
+  toggle / slider tokens, preference round-trip, concurrent readers vs writers,
+  an injected replacement failure, repair of a corrupt record and every
+  corruption case.
+- `GameUiComponents` (184 checks) — slot grid geometry/hit testing, tooltip
   placement and flipping, toast capacity/expiry/sticky/dismissal, confirmation
   geometry and destructive focus, progress fractions, text fitting and glyph
   fallback, icon fallback, owned/bounded notifications, toast timing at
   30–240 Hz, the field-group height contract, slot occupancy vs icon validity,
   label/border/band clamping, component painting/scissoring, a full HUD mock at
-  eight size × scale combinations inside the 8-draw budget, and the gallery
-  layout at 16:9, 21:9, small windows, 100% and 200%.
+  eight size × scale combinations inside the 8-draw budget, the gallery layout
+  at 16:9, 21:9, small windows, 100% and 200%, in-place notification ageing, and
+  degenerate (empty/fractional/narrow/flat) component geometry.
 - `GameUiInteraction` — routing, focus, and the geometry contracts behind them:
   one text metric for painting/caret/hit testing at 100–200% with 1×/2×
-  framebuffer density, slider track mapping at 0/25/50/75/100%, and the IME
-  composition-unit normalization (UTF-16 on Windows, scalars on Linux).
-- `--game-ui-design-system` (32 checks, Vulkan validation enabled) — captures
+  framebuffer density, scrolled-selection highlight visibility and clipping at
+  the same scales, slider track mapping at 0/25/50/75/100%, disjoint slider
+  label/value rects, and the IME composition-unit normalization (UTF-16 on
+  Windows, scalars on Linux).
+- `--game-ui-design-system` (36 checks, Vulkan validation enabled) — captures
   the gallery and HUD mock through the production composition path at
   1920×1080 / 2560×1080 / 1160×680 and 100% / 150% / 200%, checks the resolved
-  scale against the requested policy, the ≤ 32-draw menu budget with zero
-  dropped quads, and the validation counters.
+  scale against the requested policy, the destructive confirmation sample on the
+  danger variant, the ≤ 32-draw menu budget with zero dropped quads, and the
+  validation counters. `--game-ui-showcase-proof` (39 checks) additionally
+  asserts that the real exit confirmation styles its action as danger and that
+  one Enter right after opening it activates Cancel.
 
 Screenshots (canonical physical GPU, Vulkan validation on):
 [gallery 1920×1080 100%](images/game-ui-design-system/gallery-1920x1080-100.png),
@@ -274,15 +287,21 @@ Screenshots (canonical physical GPU, Vulkan validation on):
 [HUD mock 2560×1080 150%](images/game-ui-design-system/hud-2560x1080-150.png),
 [HUD mock 960×540](images/game-ui-design-system/hud-960x540-100.png).
 
-Not executed here: a physical cross-monitor DPI change, macOS/MoltenVK capture,
-an OS-driven IME session (still tracked from #301) and hands-on multiplayer/save
-flows (unchanged by this issue).
+The gallery captures above were regenerated after the round-2 corrections
+(danger confirmation action, shared slider geometry, slot tokens).
 
-## 7. Review corrections (round 1)
+Not executed here: a physical cross-monitor DPI change, macOS/MoltenVK capture,
+an OS-driven IME session (still tracked in [#314](https://github.com/gkehren/ft_vox/issues/314))
+and hands-on multiplayer/save flows (unchanged by this issue).
+
+## 7. Review corrections
 
 The first review of the design system found eight functional and nine
-robustness issues. All P2 items are fixed in this PR; the table is the map from
-finding to code and to the check that pins it.
+robustness issues; the second found three functional and seven robustness
+issues. All P2 items are fixed in this PR; the tables are the map from finding to
+code and to the check that pins it.
+
+### Round 1 (F01–F17)
 
 | # | Correction | Where | Evidence |
 | --- | --- | --- | --- |
@@ -303,6 +322,24 @@ finding to code and to the check that pins it.
 | F15 | `settleState`/`slotState` centralize precedence: disabled clears focus/hover/press but keeps selection; toggle and slider faces are token functions; the exit confirmation is a Danger action whose initial focus is Cancel. | `PlayerUiStyle.hpp`, `PlayerUiWidgets.cpp`, `GameUiShowcase.cpp` | `GameUiStyle::states`, `GameUiComponents::confirmations` |
 | F16 | Screen entry (`m_screenRevision`) is separate from layout rebuild (`m_layoutRevision`); a scale/resolution change keeps focus, selection, notifications, field values, list selection and the clamped scroll offset, and only screen entry resets them or cancels composition. | `GameUiSample.*`, `GameUiShowcase.cpp`, `GameUiGallery.cpp` | design-system proof: an in-session scale change keeps focus, the selected slot and the notification queue |
 | F17 | The Engine tracks a dirty/failed persist state: selecting the same value retries a failed write, the error clears only on success, and a failed write is never re-attempted on every frame. | `EngineUiInput.cpp`, `Engine.hpp` | manual: read-only settings path, then repair + reselect |
+
+### Round 2 (R01–R10)
+
+Every round-2 finding is fixed with a regression test that fails without the
+correction.
+
+| # | Correction | Where | Evidence |
+| --- | --- | --- | --- |
+| R01 | The selection highlight is built **with** its horizontal scroll offset and intersected with the editor clip *before* the visibility test, then that same rect is painted — for committed text and for IME preedit selections. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping`: a scrolled field at 100/150/200% × 1×/0.5× density still emits exactly one highlight quad, inside `editorClip`, plus its caret |
+| R02 | A failed DPI query stays invalid end to end: `scaleInputs` reports `contentScaleValid=false`, the controller keeps the last valid Auto scale (no revision bump), `Fixed` ignores the failure, an identical restore is a no-op, and the host skips the atlas refresh while the density is unknown. | `PlayerUiScale.hpp`, `GameUiSample.*` | `GameUiStyle::scaling` conversion → controller matrix (0/NaN/0-density, restore, Fixed, Auto-after-Fixed) |
+| R03 | `PlayerUiSettings::load` opens the record first and reads bounded 512-byte chunks from that same handle, rejects records over `kMaxPlayerUiSettingsBytes`, retries a momentary sharing violation, and keeps `Missing` (not-there, incl. a missing parent) distinct from `Corrupt` (unreadable or malformed). | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences`: 2 readers vs 40 alternating writes report no false corruption; an injected failure keeps the previous record and leaves no staging file |
+| R04 | `sliderGeometry` gives the label and the percentage readout disjoint rects with a token gap; the label elides instead of painting over the value. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping` (label `z` ≤ value `x` at 100/200% and 240/80/12 px, no glyph straddles the boundary) |
+| R05 | `fill`/`ring`/`sectionHeader`/`divider`/`fittedLabel`/`labelAligned`/`progress` clamp to their own rect: no inverted band, border width clamped to the box, header rule clamped to `rect.w`, and a rect that cannot show half a line paints no text. | `PlayerUiComponents.cpp` | `GameUiComponents::degenerateGeometry` (empty, inverted, fractional, 3 px wide, 0.5 px tall) |
+| R06 | `style::slotTokens` is the one resolver for slot visuals (face, border colour, border width, tint, indicator); `toggleFace`/`sliderFill`/`sliderTrackFace` give toggles and sliders pressed and hover feedback. Precedence documented above. | `PlayerUiStyle.hpp`, `PlayerUiComponents.cpp` | `GameUiStyle::states` asserts resolved colours, widths and the dim tint for `Error\|Focused`, `Pending\|Focused`, `Selected\|Disabled\|Focused`, `Disabled\|Error` |
+| R07 | `Renderer::setFont` is transactional: it validates the replacement, creates and uploads the new atlas, `waitIdle()`s, rebinds the descriptors and only then destroys the old image and publishes `m_face`/`m_facePixels`/`m_fontScale`; a failure destroys the partial image and keeps the previous face, and an unchanged invalid density is not retried every frame. | `GameUiRenderer.*`, `GameUiSample.*` | GPU proofs (design-system, showcase, present) run on the production swap path with validation enabled |
+| R08 | `ToastQueue::advance` ages entries in place and compacts with a move only when an entry actually expires (never self-moves, retired slots cleared). | `PlayerUiComponents.cpp` | `GameUiComponents::notificationLifetime` asserts stable `std::string` buffers/capacity across 20 steps, ordering, expiry, stickiness and capacity |
+| R09 | A corrupt or unreadable preference record marks the settings dirty so an explicit selection of the current default rewrites it; a missing record stays a fresh install and nothing is overwritten at startup. | `EngineUiInput.cpp` | `GameUiStyle::preferences` corrupt → explicit save → valid record; missing stays `Missing` |
+| R10 | The destructive action uses `ButtonVariant::Danger` in the gallery sample and in the real exit confirmation, Cancel stays first so it takes the initial focus, and Enter on a freshly opened dialog activates Cancel. | `GameUiShowcase.cpp`, `GameUiGallery.cpp` | design-system proof (gallery sample variants), showcase proof (danger styling + `ConfirmExit` → Enter → `Pause`) |
 
 ### IME platform facts (F09)
 

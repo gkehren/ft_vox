@@ -370,6 +370,93 @@ void textInput()
 		"the long-field IME anchor uses the same horizontally scrolled geometry as painting");
 }
 
+void selectionAndSliderClipping()
+{
+	// R01: a scrolled editor still highlights its visible selection, and no
+	// editor primitive escapes the field's content rect.
+	std::array<Glyph, 128> glyphs{};
+	for (auto &glyph : glyphs)
+	{
+		glyph.rect = {0.f, 0.f, 6.f, 10.f};
+		glyph.advance = 6.f;
+		glyph.visible = true;
+	}
+	const FontView font{glyphs};
+	const auto &theme = style::baseline();
+	const auto &p = theme.palette;
+	const glm::vec4 selection{p.accent.r, p.accent.g, p.accent.b, 0.32f};
+	const auto insideClip = [](glm::vec4 rect, Clip clip) {
+		return rect.x >= clip.rect.x - 0.01f && rect.y >= clip.rect.y - 0.01f &&
+			rect.z <= clip.rect.z + 0.01f && rect.w <= clip.rect.w + 0.01f;
+	};
+	for (const float scale : {1.f, 1.5f, 2.f})
+		for (const float fontScale : {1.f, 0.5f})
+		{
+			TextField field;
+			field.insert("abcdefghijklmnop");
+			field.selectAll();
+			WidgetSet set;
+			ControlId focus{};
+			set.reset({{0.f, 0.f, 600.f, 600.f}}, 600.f, 0.f);
+			set.add({1, {{0.f, 0.f, 26.f * scale, 46.f * scale}}, "value", {}, &field});
+			set.focus(focus, 1, false);
+			DrawList out;
+			out.reset({600.f, 600.f}, 4);
+			set.paint(out, font, scale, focus, {-20.f, -20.f}, theme, 4, fontScale);
+			const auto geometry = set.editorGeometry(focus, font, scale, fontScale);
+			size_t highlights = 0, overflowing = 0, carets = 0;
+			for (const auto &quad : out.quads())
+			{
+				if (quad.color == selection)
+				{
+					++highlights;
+					overflowing += !insideClip(quad.rect, geometry.clip);
+				}
+				else if (quad.color == p.accent && quad.layer == -1)
+					++carets;
+			}
+			CHECK(geometry.origin.x < geometry.clip.rect.x,
+				"the value is horizontally scrolled at " << scale * 100.f << "% scale, density "
+					<< fontScale);
+			CHECK(highlights == 1 && overflowing == 0,
+				"a scrolled selection stays highlighted and never overflows the editor at "
+					<< scale * 100.f << "% scale, density " << fontScale);
+			CHECK(carets == 1, "the caret is still painted for a scrolled selection");
+		}
+
+	// R04: the slider label and the percentage readout own disjoint rectangles,
+	// so a long label elides instead of painting over the value.
+	for (const float scale : {1.f, 2.f})
+		for (const float width : {240.f, 80.f, 12.f})
+		{
+			const auto geometry = sliderGeometry({{0.f, 0.f, width * scale, 60.f * scale}}, theme, scale);
+			CHECK(geometry.label.rect.z <= geometry.value.rect.x,
+				"the slider label rect ends before the value rect begins at " << width * scale
+					<< " px");
+			CHECK(geometry.label.rect.x >= -0.01f && geometry.value.rect.z <= width * scale + 0.01f,
+				"the label and value rects stay inside the slider bounds");
+		}
+	{
+		Slider slider{0.5f};
+		WidgetSet set;
+		set.reset({{0.f, 0.f, 400.f, 120.f}}, 120.f, 0.f);
+		set.add({1, {{0.f, 0.f, 200.f, 40.f}}, "An extremely long slider label", {}, &slider});
+		DrawList out;
+		out.reset({400.f, 120.f}, 4);
+		set.paint(out, font, 1.f, {}, {-20.f, -20.f}, theme);
+		const auto geometry = sliderGeometry({{0.f, 0.f, 200.f, 40.f}}, theme, 1.f);
+		size_t labelGlyphs = 0, straddling = 0;
+		for (const auto &quad : out.quads())
+			if (quad.layer == -2)
+			{
+				labelGlyphs += quad.rect.x < geometry.value.rect.x;
+				straddling += quad.rect.x < geometry.value.rect.x && quad.rect.z > geometry.value.rect.x;
+			}
+		CHECK(labelGlyphs > 0 && straddling == 0,
+			"a long slider label elides instead of overlapping the percentage readout");
+	}
+}
+
 void changeNotifications()
 {
 	TextField first, second;
@@ -420,6 +507,7 @@ int main()
 	layoutAndWidgets();
 	reusableBindings();
 	textMetrics();
+	selectionAndSliderClipping();
 	textInput();
 	changeNotifications();
 	return testmain::exitCode();
