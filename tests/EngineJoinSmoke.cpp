@@ -56,7 +56,7 @@ struct EngineJoinProbe
 		hosting::Options options;
 		options.world = "Hosted test";
 		options.port = 0;
-		options.playerSlots = 1;
+		options.playerSlots = 2;
 		options.interestRadius = 1;
 		frame().startHostedServer(options, true, "missing-profile");
 		CHECK(!engine.m_hostServer.snapshot().active() && !engine.m_hostError.empty(),
@@ -69,6 +69,7 @@ struct EngineJoinProbe
 			return engine.m_hostSnapshot.state == hosting::State::Ready &&
 				engine.m_hostSnapshot.status && engine.m_hostSnapshot.status->transport.count == 1 &&
 				engine.m_hostSnapshot.status->transport.roster().front().state == monitoring::SessionState::Connected &&
+				engine.m_hostSnapshot.administration &&
 				engine.m_remote && engine.m_remote->ready();
 		}, "hosted server did not auto-join");
 		auto state = engine.m_hostSnapshot;
@@ -79,7 +80,7 @@ struct EngineJoinProbe
 			"auto-join uses the canonical Host choice captured at Start and suspends solo play");
 		CHECK(engine.m_remote->welcome && state.status->transport.roster().front().id == engine.m_remote->welcome->player &&
 			state.status->transport.roster().front().state == monitoring::SessionState::Connected &&
-			state.status->transport.capacity == 1 && state.status->checkpoint == state.checkpoint,
+			state.status->transport.capacity == 2 && state.status->checkpoint == state.checkpoint,
 			"the graphical host receives authoritative identity, capacity, phase and checkpoint on its monitoring pipe");
 		CHECK(localcontrol::readControlKey(engine.m_savesRoot / ".client-profiles" / "named" /
 			"host-choice" / "owner-control.key") &&
@@ -89,6 +90,40 @@ struct EngineJoinProbe
 		CHECK(engine.m_joinRequest && engine.m_joinRequest->profile == "saved-choice",
 			"manual Join hosted server uses its explicit Host choice");
 		engine.m_joinRequest.reset();
+
+		using localcontrol::Operation;
+		using localcontrol::Result;
+		using localcontrol::Role;
+		CHECK(state.administration->role == Role::Owner, "the frame gets server-verified owner permission");
+		std::string profileError;
+		const auto guestProfile = engine.loadNamedProfile("saved-choice", profileError);
+		if (!guestProfile)
+			throw std::runtime_error(profileError);
+		net::udp::ClientTransport guest(net::udp::parseAddress(state.address, state.port), guestProfile->key);
+		guest.connect(Clock::now());
+		until([&] {
+			guest.poll(Clock::now());
+			return engine.m_hostSnapshot.status && engine.m_hostSnapshot.status->registeredProfiles == 2 &&
+				guest.status() == net::udp::ClientStatus::Connected && guest.welcome();
+		}, "guest profile was not admitted");
+		const auto command = [&](Operation operation) {
+			const auto previous = engine.m_hostSnapshot.administration->sequence;
+			const auto error = frame().administerHostedServer(state.launch, operation, guest.welcome()->player,
+				operation == Operation::GrantAdmin ? "saved-choice" : "");
+			if (!error.empty())
+				throw std::runtime_error(error);
+			until([&] {
+				guest.poll(Clock::now());
+				return engine.m_hostSnapshot.administration && engine.m_hostSnapshot.administration->sequence > previous;
+			}, "administration callback received no reply");
+			CHECK(engine.m_hostSnapshot.adminResult == Result::Applied, "the server accepts the owner panel action");
+		};
+		command(Operation::GrantAdmin);
+		CHECK(engine.m_hostSnapshot.administration->players.back().localAdmin &&
+			engine.m_hostSnapshot.administration->audit.back().operation == Operation::GrantAdmin,
+			"the panel grant binds the saved local profile and publishes the audit");
+		command(Operation::Ban);
+		CHECK(engine.m_hostSnapshot.administration->players.back().banned, "the panel ban changes server admission");
 
 		engine.running = true;
 		SDL_Event close{};

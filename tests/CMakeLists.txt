@@ -1535,7 +1535,8 @@ target_link_libraries(test_server_roles PRIVATE ft_vox_hosting ft_vox_udp ft_vox
 ft_vox_target_hygiene(test_server_roles)
 add_dependencies(test_server_roles ft_vox_server)
 add_test(NAME ServerRoles COMMAND test_server_roles $<TARGET_FILE:ft_vox_server>)
-set_tests_properties(ServerRoles PROPERTIES TIMEOUT 120 LABELS "multiplayer")
+add_test(NAME ServerAdministration COMMAND test_server_roles $<TARGET_FILE:ft_vox_server> --administration)
+set_tests_properties(ServerRoles ServerAdministration PROPERTIES TIMEOUT 120 LABELS "multiplayer")
 
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no

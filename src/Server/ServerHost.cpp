@@ -179,9 +179,11 @@ net::udp::SessionWorld ServerHost::sessionWorld() const
 net::udp::SessionAdmission ServerHost::joinRemote(const wire::PlayerKey &key)
 {
 	udp::SessionAdmission admission{{}, m_ticks, m_sim->world()->nextEditId()};
-	if (key == wire::PlayerKey{})
+	if (key == wire::PlayerKey{} || m_roles->isControlKey(key))
 		return admission;
 	const auto registered = m_identities->find(key);
+	if (!m_roles->admits(registered, localcontrol::unixSeconds()))
+		return admission;
 	if (m_remotePlayers.contains(registered) || std::ranges::any_of(m_remotePlayers, [&](const auto &entry) {
 			return entry.second.pendingKey == key;
 		}))
@@ -209,7 +211,8 @@ net::udp::SessionAdmission ServerHost::joinRemote(const wire::PlayerKey &key)
 bool ServerHost::activateRemote(sim::PlayerId player)
 {
 	const auto remote = m_remotePlayers.find(player);
-	if (remote == m_remotePlayers.end() || !m_sim->setPlayerInterestRadius(player, m_config.interestRadiusChunks))
+	if (remote == m_remotePlayers.end() || !m_roles->admits(player, localcontrol::unixSeconds()) ||
+		!m_sim->setPlayerInterestRadius(player, m_config.interestRadiusChunks))
 		return false;
 	const auto saved = m_savedPlayers.find(player);
 	const bool spawned = saved == m_savedPlayers.end()
@@ -235,6 +238,51 @@ void ServerHost::leaveRemote(sim::PlayerId player)
 	if (m_identities->contains(player) && m_sim->playerPositioned(player))
 		m_savedPlayers.insert_or_assign(player, m_sim->captureRemotePlayerState(player));
 	m_sim->removePlayer(player);
+}
+
+localcontrol::Reply ServerHost::adminStatus(uint64_t epoch) const
+{
+	localcontrol::Reply reply;
+	reply.world = m_identities->worldId();
+	reply.epoch = epoch;
+	m_roles->fillAdminState(reply, m_roles->controller(m_config.ownerBootstrap));
+	return reply;
+}
+
+localcontrol::Reply ServerHost::administer(const localcontrol::Request &request, uint64_t epoch, uint64_t &sequence,
+	net::udp::ServerTransport &transport)
+{
+	using localcontrol::Operation;
+	using localcontrol::Result;
+	auto result = Result::WrongWorld;
+	if (request.world == m_identities->worldId() && request.epoch == epoch)
+	{
+		result = Result::Replay;
+		if (sequence != UINT64_MAX && request.sequence == sequence + 1)
+		{
+			sequence = request.sequence;
+			const auto now = localcontrol::unixSeconds();
+			const auto actor = m_roles->controller(m_config.ownerBootstrap);
+			result = m_roles->moderate(actor, request, m_remotePlayers.contains(request.target), now);
+			if (result == Result::Applied && request.operation != Operation::List)
+			{
+				for (auto it = m_remotePlayers.begin(); it != m_remotePlayers.end();)
+				{
+					const auto player = (it++)->first;
+					if ((request.operation == Operation::RevokeAdmin && player == request.target) ||
+						!m_roles->admits(player, now))
+					{
+						transport.disconnectPlayer(player);
+						leaveRemote(player);
+					}
+				}
+			}
+		}
+	}
+	auto reply = adminStatus(epoch);
+	reply.sequence = request.sequence;
+	reply.result = result;
+	return reply;
 }
 
 std::optional<net::wire::ActionResult> ServerHost::receiveRemote(

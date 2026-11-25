@@ -483,6 +483,369 @@ void checkMalformed(const fs::path &exe, const fs::path &root)
 	CHECK(run(exe, args, repeated, true).has("invalid local owner bootstrap"), "multiple bootstrap records are rejected");
 	CHECK(!fs::exists(root / "Bad bootstrap"), "malformed control input never opens a world or binds UDP");
 }
+using localcontrol::Operation;
+using AdminResult = localcontrol::Result;
+constexpr wire::PlayerKey kKicked{44}, kOutside{45};
+
+udp::Address endpoint(const Snapshot &snapshot)
+{
+	return udp::parseAddress(snapshot.address, snapshot.port);
+}
+
+Snapshot awaitAdmin(const hosting::ServerSupervisor &supervisor)
+{
+	auto snapshot = await(supervisor, [](const Snapshot &s) { return s.administration || !s.active(); });
+	require(snapshot.state == State::Ready && snapshot.administration, snapshot.message);
+	return snapshot;
+}
+
+Snapshot command(hosting::ServerSupervisor &supervisor, Operation operation, sim::PlayerId target = {},
+	std::optional<hosting::OwnerProfile> delegate = {})
+{
+	const auto before = supervisor.snapshot();
+	const auto priorSequence = before.administration->sequence;
+	require(supervisor.administer(before.launch, {operation, target, std::move(delegate)}), "queue local admin command");
+	return await(supervisor, [&](const Snapshot &s) {
+		return !s.active() || (!s.adminPending && s.adminOperation == operation && s.adminResult &&
+			(s.adminChannelFailed || (s.administration && s.administration->sequence > priorSequence)));
+	});
+}
+
+const localcontrol::Player &player(const localcontrol::Reply &state, sim::PlayerId id)
+{
+	const auto found = std::ranges::find_if(state.players, [&](const auto &row) { return row.id == id; });
+	require(found != state.players.end(), "expected registered actor in admin state");
+	return *found;
+}
+
+void disconnected(const hosting::ServerSupervisor &supervisor, udp::ClientTransport &client,
+	std::initializer_list<udp::ClientTransport *> otherClients = {})
+{
+	using Status = udp::ClientStatus;
+	const auto id = client.welcome()->player;
+	const auto done = [&] {
+		return client.status() == Status::Disconnected || client.status() == Status::TimedOut ||
+			client.status() == Status::Rejected;
+	};
+	const auto pollClients = [&] {
+		const auto now = udp::ClientTransport::Clock::now();
+		client.poll(now);
+		for (auto *other : otherClients)
+			other->poll(now);
+	};
+	await(supervisor, [&](const Snapshot &state) {
+		pollClients();
+		return state.status && std::ranges::none_of(state.status->transport.roster(), [&](const auto &row) {
+			return row.id == id;
+		});
+	});
+	const auto deadline = udp::ClientTransport::Clock::now() + 12s;
+	while (!done() && udp::ClientTransport::Clock::now() < deadline)
+	{
+		pollClients();
+		std::this_thread::sleep_for(5ms);
+	}
+	require(done(), "moderated client #" + std::to_string(id.value) + " did not observe departure");
+}
+
+void rejected(udp::Address address, const wire::PlayerKey &key)
+{
+	udp::ClientTransport client(address, key);
+	pump(client, [](const auto &session) { return session.status() == udp::ClientStatus::Rejected; });
+	CHECK(!client.welcome(), "denied profile never receives Welcome or activates");
+}
+
+// Direct inherited IPC fixture bypasses the UI adapter's permission and
+// one-request guards. It uses the same private pipe launcher as production.
+class ControlChild
+{
+public:
+	ControlChild(const fs::path &exe, const fs::path &root, const std::string &world,
+		const localcontrol::Bootstrap &proof)
+		: process(fs::absolute(exe), {"--world", world, "--saves-root", root, "--port", "0", "--workers", "0",
+			"--interest-radius", "1", "--launcher-control", "admin"}, true)
+	{
+		require(process.writeControl(localcontrol::encodeBootstrap(proof)), "write the bootstrap proof");
+	}
+
+	~ControlChild()
+	{
+		if (!finished)
+		{
+			process.closeControl();
+			process.forceStop();
+			const auto deadline = std::chrono::steady_clock::now() + 2s;
+			while (!process.pollExit() && std::chrono::steady_clock::now() < deadline)
+				std::this_thread::sleep_for(5ms);
+		}
+	}
+
+	localcontrol::Reply readReply()
+	{
+		const auto deadline = std::chrono::steady_clock::now() + 10s;
+		std::array<uint8_t, localcontrol::kReplyHeaderSize> header{};
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			readExact(header, deadline);
+			const auto size = localcontrol::replySize(header);
+			std::vector<uint8_t> frame(size.value_or(monitoring::kFrameSize));
+			std::ranges::copy(header, frame.begin());
+			readExact(std::span{frame}.subspan(header.size()), deadline);
+			if (size)
+			{
+				auto reply = localcontrol::decodeReply(frame);
+				require(reply.has_value(), "invalid administration reply");
+				return std::move(*reply);
+			}
+		}
+		throw std::runtime_error("no administration reply");
+	}
+
+	localcontrol::Reply send(const localcontrol::Request &request)
+	{
+		require(process.writeControl(localcontrol::encodeRequest(request)), "send administration frame");
+		return readReply();
+	}
+
+	udp::Address address() const
+	{
+		return udp::parseAddress("127.0.0.1", static_cast<uint16_t>(field({0, output}, " port=")));
+	}
+
+	void stop()
+	{
+		process.closeControl();
+		const auto deadline = std::chrono::steady_clock::now() + 15s;
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			drainLog();
+			if (const auto exit = process.pollExit())
+			{
+				finished = true;
+				drainLog();
+				require(*exit == 0 && output.find("reason=launcher saved=1") != std::string::npos,
+					"EOF still commits a checkpoint after control errors");
+				return;
+			}
+			std::this_thread::sleep_for(5ms);
+		}
+		throw std::runtime_error("control child did not exit");
+	}
+
+	hosting::ChildProcess process;
+	std::string output;
+
+private:
+	void drainLog()
+	{
+		std::array<char, 4096> log{};
+		while (const auto count = process.readOutput(log))
+			output.append(log.data(), count);
+	}
+
+	void readExact(std::span<uint8_t> bytes, std::chrono::steady_clock::time_point deadline)
+	{
+		while (!bytes.empty() && std::chrono::steady_clock::now() < deadline)
+		{
+			drainLog();
+			const auto count = process.readMonitoring({reinterpret_cast<char *>(bytes.data()), bytes.size()});
+			if (count)
+				bytes = bytes.subspan(count);
+			else if (process.pollExit())
+				throw std::runtime_error("control child exited: " + output);
+			else
+				std::this_thread::sleep_for(5ms);
+		}
+		require(bytes.empty(), "timed out reading the bounded reply pipe");
+	}
+
+	bool finished{};
+};
+
+void checkAdministration(const fs::path &exe, const fs::path &root)
+{
+	using localcontrol::Role;
+	auto settings = options("Live administration");
+	const hosting::OwnerProfile owner{kHost, root / "live owner key"};
+	const hosting::OwnerProfile delegate{kGuest, root / "live delegate key"};
+	const auto authorityFile = authority(root, settings.world);
+	hosting::ServerSupervisor supervisor;
+	require(supervisor.start(settings, exe, root, owner), "launch administration world");
+	auto first = awaitAdmin(supervisor);
+	require(first.administration->role == Role::Owner && first.administration->players.size() == 1,
+		"owner is authenticated before the first join");
+	stop(supervisor);
+
+	// Rewrite the original FTRL layout to exercise a real v1 -> v2 migration.
+	auto legacy = readPrivateFixture(authorityFile);
+	require(legacy.size() >= 120 && legacy[4] == 2, "v2 authority fixture");
+	legacy[4] = 1;
+	legacy.erase(legacy.begin() + 100, legacy.begin() + 112);
+	legacy.resize(legacy.size() - 8);
+	ws::ByteWriter checksum;
+	checksum.u64(ws::fnv1a64(legacy.data(), legacy.size()));
+	const auto suffix = checksum.take();
+	legacy.insert(legacy.end(), suffix.begin(), suffix.end());
+	require(localcontrol::writePrivateFile(authorityFile, legacy, true), "install original authority format");
+	require(supervisor.start(settings, exe, root, owner), "restart with v1 authority");
+	first = awaitAdmin(supervisor);
+	CHECK(first.administration->role == Role::Owner && !first.administration->allowlist, "v1 migrates with open admission");
+	const auto ownerId = first.administration->players.front().id;
+	CHECK(!supervisor.administer(first.launch - 1, {Operation::Stop, {}, {}}), "a stale frame cannot address another launch");
+
+	udp::ClientTransport guest(endpoint(first), kGuest), banned(endpoint(first), kReplacement);
+	udp::ClientTransport kicked(endpoint(first), kKicked), outside(endpoint(first), kOutside);
+	const auto guestId = connect(guest).player, bannedId = connect(banned).player;
+	const auto kickedId = connect(kicked).player;
+	connect(outside);
+	await(supervisor, [](const Snapshot &s) {
+		return s.status && s.status->registeredProfiles == 5 && s.status->transport.count == 4 &&
+			std::ranges::all_of(s.status->transport.roster(), [](const auto &row) {
+				return row.state == monitoring::SessionState::Connected;
+			});
+	});
+	auto state = command(supervisor, Operation::List);
+	CHECK(state.adminResult == AdminResult::Applied && state.administration->players.size() == 5,
+		"owner lists sorted registered roles without gameplay secrets");
+
+	auto granted = command(supervisor, Operation::GrantAdmin, guestId);
+	CHECK(granted.adminResult == AdminResult::Applied && player(*granted.administration, guestId).role == Role::Admin &&
+		!player(*granted.administration, guestId).localAdmin, "role-only delegation confers no local credential");
+	auto wrong = command(supervisor, Operation::GrantAdmin, guestId, hosting::OwnerProfile{kOutside, root / "other key"});
+	CHECK(wrong.adminResult == AdminResult::InvalidCredential && wrong.administration->revision == granted.administration->revision,
+		"the selected local profile must match the target actor");
+	auto bound = command(supervisor, Operation::GrantAdmin, guestId, delegate);
+	CHECK(bound.adminResult == AdminResult::Applied && player(*bound.administration, guestId).localAdmin,
+		"owner explicitly authorizes the matching private local admin credential");
+
+	auto ban = command(supervisor, Operation::Ban, bannedId);
+	CHECK(ban.adminResult == AdminResult::Applied && player(*ban.administration, bannedId).banned, "ban is applied before acknowledgment");
+	disconnected(supervisor, banned, {&guest, &kicked, &outside});
+	rejected(endpoint(first), kReplacement);
+	CHECK(guest.status() == udp::ClientStatus::Connected && outside.status() == udp::ClientStatus::Connected,
+		"moderation leaves unrelated client sessions intact");
+	auto kick = command(supervisor, Operation::Kick, kickedId);
+	CHECK(kick.adminResult == AdminResult::Applied && player(*kick.administration, kickedId).kickedUntil > localcontrol::unixSeconds(),
+		"kick installs a bounded rejoin hold");
+	disconnected(supervisor, kicked, {&guest, &outside});
+	rejected(endpoint(first), kKicked);
+
+	CHECK(command(supervisor, Operation::Allow, guestId).adminResult == AdminResult::Applied, "owner adds delegate to allowlist");
+	auto limited = command(supervisor, Operation::EnableAllowlist);
+	CHECK(limited.adminResult == AdminResult::Applied && limited.administration->allowlist &&
+		limited.administration->audit.back().actor == ownerId, "owner enables allowlist and the audit records the actor");
+	disconnected(supervisor, outside);
+	rejected(endpoint(first), wire::PlayerKey{46});
+	CHECK(command(supervisor, Operation::Ban, ownerId).adminResult == AdminResult::ProtectedRole, "owner is exempt from moderation");
+	auto stopped = command(supervisor, Operation::Stop);
+	if (stopped.active())
+		stopped = await(supervisor, [](const Snapshot &s) { return !s.active(); });
+	CHECK(stopped.state == State::Stopped && stopped.checkpoint > first.checkpoint &&
+		std::ranges::any_of(stopped.logs, [](const auto &line) { return line.find("reason=control saved=1") != std::string::npos; }),
+		"privileged stop waits for the committed checkpoint");
+
+	const auto delegateKey = localcontrol::readControlKey(delegate.controlFile);
+	const auto ownerKey = localcontrol::readControlKey(owner.controlFile);
+	require(delegateKey && ownerKey, "read separate local fixtures");
+	std::vector<uint8_t> beforeLatestBan;
+	{
+		ControlChild child(exe, root, settings.world, {delegate.player, *delegateKey});
+		const auto initial = child.readReply();
+		require(initial.role == Role::Admin && initial.allowlist && player(initial, bannedId).banned, "delegate authenticates after restart");
+		CHECK(initial.epoch != first.administration->epoch && player(initial, kickedId).kickedUntil > localcontrol::unixSeconds(),
+			"new process epoch and durable kick cooldown");
+		rejected(child.address(), kKicked);
+		const auto request = [&](uint64_t sequence, Operation op, sim::PlayerId id = {}) {
+			return localcontrol::Request{initial.world, initial.epoch, sequence, op, id, std::nullopt};
+		};
+		auto foreign = request(1, Operation::Unban, bannedId);
+		foreign.world ^= 1;
+		CHECK(child.send(foreign).result == AdminResult::WrongWorld, "different-world command is rejected");
+		foreign.world = initial.world;
+		foreign.epoch = first.administration->epoch;
+		CHECK(child.send(foreign).result == AdminResult::WrongWorld, "previous-process command is rejected");
+		CHECK(child.send(request(2, Operation::Unban, bannedId)).result == AdminResult::Replay, "skipped sequence is rejected");
+		auto malformed = localcontrol::encodeRequest(request(1, Operation::Unban, bannedId));
+		malformed[4] = 99;
+		require(child.process.writeControl(malformed), "send malformed request version");
+		CHECK(child.readReply().result == AdminResult::Malformed, "invalid version is rejected before dispatch");
+		CHECK(child.send(request(1, Operation::GrantAdmin, guestId)).result == AdminResult::Forbidden, "delegate cannot self-promote");
+		CHECK(child.send(request(2, Operation::Ban, ownerId)).result == AdminResult::ProtectedRole, "delegate cannot alter owner access");
+		CHECK(child.send(request(3, Operation::RevokeAdmin, ownerId)).result == AdminResult::Forbidden, "delegate cannot revoke owner");
+		CHECK(child.send(request(4, Operation::Stop)).result == AdminResult::Forbidden, "typed shutdown is owner-only");
+		CHECK(child.send(request(5, Operation::Transfer, guestId)).result == AdminResult::Malformed, "ownership changes have no live opcode");
+		CHECK(child.send(request(5, Operation::DisableAllowlist)).result == AdminResult::Forbidden, "allowlist policy is owner-only");
+
+		auto unban = child.send(request(6, Operation::Unban, bannedId));
+		CHECK(unban.result == AdminResult::Applied && unban.revision == initial.revision + 1 &&
+			unban.audit.back().actor == guestId && unban.audit.back().target == bannedId,
+			"only the approved moderation changes durable state and the audit names actor and target");
+		const auto replay = child.send(request(6, Operation::Ban, bannedId));
+		CHECK(replay.result == AdminResult::Replay && replay.revision == unban.revision && !player(replay, bannedId).banned,
+			"replay does not reapply or change policy");
+		beforeLatestBan = readPrivateFixture(authorityFile);
+		const auto reban = child.send(request(7, Operation::Ban, bannedId));
+		CHECK(reban.result == AdminResult::Applied && player(reban, bannedId).banned, "delegated ban is persisted");
+		const auto excess = localcontrol::encodeRequest(request(8, Operation::Unban, bannedId));
+		std::array<uint8_t, 2 * localcontrol::kRequestSize> burst{};
+		std::ranges::copy(excess, burst.begin());
+		std::ranges::copy(excess, burst.begin() + excess.size());
+		require(child.process.writeControl(burst), "send oversized request batch");
+		const auto over = child.readReply();
+		CHECK(over.result == AdminResult::Malformed && over.revision == reban.revision && player(over, bannedId).banned,
+			"over-capacity burst applies neither command");
+		child.stop();
+	}
+
+	const auto pending = authorityFile.parent_path() / (".pending.." + settings.world);
+	require(localcontrol::writePrivateFile(pending, readPrivateFixture(authorityFile), false) &&
+		localcontrol::writePrivateFile(authorityFile, beforeLatestBan, true), "simulate interruption after advancing role revision");
+	require(fs::is_regular_file(ws::checkpointManifestPrevPath(root / settings.world)), "gameplay recovery fixture has a fallback");
+	std::ofstream(ws::checkpointManifestPath(root / settings.world), std::ios::binary | std::ios::trunc).put('X');
+	require(supervisor.start(settings, exe, root, owner), "restart from interrupted authority and damaged gameplay checkpoint");
+	auto recovered = awaitAdmin(supervisor);
+	CHECK(!fs::exists(pending) && recovered.administration->allowlist && player(*recovered.administration, bannedId).banned &&
+		recovered.administration->audit.back().operation == Operation::Ban, "authority recovery preserves ban over gameplay rollback");
+	rejected(endpoint(recovered), kReplacement);
+
+	udp::ClientTransport activeDelegate(endpoint(recovered), kGuest);
+	CHECK(connect(activeDelegate).player == guestId, "delegate keeps its persistent gameplay profile");
+	await(supervisor, [](const Snapshot &s) {
+		return s.status && s.status->transport.count == 1 &&
+			s.status->transport.roster().front().state == monitoring::SessionState::Connected;
+	});
+	const auto revoked = command(supervisor, Operation::RevokeAdmin, guestId);
+	CHECK(revoked.adminResult == AdminResult::Applied && player(*revoked.administration, guestId).role == Role::Player &&
+		!player(*revoked.administration, guestId).localAdmin, "revocation clears the role and proof");
+	disconnected(supervisor, activeDelegate);
+	udp::ClientTransport ordinary(endpoint(recovered), kGuest);
+	CHECK(connect(ordinary).player == guestId, "after revocation an allowed profile can reconnect as a player");
+	await(supervisor, [&](const Snapshot &s) {
+		ordinary.poll(udp::ClientTransport::Clock::now());
+		return s.status && s.status->transport.count == 1 &&
+			s.status->transport.roster().front().state == monitoring::SessionState::Connected;
+	});
+	CHECK(command(supervisor, Operation::Unallow, guestId).adminResult == AdminResult::Applied, "owner removes player from enabled allowlist");
+	disconnected(supervisor, ordinary);
+	rejected(endpoint(recovered), kGuest);
+	stop(supervisor);
+
+	for (const auto &proof : {localcontrol::Bootstrap{delegate.player, *delegateKey}, localcontrol::Bootstrap{kOutside, *ownerKey}})
+	{
+		ControlChild child(exe, root, settings.world, proof);
+		const auto initial = child.readReply();
+		CHECK(initial.role == Role::Player && initial.players.empty() && initial.audit.empty(),
+			"revoked or mismatched credential receives no administrative data");
+		CHECK(child.send({initial.world, initial.epoch, 1, Operation::Unban, bannedId, {}}).result == AdminResult::Forbidden,
+			"revoked or mismatched credential cannot execute a valid scoped command");
+		child.stop();
+	}
+
+	const auto status = run(exe, {"roles", "status", root, settings.world});
+	CHECK(status.has("operation=ban actor_id=" + std::to_string(guestId.value) + " target_id=" + std::to_string(bannedId.value)) &&
+		status.has("operation=revoke-admin actor_id=" + std::to_string(ownerId.value)), "offline audit shows stable identities");
+}
+
 }
 
 int main(int argc, char **argv)
@@ -507,15 +870,21 @@ int main(int argc, char **argv)
 			std::cerr << error << '\n';
 		return 2;
 	}
-	if (argc != 2)
+	const bool administration = argc == 3 && std::string_view(argv[2]) == "--administration";
+	if (argc != 2 && !administration)
 		return 2;
 	const auto root = fs::temp_directory_path() / ("ft vox roles " + std::to_string(udp::randomId()));
 	try
 	{
 		fs::create_directory(root);
-		checkMalformed(argv[1], root);
-		checkBootstrapAndRoles(argv[1], root);
-		checkLegacyAndCrash(argv[1], argv[0], root);
+		if (administration)
+			checkAdministration(argv[1], root);
+		else
+		{
+			checkMalformed(argv[1], root);
+			checkBootstrapAndRoles(argv[1], root);
+			checkLegacyAndCrash(argv[1], argv[0], root);
+		}
 	}
 	catch (const std::exception &error)
 	{

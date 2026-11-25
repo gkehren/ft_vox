@@ -61,8 +61,9 @@ The game starts the sibling `ft_vox_server` executable as a separate
 process and keeps a bounded log in **Host**. It reads readiness and
 checkpoint status from the child's inherited output pipe. The separate
 inherited stdin pipe carries the owner bootstrap before the server opens
-the world. After startup, EOF requests graceful shutdown. The local client
-joins with its ordinary profile.
+the world. It then carries scoped requests from the Administration panel.
+Replies share the private monitoring pipe. EOF requests graceful shutdown.
+The local client joins with its ordinary profile.
 
 **Stop server** closes the control pipe and waits for the process to exit
 and report a committed checkpoint. Closing the game follows the same
@@ -127,9 +128,9 @@ If that world has no dedicated checkpoint yet, run the CLI server first
 with `--ticks 1`, then provision it offline.
 
 The server classifies registered identities as owner, admin, or player.
-Role metadata alone gives a wire-v5 client no privileged commands. The
-gameplay profile key remains a cleartext bearer credential. The separate
-owner control key stays local to role administration. When creating a world,
+An ordinary game connection supplies only a cleartext bearer credential.
+Live administration requires the private inherited pipes and a separate,
+server-verified local control credential. When creating a world,
 the GUI creates or reuses `owner-control.key` alongside the selected named
 profile's `player.key`. When reopening, the GUI reads the existing file.
 If you select the registered owner, the server requires the matching
@@ -143,6 +144,55 @@ Windows drive mounted without Linux permission metadata may report mode
 0777 even for files created with mode 0600. For the default relative save
 paths, launch the Linux game from a private working directory under your
 Linux home.
+
+### Multiplayer Administration
+
+Open **Multiplayer → Administration** in the app that launched the server.
+The panel shows the authority verified for that launch, registered player
+IDs and roles, moderation results, and the latest 64 committed audit
+entries. Use **Refresh players and audit** after a new profile joins.
+Command confirmations identify the world and, for player actions, the
+persistent player ID. The **Players** section shows current admitted
+sessions. Offline registered profiles also appear in Administration.
+
+| Verified local permission | Operations |
+| --- | --- |
+| Owner | List registered profiles and audit, grant or revoke admin, kick, ban or unban, change allowlist membership or mode, and stop with checkpoint confirmation. The owner is exempt from admission restrictions and cannot be targeted. |
+| Delegated admin | List registered profiles and audit and kick, ban or unban players. Owners and other admins are protected from delegated moderation. |
+| Player, guest, or remote connection | No administrative actions. |
+
+**Grant admin role** assigns the role. **Authorize local control** also
+binds the selected saved local profile's private `owner-control.key` to the
+chosen player ID. The server requires the saved profile to match the target's
+registered profile. The delegated admin can exercise the role by launching
+that world from this machine with the matching profile and credential after
+the current launcher has stopped. Remote administration is unsupported,
+including for profiles with an admin role. Wire v5 carries gameplay only.
+
+The default admission mode is open to anyone who can reach the configured
+loopback or private-network bind, subject to bans and kicks. An enabled
+allowlist admits the owner and individually allowed profiles. A profile
+must have registered in this world before it can be added. Ban takes
+precedence over allowlist membership. A kick retires the admitted session
+and holds off rejoin for 60 seconds, measured by the server's clock and
+retained across restart. A ban lasts until unban. These restrictions
+apply to the registered profile rather than the network address. In open
+mode a new profile can still join. Use an allowlist to restrict admission
+to known profiles.
+
+Revoking admin retires the current gameplay session and deletes its local
+authorization. The profile can reconnect as a player if admission rules
+permit. Banning a profile, enabling the allowlist, or removing membership
+from an enabled allowlist also retires the affected sessions at the next
+control boundary. The server stops accepting gameplay from retired
+sessions immediately. A client can learn of retirement from the departure
+packet or its normal session timeout. Admission and local admin credentials
+are checked separately.
+
+**Stop and save server** requests an owner-authorized stop. The panel
+confirms a save only after the child reports a committed checkpoint and
+exits successfully. The launcher can still use **Host → Stop server** or
+close the app to manage the lifetime of the child it created.
 
 ### Offline administration and recovery
 
@@ -161,7 +211,7 @@ player, use its persistent actor ID from the client's join log. Run
 | `grant-admin SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE` | Current owner delegates to a registered player. |
 | `revoke-admin SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE` | Current owner removes a delegation. |
 | `transfer SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_ID OWNER_CONTROL_FILE NEW_CONTROL_FILE` | Current owner transfers ownership to a registered player and rotates the credential. The former owner becomes a player. Other delegations stay in place. |
-| `recover SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_KEY NEW_CONTROL_FILE` | Trusted local world operator explicitly rebinds an owned world, rotates the credential, and clears every admin. Generate a fresh control key and use the revision reported by status, including for missing, invalid, or stale authority. |
+| `recover SAVES_ROOT WORLD WORLD_ID REVISION PLAYER_KEY NEW_CONTROL_FILE` | Trusted local world operator explicitly rebinds an owned world, rotates the credential, and clears every admin. Generate a fresh control key and use the revision reported by status, including for missing, invalid, or stale authority. Admission policy is retained when recovery starts from a valid current authority. If that record is lost, restore a current backup to recover its restrictions. |
 
 Pass file paths as arguments and keep their contents private. The local
 operator is the OS principal with write access to the save directory and

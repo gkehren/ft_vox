@@ -61,6 +61,10 @@ public:
 	bool restoredPlayer() const { return m_restoredPlayer; }
 	net::udp::SessionWorld sessionWorld() const;
 	Role role(sim::PlayerId player) const { return m_roles ? m_roles->role(player) : Role::Player; }
+	bool adminHealthy() const { return m_roles->healthy(); }
+	localcontrol::Reply adminStatus(uint64_t epoch) const;
+	localcontrol::Reply administer(const localcontrol::Request &request, uint64_t epoch, uint64_t &sequence,
+		net::udp::ServerTransport &transport);
 	net::udp::SessionAdmission joinRemote(const net::wire::PlayerKey &key = net::udp::randomPlayerKey()) override;
 	bool activateRemote(sim::PlayerId player) override;
 	void leaveRemote(sim::PlayerId player) override;

@@ -15,7 +15,7 @@ namespace
 struct Mailbox
 {
 	uint64_t generation{};
-	bool closing{}, confirmed{}, active{}, spawnFailed{};
+	bool closing{}, confirmed{}, active{}, spawnFailed{}, moderated{};
 	uint64_t inputClosedThrough{};
 	std::optional<SessionAdmission> admission;
 	wire::PlayerKey playerKey{};
@@ -56,6 +56,7 @@ struct Peer
 	uint8_t nextFragment{};
 	bool worldInFlight{};
 	std::optional<Time> resyncDeadline;
+	std::optional<Time> moderationDeadline;
 	bool confirmed{}, closing{}, waitingForResult{};
 };
 
@@ -191,7 +192,7 @@ struct ServerTransport::Impl
 			return;
 		if (const auto *msg = std::get_if<wire::Hello>(&packet.payload))
 			return hello(frame.from, it == peers.end() ? nullptr : &*it, *msg, now);
-		if (it == peers.end() || !it->welcome || it->closing || it->link->scope != packet.scope)
+		if (it == peers.end() || !it->welcome || it->link->scope != packet.scope)
 			return;
 		const auto kind = kindOf(packet);
 		if (!rate.takeKind(now, kind))
@@ -200,6 +201,12 @@ struct ServerTransport::Impl
 		const size_t slot = static_cast<size_t>(it - peers.begin());
 		auto &peer = *it;
 		auto &link = *peer.link;
+		if (peer.closing)
+		{
+			if (const auto *ack = std::get_if<wire::Ack>(&packet.payload); peer.moderationDeadline && ack)
+				link.acknowledge(ack->through);
+			return;
+		}
 		if (const auto *ack = std::get_if<wire::Ack>(&packet.payload))
 		{
 			if (link.acknowledge(ack->through))
@@ -219,6 +226,8 @@ struct ServerTransport::Impl
 		{
 			std::lock_guard lock(mutex);
 			auto &box = mailboxes[slot];
+			if (box.moderated)
+				return;
 			const auto *input = std::get_if<wire::Input>(&packet.payload);
 			if (input && (!withinInputWindow(input->intendedTick, ownerTick) ||
 			              input->intendedTick <= box.inputClosedThrough ||
@@ -260,11 +269,25 @@ struct ServerTransport::Impl
 			link.flushAck(sender(peer), now);
 	}
 
+	void notifyModeration(Peer &peer, Time now)
+	{
+		// Wait briefly for the ACK of an in-flight reliable frame. The
+		// disconnect must use the session's next reliable sequence.
+		auto &link = *peer.link;
+		if (link.pending && link.pending->sent && now < *peer.moderationDeadline)
+			return;
+		if (link.reliableSent < wire::kMaxSequence)
+			sender(peer).send(now, {link.scope, link.reliableSent + 1, wire::Disconnect{wire::DisconnectReason::Leaving}});
+		peer.moderationDeadline.reset();
+	}
+
 	void refresh(size_t slot, Time now)
 	{
 		auto &peer = peers[slot];
 		if (!peer.link)
 			return;
+		if (peer.moderationDeadline)
+			return notifyModeration(peer, now);
 		if (peer.closing)
 		{
 			std::lock_guard lock(mutex);
@@ -277,11 +300,22 @@ struct ServerTransport::Impl
 			return close(slot);
 
 		std::optional<SessionAdmission> admission;
-		bool spawnFailed;
+		bool spawnFailed, moderated;
 		{
 			std::lock_guard lock(mutex);
 			admission = mailboxes[slot].admission;
 			spawnFailed = mailboxes[slot].spawnFailed;
+			moderated = mailboxes[slot].moderated;
+		}
+		if (moderated)
+		{
+			close(slot);
+			if (peer.welcome)
+			{
+				peer.moderationDeadline = now + 250ms;
+				notifyModeration(peer, now);
+			}
+			return;
 		}
 		if (spawnFailed)
 		{
@@ -497,7 +531,7 @@ struct ServerTransport::Impl
 			for (size_t slot = 0; slot < mailboxes.size(); ++slot)
 			{
 				auto &box = mailboxes[slot];
-				if (!box.generation)
+				if (!box.generation || (box.moderated && !box.closing))
 					continue;
 				if (discardInputs)
 					box.intents.inputs = {};
@@ -580,7 +614,7 @@ struct ServerTransport::Impl
 			bool snapshotDue, entitiesDue, worldReady, allowBaseline;
 			{
 				std::lock_guard lock(mutex);
-				if (!box.active || box.closing)
+				if (!box.active || box.closing || box.moderated)
 					continue;
 				player = box.admission->player;
 				snapshotDue = completedTick % kSnapshotIntervalTicks == 0 && box.lastSnapshotTick != completedTick;
@@ -654,6 +688,14 @@ ServerTransport::ServerTransport(Address bind, size_t remoteCap, SessionWorld wo
 	: m_impl(std::make_unique<Impl>(bind, remoteCap, world)) {}
 
 ServerTransport::~ServerTransport() = default;
+
+void ServerTransport::disconnectPlayer(sim::PlayerId player)
+{
+	std::lock_guard lock(m_impl->mutex);
+	for (auto &box : m_impl->mailboxes)
+		if (box.admission && box.admission->player == player)
+			box.moderated = true;
+}
 
 Address ServerTransport::address() const { return m_impl->socket.address(); }
 

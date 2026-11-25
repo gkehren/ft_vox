@@ -65,14 +65,14 @@ struct MonitorWriter::Impl
 #endif
 	}
 
-	bool send(const monitoring::Frame &frame, std::stop_token stop)
+	bool send(std::span<const uint8_t> frame, std::stop_token stop)
 	{
 #ifdef _WIN32
 		DWORD written = 0;
 		return !stop.stop_requested() &&
 			WriteFile(pipe, frame.data(), static_cast<DWORD>(frame.size()), &written, nullptr) && written == frame.size();
 #else
-		std::span<const uint8_t> remaining(frame);
+		auto remaining = frame;
 		while (!remaining.empty() && !stop.stop_requested())
 		{
 			const auto written = ::write(pipe, remaining.data(), remaining.size());
@@ -97,11 +97,21 @@ struct MonitorWriter::Impl
 			while (!stop.stop_requested())
 			{
 				std::optional<monitoring::Status> sample;
+				std::optional<localcontrol::Reply> reply;
 				{
 					std::lock_guard lock(mutex);
-					sample = std::exchange(latest, std::nullopt);
+					reply = std::exchange(adminReply, std::nullopt);
+					if (!reply)
+						sample = std::exchange(latest, std::nullopt);
 				}
-				if (!sample)
+				if (reply)
+				{
+					if (!send(localcontrol::encodeReply(*reply), stop))
+						return;
+					std::lock_guard lock(mutex);
+					adminBusy = false;
+				}
+				else if (!sample)
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				else if (!send(monitoring::encode(*sample), stop))
 					return;
@@ -120,6 +130,8 @@ struct MonitorWriter::Impl
 #endif
 	std::mutex mutex;
 	std::optional<monitoring::Status> latest;
+	std::optional<localcontrol::Reply> adminReply;
+	bool adminBusy{};
 	std::jthread worker;
 };
 
@@ -140,5 +152,18 @@ void MonitorWriter::offer(const monitoring::Status &status)
 	if (!lock)
 		return;
 	m_impl->latest = status;
+}
+
+bool MonitorWriter::adminReady() const
+{
+	std::lock_guard lock(m_impl->mutex);
+	return !m_impl->adminBusy;
+}
+
+void MonitorWriter::offerAdmin(localcontrol::Reply reply)
+{
+	std::lock_guard lock(m_impl->mutex);
+	m_impl->adminBusy = true;
+	m_impl->adminReply = std::move(reply);
 }
 }

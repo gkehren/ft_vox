@@ -49,6 +49,22 @@ void Engine::populateHostingUi(GameUIFrame &frame)
 		if (auto profile = loadNamedProfile(name, m_hostError))
 			queueHostedJoin(server, profile->name);
 	};
+	frame.administerHostedServer = [this](uint64_t launch, localcontrol::Operation operation,
+		sim::PlayerId target, std::string_view name) -> std::string {
+		hosting::AdminAction action{operation, target, std::nullopt};
+		if (!name.empty())
+		{
+			std::string error;
+			const auto profile = loadNamedProfile(name, error);
+			if (!profile)
+				return error;
+			action.delegate = hosting::OwnerProfile{profile->key,
+				m_savesRoot / ".client-profiles" / "named" / profile->name / "owner-control.key"};
+		}
+		if (!m_hostServer.administer(launch, std::move(action)))
+			return "The server is busy or this administration session is unavailable.";
+		return {};
+	};
 }
 
 void Engine::queueHostedJoin(const hosting::Snapshot &server, const std::string &profile)

@@ -129,14 +129,16 @@ does not authenticate a command or modify wire v5.
 
 - The launcher writes one fixed 72-byte record to the private inherited
   stdin pipe. It contains `FTLB`, little-endian u32 version 1, the
-  32-byte player key and a 32-byte owner control field. The field is zero
+  32-byte player key and a 32-byte local control field. The field is zero
   when reopening without a readable key. A fresh bootstrap requires a
   distinct, nonzero control key. The server
   reads it within five seconds before opening a world. Extra bytes are
   rejected and closing the writer requests graceful shutdown after startup.
   Key bytes are absent from command arguments, environment, preferences,
   readiness output and the audit. `--launcher-control stdin` remains the
-  EOF-only mode for ordinary supervisors.
+  EOF-only mode for ordinary supervisors. `bootstrap` accepts the same
+  bootstrap record and EOF. `admin` additionally enables live requests and
+  requires the inherited monitoring response pipe.
 - The local control key file is `FTVK`, little-endian u32 version 1, then a
   nonzero OS-generated 32-byte value. New files use mode 0600 on POSIX and a
   protected DACL for the current user and SYSTEM on Windows. The authority
@@ -157,6 +159,20 @@ does not authenticate a command or modify wire v5.
   entries. Recovery rotates control and clears delegations. The CLI and
   launcher are local process entry points. Hello, session capabilities and
   claimed actor IDs grant no access to them.
+- Issue #288 binds live authority to the bootstrap proof and checks the
+  current role again before each command. A delegated admin needs a
+  separate, explicitly enrolled local control key. A command is a fixed
+  104-byte `FTAQ` v1 record with world ID, fresh server launch epoch, the
+  next request sequence, an opcode, target, and optional delegation proof
+  for owner grants. Padding and unused proof bytes are zero. Replay, wrong
+  scope, malformed input and buffered request bursts cannot mutate policy.
+  An oversized burst or stalled partial record disables the privileged
+  input for that launch. EOF still controls child lifetime. The inherited
+  reply stream multiplexes `FTAR` v1 results with existing monitor frames.
+  Replies are limited to 4,096 registered profiles and 64 audit entries.
+  The launcher sends one request at a time and the child queues one reply.
+  Command application runs on the simulation owner before UDP intents.
+  No game packets or remote administration endpoints are added.
 
 ### Atomic records and restore
 
@@ -166,18 +182,30 @@ does not authenticate a command or modify wire v5.
   prevent role-aware startup. The roster and the current role bindings
   are validated against the registry.
 - `<saves-root>/.ft_vox..server-roles/<world-name>` stores
-  `FTRL` **v1**, independent of gameplay checkpoint generations. The
+  `FTRL` **v2**, independent of gameplay checkpoint generations. The
   little-endian record contains magic, u32 version, u64 world ID and role
   revision, u32 owner ID, owner profile and control keys, and u32 admin
-  and audit counts. Each sorted admin is a u32 ID and a 32-byte profile
-  binding. The most recent 64 audit entries contain a u64 revision, u8
-  operation, and u32 previous-owner and target IDs. A final u64 FNV-1a
-  checksum covers the preceding bytes to detect corruption. The server
+  and audit counts, followed in v2 by delegation and policy counts and the
+  allowlist mode. Each sorted admin is a u32 ID and a 32-byte profile
+  binding. Optional delegated local credentials are sorted ID and
+  32-byte control-key pairs. Sorted admission entries record ID, ban and
+  allowlist bits, and a u64 kick expiry in Unix seconds. The most recent
+  64 audit entries contain a u64 revision, u8 operation, and u32 actor and
+  target IDs. Zero actor identifies local bootstrap, provisioning or
+  recovery. The reader accepts v1 records and treats their admission as
+  open and delegations as role-only until the next authority write. A final
+  u64 FNV-1a checksum covers the preceding bytes to detect corruption. The server
   flushes a private `.pending..<world-name>` record, atomically advances
   the revision in the identity registry, then promotes the staged record
   with an atomic rename. Opening the world completes a matching staged
-  record if interrupted. Admin revocation and its audit entry share that
-  commit. A role file older than the registry revision cannot become active.
+  record if interrupted. Moderation and its audit entry share that commit.
+  Admission is enforced before both reservation and activation. A role
+  file older than the registry revision cannot become active. A gameplay
+  checkpoint rollback preserves the latest valid authority and identities.
+  Keep both files when restoring gameplay. Their permissions and the trust
+  placed in the local operator are part of the security boundary. The
+  checksum detects corruption and carries no protection against someone
+  who can replace both private authority and registry files.
 - Before the first gameplay checkpoint, the server publishes its registry
   and a pending authority record with the trusted keys and owner ID zero.
   After publishing and sealing the first dedicated checkpoint it enrolls

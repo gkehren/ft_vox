@@ -494,7 +494,7 @@ if(WIN32)
 endif()
 ft_vox_target_hygiene(ft_vox_udp)
 
-add_library(ft_vox_local_control STATIC src/Hosting/RoleCredentials.cpp src/Hosting/ServerStatus.cpp)
+add_library(ft_vox_local_control STATIC src/Hosting/RoleCredentials.cpp src/Hosting/ServerStatus.cpp src/Hosting/AdminProtocol.cpp)
 target_link_libraries(ft_vox_local_control PRIVATE ft_vox_core ft_vox_udp)
 if(WIN32)
     target_link_libraries(ft_vox_local_control PRIVATE advapi32)

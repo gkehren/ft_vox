@@ -2,6 +2,7 @@
 
 #include <Network/WireProtocol.hpp>
 #include <Core/ServerStatus.hpp>
+#include <Hosting/AdminProtocol.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -41,6 +42,13 @@ struct OwnerProfile
 	std::filesystem::path controlFile;
 };
 
+struct AdminAction
+{
+	localcontrol::Operation operation{};
+	sim::PlayerId target;
+	std::optional<OwnerProfile> delegate;
+};
+
 std::string validate(const Options &options);
 std::vector<std::string> listWorlds(const std::filesystem::path &root);
 
@@ -56,6 +64,10 @@ struct Snapshot
 	bool delayed{};
 	std::deque<std::string> logs;
 	std::shared_ptr<const monitoring::Status> status;
+	std::shared_ptr<const localcontrol::Reply> administration;
+	std::optional<localcontrol::Result> adminResult;
+	localcontrol::Operation adminOperation{};
+	bool adminPending{}, adminChannelFailed{};
 
 	bool active() const { return state == State::Starting || state == State::Ready || state == State::Stopping; }
 };
@@ -74,6 +86,7 @@ public:
 		std::optional<OwnerProfile> owner = std::nullopt);
 	void stop();
 	bool forceStop();
+	bool administer(uint64_t launch, AdminAction action);
 	Snapshot snapshot() const;
 	std::optional<Snapshot> snapshotIfChanged(uint64_t &revision) const;
 
@@ -88,6 +101,8 @@ private:
 	Snapshot m_snapshot;
 	std::atomic<uint64_t> m_revision{};
 	std::atomic<Command> m_command{Command::None};
+	std::optional<AdminAction> m_adminRequest;
+	bool m_adminInFlight{};
 	std::jthread m_worker;
 };
 }
