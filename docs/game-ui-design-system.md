@@ -118,14 +118,30 @@ glyph, so an atlas reload never blanks the HUD.
 
 | Mode | Rule |
 | --- | --- |
-| `Auto` (default) | `contentScale = SDL_GetWindowDisplayScale / SDL_GetWindowPixelDensity`, capped so the authored metrics fit a 900×480 logical view, snapped down onto `{0.75, 1, 1.25, 1.5, 1.75, 2}` |
+| `Auto` (default) | `base = snapDown(contentScale)`, `fit = min(width / 900, height / 480)`, `scale = snapDown(min(base, fit))` — continuous across the fit box, snapped down onto `{0.75, 1, 1.25, 1.5, 1.75, 2}` |
 | `Fixed` | an explicit user override snapped onto `{1, 1.25, 1.5, 1.75, 2}` (100–200%); ignores the window size, which is the point of an override |
+
+The accepted Auto table (asserted in `GameUiStyle`):
+
+| Logical resolution | Content scale | Auto scale |
+| --- | --- | --- |
+| 1920 × 1080 | 200% | 200% |
+| 1600 × 900 | 200% | 175% |
+| 1280 × 720 | 200% | 125% |
+| 1160 × 680 | 125% | 125% |
+| 900 × 480 | 200% | 100% |
+| 800 × 480 | 150% | 75% |
+| 0 × 0 (minimized) | invalid | last valid Auto scale |
 
 Details:
 
+- There is no special case at `fit >= 1`: the cap is `min(base, fit)` everywhere,
+  so crossing 900×480 moves one step instead of jumping to the raw content
+  scale.
 - Degenerate inputs (0×0 while minimized, a non-finite or zero content scale)
-  keep the last resolved value / fall back to 100% instead of collapsing to the
-  floor.
+  keep the last valid **Auto** scale without bumping the layout revision; a
+  fresh controller falls back to the snapped content scale. Restoring the window
+  re-resolves to the same value, so no layout is invalidated.
 - 75% is auto-only: an override may not make text smaller than 100%.
 - `ScaleController::resolve(inputs)` runs **once per frame, before any screen is
   built**. A changed value cancels the in-flight press and rebuilds the layout on
@@ -227,17 +243,22 @@ test_engine_reload --game-ui-design-system docs/images/game-ui-design-system
 test_engine_reload --game-ui-showcase-proof     # existing interaction proof
 ```
 
-- `GameUiStyle` (82 checks) — palette contrast on bright/dark scenes, state
+- `GameUiStyle` (107 checks) — palette contrast on bright/dark scenes, state
   precedence, type/spacing scales, auto/fixed scale policy incl. degenerate
   windows, controller frame boundary, preference round-trip and every corruption
   case.
-- `GameUiComponents` (153 checks) — slot grid geometry/hit testing, tooltip
+- `GameUiComponents` (165 checks) — slot grid geometry/hit testing, tooltip
   placement and flipping, toast capacity/expiry/sticky/dismissal, confirmation
   geometry and destructive focus, progress fractions, text fitting and glyph
-  fallback, icon fallback, the field-group height contract, component
-  painting/scissoring, a full HUD mock at
+  fallback, icon fallback, owned/bounded notifications, toast timing at
+  30–240 Hz, the field-group height contract, slot occupancy vs icon validity,
+  label/border/band clamping, component painting/scissoring, a full HUD mock at
   eight size × scale combinations inside the 8-draw budget, and the gallery
   layout at 16:9, 21:9, small windows, 100% and 200%.
+- `GameUiInteraction` — routing, focus, and the geometry contracts behind them:
+  one text metric for painting/caret/hit testing at 100–200% with 1×/2×
+  framebuffer density, slider track mapping at 0/25/50/75/100%, and the IME
+  composition-unit normalization (UTF-16 on Windows, scalars on Linux).
 - `--game-ui-design-system` (29 checks, Vulkan validation enabled) — captures
   the gallery and HUD mock through the production composition path at
   1920×1080 / 2560×1080 / 1160×680 and 100% / 150% / 200%, checks the resolved
@@ -257,7 +278,52 @@ Not executed here: a physical cross-monitor DPI change, macOS/MoltenVK capture,
 an OS-driven IME session (still tracked from #301) and hands-on multiplayer/save
 flows (unchanged by this issue).
 
-## 7. Limitations and follow-ups
+## 7. Review corrections (round 1)
+
+The first review of the design system found eight functional and nine
+robustness issues. All P2 items are fixed in this PR; the table is the map from
+finding to code and to the check that pins it.
+
+| # | Correction | Where | Evidence |
+| --- | --- | --- | --- |
+| F01 | One text metric (`TextStyle`: role × player scale × framebuffer) drives rendering, caret placement, mouse hit testing, selection, horizontal scrolling and the IME anchor; the SDL text-input area no longer carries a hardcoded line height and no geometry depends on a paint having run. | `PlayerUiText.hpp`, `PlayerUiWidgets.*`, `GameUiShowcase.cpp` | `GameUiInteraction::textMetrics` (100/150/200% × 1×/2×), backend proof caret/candidate check |
+| F02 | Selection, preedit and caret primitives are clipped to the editor content rect (`fieldGeometry` returns the well inset ∩ viewport). | `PlayerUiWidgets.cpp` | paint path + `GameUiInteraction` long-field caret test |
+| F03 | List rows use `listGeometry`/`listRowRect`/`listRowAt` for paint, hover and activation; clipped rows keep their visible part interactive and cannot take input outside the row window. | `PlayerUiWidgets.*` | `GameUiInteraction` hit/release parity |
+| F04 | Auto scale is `snapDown(min(snapDown(contentScale), fit))`; the fit-box discontinuity is gone and invalid inputs keep the last valid Auto scale. | `PlayerUiScale.hpp` | `GameUiStyle::scaling` (accepted table + continuity) |
+| F05 | The whole confirmation layout (panel, title, body, both buttons) is placed by the viewport transform that the widgets use. | `GameUiGallery.cpp`, `PlayerUiComponents.*` | `GameUiComponents::confirmations` placement invariance |
+| F06 | Unique staging file per write, `MoveFileExW(REPLACE_EXISTING)` on Windows / `rename` elsewhere, bounded retry on sharing violations, only our staging file is ever deleted, and serialization/parsing is fully locale-independent. | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences` (4 concurrent writers, failed write keeps the record, comma/period cases) |
+| F07 | `Toast` owns `std::string` title/body, bounded to 96 bytes on a scalar boundary; painting allocates nothing. | `PlayerUiComponents.*` | `GameUiComponents::notifications` (source destroyed, over-long text) |
+| F08 | `SlotView::icon` is `std::optional<AtlasIcon>`; occupancy is `count != 0`, atlas layer 0 is a real texture, and an occupied slot with a missing/stale icon keeps its count and frame. | `PlayerUiComponents.*`, `GameUiGallery.cpp` | `GameUiComponents::slotPaintingAndFallbacks` (layer 0, no icon, empty) |
+| F09 | Composition units are normalized: UTF-16 code units on Windows, scalars on Linux; an index inside a surrogate pair rounds down and end-of-text ranges clamp. | `PlayerUiWidgets.*` | `GameUiInteraction` composition-range matrix; real OS IME pass tracked separately |
+| F10 | Notifications and the indeterminate phase advance from a monotonic clock (`presentationStep`, 250 ms cap); toast ids are monotonic, not phase-derived. | `GameUiSample.cpp`, `PlayerUiComponents.hpp` | `GameUiComponents::notifications` (30/60/144/240 Hz) |
+| F11 | The face is re-baked only when the framebuffer density changes; the renderer swaps the atlas after `waitIdle`, and every text path (standalone proofs included) applies the compensation. | `GameUiSample.cpp`, `GameUiFonts`, `GameUiRenderer.*` | GPU proof on the 1× capture, manual DPI move |
+| F12 | Labels are fitted into their own rects, borders clamp to the box, the indeterminate band clamps to its track, and the gallery card is clipped by the viewport while its content is clipped by the body. | `PlayerUiComponents.cpp`, `GameUiGallery.cpp` | `GameUiComponents::painting` (long label, 4×4 ring, 6×4 bar) |
+| F13 | `sliderGeometry`/`sliderValueAt` are shared by painting and dragging; the legacy interaction margin is gone. | `PlayerUiWidgets.*` | `GameUiInteraction` 0/25/50/75/100% track mapping |
+| F14 | The quantity badge paints a contrast backing, owns a band above the durability/progress track, and never overlaps it. | `PlayerUiComponents.cpp` | `GameUiComponents` slot painting + captures |
+| F15 | `settleState`/`slotState` centralize precedence: disabled clears focus/hover/press but keeps selection; toggle and slider faces are token functions; the exit confirmation is a Danger action whose initial focus is Cancel. | `PlayerUiStyle.hpp`, `PlayerUiWidgets.cpp`, `GameUiShowcase.cpp` | `GameUiStyle::states`, `GameUiComponents::confirmations` |
+| F16 | Screen entry (`m_screenRevision`) is separate from layout rebuild (`m_layoutRevision`); a scale/resolution change keeps focus, selection, notifications, field values, list selection and the clamped scroll offset, and only screen entry resets them or cancels composition. | `GameUiSample.*`, `GameUiShowcase.cpp`, `GameUiGallery.cpp` | manual scale switching in the running game + proof runs |
+| F17 | The Engine tracks a dirty/failed persist state: selecting the same value retries a failed write, the error clears only on success, and a failed write is never re-attempted on every frame. | `EngineUiInput.cpp`, `Engine.hpp` | manual: read-only settings path, then repair + reselect |
+
+### IME platform facts (F09)
+
+`SDL_EVENT_TEXT_EDITING::start/length` are **not** normalized by SDL. In the
+bundled SDL 3.4.18:
+
+- `src/video/windows/SDL_windowskeyboard.c` (`IME_SendEditingEvent`) passes
+  `ime_cursor`, `ime_selected_start/length` and `SDL_wcslen(readingstring)` —
+  UTF-16 **code units** — while `text` is UTF-8.
+- `src/core/linux/SDL_fcitx.c` / `SDL_ibus.c` convert with `SDL_utf8strnlen`,
+  i.e. **Unicode scalars**.
+
+The player UI therefore normalizes with `CompositionUnit` (`kPlatformCompositionUnit`
+selects UTF-16 on Windows, scalars elsewhere). A UTF-16 index inside a surrogate
+pair rounds down, so a supplementary character can never be split into invalid
+bytes. Real OS-driven IME validation (Japanese/Chinese/Korean candidate windows,
+supplementary-plane input, focus handoff) still needs a manual pass on a Windows
+desktop and is tracked in [#314](https://github.com/gkehren/ft_vox/issues/314);
+the normalized geometry is covered headlessly.
+
+## 8. Limitations and follow-ups
 
 - Rounded corners are a stepped octagon; a rounded/SDF UI primitive is a
   renderer follow-up, not a design-system one.

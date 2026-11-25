@@ -124,8 +124,24 @@ glm::vec2 tooltipExtent(FontView font, std::string_view text, const style::Theme
 
 // --- Toasts ----------------------------------------------------------------
 
+namespace
+{
+/// Bound a toast field without splitting a UTF-8 sequence.
+std::string boundedText(std::string_view text)
+{
+	if (text.size() <= Toast::kMaxText)
+		return std::string(text);
+	size_t size = Toast::kMaxText;
+	while (size && (static_cast<unsigned char>(text[size]) & 0xc0) == 0x80)
+		--size;
+	return std::string(text.substr(0, size));
+}
+} // namespace
+
 bool ToastQueue::push(Toast toast)
 {
+	toast.title = boundedText(toast.title);
+	toast.body = boundedText(toast.body);
 	const bool full = m_count == kCapacity;
 	const size_t keep = std::min(m_count, kCapacity - 1);
 	for (size_t i = keep; i > 0; --i)
@@ -236,9 +252,10 @@ void Surface::fill(Clip rect, glm::vec4 color, float radius) const
 void Surface::ring(Clip rect, glm::vec4 color, float width, float radius) const
 {
 	(void)radius;
-	const float w = std::max(1.f, width);
 	if (size(rect).x <= 0.f || size(rect).y <= 0.f)
 		return;
+	// A border can never be wider than the geometry it frames (F12).
+	const float w = std::clamp(width, 1.f, std::max(1.f, std::min(size(rect).x, size(rect).y) * 0.5f));
 	m_out.panel({rect.rect.x, rect.rect.y, rect.rect.z, rect.rect.y + w}, color, m_clip);
 	m_out.panel({rect.rect.x, rect.rect.w - w, rect.rect.z, rect.rect.w}, color, m_clip);
 	m_out.panel({rect.rect.x, rect.rect.y + w, rect.rect.x + w, rect.rect.w - w}, color, m_clip);
@@ -253,10 +270,9 @@ void Surface::frame(Clip rect, glm::vec4 face, glm::vec4 border, float width, fl
 
 void Surface::label(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color) const
 {
-	if (text.empty())
-		return;
-	m_font.paint(m_out, {rect.rect.x, centeredLineTop(rect, role, m_scale)}, text, color,
-		glyphScale(role), m_clip);
+	// A label is fitted into its own component rect: variable-length text can
+	// never overdraw a neighbouring control (issue #302 F12).
+	fittedLabel(rect, text, role, color, 0.f);
 }
 
 float Surface::fittedWidth(std::string_view text, style::TextRole role, float available,
@@ -352,7 +368,9 @@ void Surface::button(Clip rect, std::string_view text, style::ButtonVariant vari
 	}
 	if (border.a > 0.f)
 		ring(rect, border, borderWidth, radius);
-	fittedLabel(rect, text, style::TextRole::Body, tokens.text, 0.5f);
+	const float pad = std::min(px(m_theme.space.sm), size(rect).x * 0.25f);
+	fittedLabel({{rect.rect.x + pad, rect.rect.y, std::max(rect.rect.x + pad, rect.rect.z - pad),
+			rect.rect.w}}, text, style::TextRole::Body, tokens.text, 0.5f);
 }
 
 void Surface::listRow(Clip rect, std::string_view title, std::string_view trailing,
@@ -437,8 +455,9 @@ void Surface::progress(Clip rect, float value, bool pending, float phase) const
 		return;
 	}
 	// Indeterminate: one band sweeping left to right on the caller's phase, so
-	// the animation stays deterministic and testable.
-	const float width = std::max(px(8.f), size(inner).x * 0.28f);
+	// the animation stays deterministic and testable. The band is clamped to the
+	// track, never painted past it on a very small progress bar (F12).
+	const float width = std::min(size(inner).x, std::max(px(8.f), size(inner).x * 0.28f));
 	const float travel = std::max(0.f, size(inner).x - width);
 	const float x = inner.rect.x + travel * std::clamp(phase, 0.f, 1.f);
 	fill({{x, inner.rect.y, x + width, inner.rect.w}}, m_theme.palette.pending, radius);
@@ -490,7 +509,9 @@ void Surface::confirmation(const ConfirmationLayout &layout, std::string_view ti
 void Surface::slot(Clip rect, const SlotView &entry) const
 {
 	const auto &p = m_theme.palette;
-	const auto state = entry.state;
+	// One precedence for combined slot states (F15): disabled clears the focus
+	// ring, validation outranks selection, selection outranks focus.
+	const auto state = style::slotState(entry.state);
 	auto border = p.border;
 	float borderWidth = px(m_theme.size.borderWidth);
 	if (style::has(state, style::State::Selected))
@@ -510,41 +531,59 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 	frame(rect, p.surfaceSunken, border, borderWidth, px(m_theme.size.radiusSmall));
 	const Clip iconRect = inset(rect, px(m_theme.space.xs));
 	const uint32_t layers = m_atlasLayers ? m_atlasLayers : UINT32_MAX;
-	const auto status = iconStatus(entry.icon, m_out.atlasGeneration(), layers);
+	// Occupancy is `count != 0`; an icon is an optional, generation-tagged
+	// handle (F08). Layer 0 is a real texture, a stale handle is not sampled and
+	// an occupied slot without a drawable icon keeps its count and its frame.
+	const bool occupied = !entry.empty();
+	const auto status = entry.icon ? iconStatus(*entry.icon, m_out.atlasGeneration(), layers)
+								   : IconStatus::MissingLayer;
 	const glm::vec4 tint = style::disabled(state) ? glm::vec4(1.f, 1.f, 1.f, 0.45f) : glm::vec4(1.f);
-	if (!entry.empty() && drawable(status))
-		m_out.icon(iconRect.rect, entry.icon, tint, m_clip);
-	else if (!entry.empty())
+	if (occupied && entry.icon && drawable(status))
+		m_out.icon(iconRect.rect, *entry.icon, tint, m_clip);
+	else if (occupied)
 	{
 		// Missing/stale icon fallback: keep the slot, mark it, never drop it.
 		fill(iconRect, p.surfaceRaised, px(m_theme.size.radiusSmall));
 		labelAligned(iconRect, std::string_view(&kFallbackGlyph, 1), style::TextRole::Body,
 			style::disabled(state) ? p.inkDisabled : p.inkMuted, 0.5f);
 	}
+
+	// Durability/progress owns a reserved band at the bottom; the quantity badge
+	// sits above it and always paints a contrast backing, so a count stays
+	// readable over a bright texture and never collides with the bar (F14).
+	const float barInset = px(m_theme.space.xxs);
+	const float barHeight = std::max(px(2.f), px(m_theme.size.borderWidth) * 2.f);
+	const Clip track = {{rect.rect.x + barInset, rect.rect.w - barHeight - barInset,
+		rect.rect.z - barInset, rect.rect.w - barInset}};
+	const auto bar = entry.progress ? entry.progress : entry.durability;
+	const float bandBottom = (bar ? track.rect.y : rect.rect.w) - barInset;
 	char badge[8]{};
 	const auto count = formatCount(entry.count, badge);
 	if (!count.empty())
 	{
 		const float roleScale = glyphScale(style::TextRole::Caption);
-		const float width = m_font.measure(count, roleScale) + px(m_theme.space.xs);
-		const float height = style::lineHeight(style::TextRole::Caption) * m_scale;
-		Clip badgeRect = {{rect.rect.z - width - px(m_theme.space.xxs), rect.rect.w - height,
-			rect.rect.z - px(m_theme.space.xxs), rect.rect.w}};
-		labelAligned(badgeRect, count, style::TextRole::Caption,
-			style::disabled(state) ? p.inkDisabled : p.ink, 1.f);
+		const float lineHeight = textStyle(style::TextRole::Caption, m_scale, m_fontScale).lineHeight();
+		const float width = std::min(size(rect).x, m_font.measure(count, roleScale) +
+			2.f * px(m_theme.space.xxs));
+		const float top = std::max(iconRect.rect.y, bandBottom - lineHeight);
+		const Clip badgeRect = {{std::max(rect.rect.x, rect.rect.z - width - barInset), top,
+			rect.rect.z - barInset, std::max(top, bandBottom)}};
+		if (badgeRect.rect.y < badgeRect.rect.w)
+		{
+			glm::vec4 backing = p.surface;
+			backing.a = m_theme.overlay.card;
+			fill(badgeRect, backing, px(m_theme.size.radiusSmall));
+			fittedLabel(inset(badgeRect, px(m_theme.space.xxs)), count, style::TextRole::Caption,
+				style::disabled(state) ? p.inkDisabled : p.ink, 1.f);
+		}
 	}
-	const float barHeight = std::max(px(2.f), px(m_theme.size.borderWidth) * 2.f);
-	const Clip track = {{rect.rect.x + px(m_theme.space.xxs), rect.rect.w - barHeight - px(m_theme.space.xxs),
-		rect.rect.z - px(m_theme.space.xxs), rect.rect.w - px(m_theme.space.xxs)}};
-	const auto bar = entry.progress ? entry.progress : entry.durability;
 	if (bar)
 	{
 		const float value = progressFraction(*bar);
 		const glm::vec4 color = entry.progress ? p.accent
 			: (value > 0.5f ? p.ok : (value > 0.2f ? p.warning : p.error));
 		fill(track, p.surface, 0.f);
-		fill({{track.rect.x, track.rect.y, track.rect.x + size(track).x * value, track.rect.w}},
-			color, 0.f);
+		fill(progressFill(track, value), color, 0.f);
 	}
 }
 

@@ -423,10 +423,13 @@ struct GameUiBackendProbe
 		engine.handleEvents();
 		SDL_Rect textArea{};
 		int cursor = 0;
-		const auto textGeometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(), sample.m_screenScale);
+		const auto textGeometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(),
+			sample.m_screenScale, sample.m_fontScale);
 		CHECK(SDL_GetTextInputArea(engine.window, &textArea, &cursor) &&
 			textArea.x + cursor == int(std::lround(textGeometry.caretX)) &&
-			textGeometry.caretX == textGeometry.clip.rect.z - sample.m_screenScale,
+			textGeometry.caretX == textGeometry.clip.rect.z - 1.f &&
+			textGeometry.glyphScale == gameui::textStyle(gameui::style::TextRole::Body,
+				sample.m_screenScale, sample.m_fontScale).glyphScale(),
 			"SDL candidate location follows the visible horizontally scrolled caret");
 		click(center("Secondary level"));
 		click(center("Enable secondary name"));

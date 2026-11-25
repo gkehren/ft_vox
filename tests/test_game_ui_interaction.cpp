@@ -1,4 +1,7 @@
+#include <Engine/PlayerUiText.hpp>
 #include <Engine/PlayerUiWidgets.hpp>
+
+#include <cmath>
 
 #include "TestMain.hpp"
 
@@ -204,15 +207,29 @@ void reusableBindings()
 	CHECK(!focus && set.key(focus, NavKey::Enter, false, false, false).action == WidgetAction::None,
 		"re-enabling does not restore focus or replay input");
 
-	set.press({50, 50}, focus, {}, 1.f);
-	set.drag({98, 50}, 1.f);
+	// F13: pointer -> value uses the painted track, so the visible ends are 0 and
+	// 1 and the midpoints land on the same values as the keyboard steps.
+	const auto slider = sliderGeometry({{0, 40, 100, 72}}, style::baseline(), 1.f);
+	const auto sliderX = [&](float fraction) {
+		return slider.track.rect.x + size(slider.track).x * fraction;
+	};
+	set.press({sliderX(0.5f), 50}, focus, {}, 1.f);
+	set.drag({sliderX(1.f), 50}, 1.f);
 	CHECK(firstSlider.value == 1.f && secondSlider.value == 0.25f, "pointer drag mutates only its bound slider");
 	set.setEnabled(3, false, focus);
-	CHECK(set.drag({8, 50}, 1.f).action == WidgetAction::None && firstSlider.value == 1.f,
+	CHECK(set.drag({sliderX(0.f), 50}, 1.f).action == WidgetAction::None && firstSlider.value == 1.f,
 		"disabled slider cancels active drag");
 	set.setEnabled(3, true, focus);
-	CHECK(set.release({8, 50}, 1.f).action == WidgetAction::None &&
-		set.drag({8, 50}, 1.f).action == WidgetAction::None, "cancelled drag cannot resume when re-enabled");
+	CHECK(set.release({sliderX(0.f), 50}, 1.f).action == WidgetAction::None &&
+		set.drag({sliderX(0.f), 50}, 1.f).action == WidgetAction::None,
+		"cancelled drag cannot resume when re-enabled");
+	CHECK(set.press({sliderX(0.25f), 50}, focus, {}, 1.f).action == WidgetAction::Change &&
+		std::abs(firstSlider.value - 0.25f) < 0.001f,
+		"a click at 25% of the visible track selects a quarter");
+	CHECK(set.drag({sliderX(0.75f), 50}, 1.f).action == WidgetAction::Change &&
+		std::abs(firstSlider.value - 0.75f) < 0.001f,
+		"dragging to 75% of the visible track selects three quarters");
+	set.release({sliderX(0.75f), 50}, 1.f);
 	set.focus(focus, 4, false);
 	CHECK(set.key(focus, NavKey::Right, false, false, false).id == 4 && secondSlider.value == 0.30f,
 		"second slider has independent keyboard behavior and change action");
@@ -238,6 +255,46 @@ void reusableBindings()
 	set.revalidate(focus);
 	CHECK(!focus && !set.editor(1) && firstField.composition().empty(),
 		"recomposition removes eligibility for fully clipped fields");
+}
+
+void textMetrics()
+{
+	// F01: one metric for painting, the caret, hit testing and the IME anchor. At
+	// every supported player scale and framebuffer density, the caret sits on a
+	// character boundary and a click on a character selects that boundary.
+	std::array<Glyph, 128> glyphs{};
+	for (auto &glyph : glyphs)
+	{
+		glyph.advance = 6.f;
+		glyph.visible = true;
+	}
+	const FontView font{glyphs};
+	const std::string value = "abcdef";
+	for (const float scale : {1.f, 1.5f, 2.f})
+		for (const float fontScale : {1.f, 0.5f})
+		{
+			TextField field;
+			field.insert(value);
+			WidgetSet set;
+			ControlId focus{};
+			set.reset({{0.f, 0.f, 600.f, 600.f}}, 600.f, 0.f);
+			set.add({1, {{0.f, 0.f, 400.f * scale, 46.f * scale}}, "value", {}, &field});
+			set.focus(focus, 1, false);
+			const auto metric = textStyle(style::TextRole::Body, scale, fontScale);
+			const auto geometry = set.editorGeometry(focus, font, scale, fontScale);
+			CHECK(geometry.glyphScale == metric.glyphScale() && geometry.lineHeight == metric.lineHeight(),
+				"the editor geometry reports the one text metric");
+			const float advance = font.measure("a", metric.glyphScale());
+			CHECK(std::abs(geometry.caretX - (geometry.origin.x + advance * float(value.size()))) < 0.01f,
+				"the caret x is the painted advance of every character before it");
+			const float click = geometry.origin.x + advance * 2.5f;
+			set.press({click, geometry.origin.y + 1.f}, focus, font, scale, false, fontScale);
+			CHECK(field.caret() == 3,
+				"a click at a character centre selects exactly that character boundary");
+			set.press({geometry.origin.x - 5.f, geometry.origin.y + 1.f}, focus, font, scale, false,
+				fontScale);
+			CHECK(field.caret() == 0, "a click left of the text selects the first boundary");
+		}
 }
 
 void textInput()
@@ -267,6 +324,38 @@ void textInput()
 	field.preedit("a\n\xc3\xa9", 2, 1);
 	CHECK(field.compositionCursor() == 1 && field.compositionEnd() == 3,
 		"filtered composition keeps offsets mapped to sanitized bytes");
+	// F09: SDL does not normalize composition units — the Windows backend sends
+	// UTF-16 code units, the Linux backends Unicode scalars. Both normalize to
+	// one scalar range, and a supplementary character is never split.
+	// U+1F332 twice, built numerically so no source encoding can interfere.
+	std::string trees;
+	for (int i = 0; i < 2; ++i)
+	{
+		trees.push_back(char(0xf0));
+		trees.push_back(char(0x9f));
+		trees.push_back(char(0x8c));
+		trees.push_back(char(0xb2));
+	}
+	const auto utf16Range = compositionRange(trees, 1, 2, CompositionUnit::Utf16);
+	const auto scalarRange = compositionRange(trees, 1, 2, CompositionUnit::Scalar);
+	// Both ends round down, so the range covers exactly the scalars that lie
+	// fully inside the requested UTF-16 range: units [1,3) -> scalar [0,1).
+	CHECK(utf16Range.start == 0 && utf16Range.length == 1,
+		"a UTF-16 range starting inside a surrogate pair rounds down to the pair");
+	CHECK(scalarRange.start == 1 && scalarRange.length == 1,
+		"the same numeric range on a scalar backend selects the second character");
+	CHECK(compositionRange(trees, -1, -1, CompositionUnit::Utf16).start == -1 &&
+			compositionRange(trees, -1, -1, CompositionUnit::Utf16).length == -1,
+		"an unset composition range stays unset on both backends");
+	CHECK(compositionRange(trees, 1, INT32_MAX, CompositionUnit::Utf16).length == 2,
+		"an end-of-text composition range clamps instead of overflowing");
+	TextField supplementary;
+	supplementary.insert("x");
+	supplementary.preedit(trees, 2, 2, CompositionUnit::Utf16);
+	CHECK(supplementary.composition().size() == 8 && supplementary.compositionCursor() == 4 &&
+			supplementary.compositionEnd() == 8,
+		"a supplementary composition range maps to byte offsets in the sanitized preedit");
+
 	std::array<Glyph, 128> glyphs{};
 	for (auto &glyph : glyphs)
 		glyph.advance = 8.f;
@@ -330,6 +419,7 @@ int main()
 	screens();
 	layoutAndWidgets();
 	reusableBindings();
+	textMetrics();
 	textInput();
 	changeNotifications();
 	return testmain::exitCode();

@@ -418,6 +418,9 @@ private:
 	client::JoinPreferences m_joinPreferences;
 	gameui::PlayerUiSettings m_playerUiSettings{};
 	std::string m_playerUiError;
+	/// True while the in-memory preference is not known to be on disk. A failed
+	/// write is retried by the next selection, even of the same value (F17).
+	bool m_playerUiDirty{};
 	std::vector<std::string> m_joinProfiles;
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;

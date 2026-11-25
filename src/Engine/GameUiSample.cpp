@@ -72,6 +72,36 @@ bool contains(glm::vec4 rect, float x, float y)
 }
 } // namespace
 
+void GameUiSample::advancePresentation()
+{
+	static constexpr float kIndeterminatePeriod = 2.f; // seconds per progress sweep
+	const auto now = std::chrono::steady_clock::now();
+	const float elapsed = m_lastFrame ? std::chrono::duration<float>(now - *m_lastFrame).count() : 0.f;
+	m_lastFrame = now;
+	const float step = gameui::presentationStep(elapsed);
+	m_toasts.advance(step);
+	m_uiPhase += step / kIndeterminatePeriod;
+	m_uiPhase -= std::floor(m_uiPhase);
+}
+
+void GameUiSample::refreshFace(SDL_Window *window)
+{
+	const float pixels = framebufferScaleFor(window);
+	if (!(pixels > 0.f) || std::abs(pixels - m_facePixels) < 0.01f)
+		return;
+	gameui::BakedFace next;
+	// A failed bake keeps the previous face: the UI degrades, it never blanks.
+	if (!gameui::bakeFace(pixels, next))
+		return;
+	m_face = std::move(next);
+	m_facePixels = pixels;
+	m_fontScale = m_face.fontScale;
+	if (m_immediate)
+		m_renderer.setFont(*m_immediate, {m_face.width, m_face.height}, m_face.coverage);
+	// Glyph metrics changed with the density: rebuild the geometry, keep state.
+	invalidateLayout();
+}
+
 void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommands &immediate,
 						VkFormat format, VkColorSpaceKHR colorSpace, bool standalone)
 {
@@ -82,6 +112,8 @@ void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommand
 	if (!gameui::bakeFace(pixels, m_face))
 		throw std::runtime_error("Game UI font atlas bake failed");
 	m_fontScale = m_face.fontScale;
+	m_facePixels = pixels;
+	m_immediate = &immediate;
 	m_renderer.init(context, immediate, {m_face.width, m_face.height}, m_face.coverage, format,
 		colorSpace);
 }
@@ -209,9 +241,8 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 	// built. A changed value cancels the in-flight press and rebuilds the next
 	// layout - never mid-paint (issue #302).
 	m_atlasLayers = uint32_t(COUNT);
-	m_uiPhase += 1.f / 60.f;
-	if (m_uiPhase >= 1.f)
-		m_uiPhase -= 1.f;
+	advancePresentation();
+	refreshFace(window);
 	if (m_scale.resolve(scaleInputsFor(window)))
 		invalidateLayout();
 	const float resolvedScale = m_scale.effective();
@@ -245,8 +276,12 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 			cancelPointerPress();
 		const auto clip = view.empty() ? m_draws.bounds() : view.intersect(m_draws.bounds());
 		const auto panel = [&](glm::vec4 rect, glm::vec4 color) { m_draws.panel(layout.rect(rect), color, clip); };
-		const auto label = [&](glm::vec2 pos, std::string_view caption, glm::vec4 color, float fontScale = 1.f) {
-			font().paint(m_draws, layout.origin + pos * layout.scale, caption, color, layout.scale * fontScale, clip);
+		// Every text path applies the framebuffer compensation, standalone proofs
+		// included (issue #302 F11); the role ratio is 1 for these HUD labels.
+		const auto label = [&](glm::vec2 pos, std::string_view caption, glm::vec4 color,
+							   float roleScale = 1.f) {
+			font().paint(m_draws, layout.origin + pos * layout.scale, caption, color,
+				layout.scale * roleScale * m_fontScale, clip);
 		};
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);

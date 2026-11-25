@@ -8,6 +8,7 @@
 #include <Renderer/GameUiRenderer.hpp>
 #include <SDL3/SDL.h>
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -82,6 +83,14 @@ private:
 	friend struct GameUiBackendProbe;
 
 	void handleWindowEvent(Uint32 type);
+	/// Re-bakes the face when the framebuffer density changed (issue #302 F11)
+	/// and hands the new atlas to the renderer at a safe synchronization point.
+	void refreshFace(SDL_Window *window);
+	/// Ages notifications and the indeterminate phase from a monotonic clock
+	/// (issue #302 F10): the timers are frame-rate independent.
+	void advancePresentation();
+	/// Monotonic notification id, independent of any animation phase.
+	uint32_t nextToastId() { return ++m_toastSerial; }
 	bool windowInteractive() const;
 	void activate(const char *source);
 	gameui::FontView font() const { return {m_face.glyphs}; }
@@ -99,6 +108,9 @@ private:
 	std::optional<gameui::RecordedStats> m_lastRecordedStats;
 	gameui::BakedFace m_face;
 	float m_fontScale{1.f};
+	/// Framebuffer pixels per logical point the current face was baked at.
+	float m_facePixels{1.f};
+	ImmediateCommands *m_immediate{};
 	SDL_WindowFlags m_windowFlags{};
 	glm::vec4 m_button{};
 	unsigned m_activations{};
@@ -111,6 +123,9 @@ private:
 	gameui::Slider m_slider{0.5f}, m_secondarySlider{0.25f};
 	gameui::ListBox m_list, m_secondaryList;
 	gameui::Clip m_panel{};
+	/// Screen stack revision whose presentation state is initialized. Layout
+	/// invalidation and screen entry are separate events (issue #302 F16).
+	uint64_t m_screenRevision{UINT64_MAX};
 	uint64_t m_layoutRevision{UINT64_MAX};
 	float m_screenScale{1.f};
 	uint32_t m_atlasLayers{};
@@ -120,6 +135,8 @@ private:
 	std::optional<gameui::ScalePolicy> m_scaleRequest;
 	std::string m_settingsNotice;
 	float m_uiPhase{};
+	uint32_t m_toastSerial{};
+	std::optional<std::chrono::steady_clock::time_point> m_lastFrame;
 	gameui::TextField m_galleryName;
 	gameui::Toggle m_galleryToggle{true};
 	gameui::Slider m_gallerySlider{0.4f};

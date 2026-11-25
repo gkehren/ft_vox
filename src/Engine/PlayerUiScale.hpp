@@ -120,18 +120,34 @@ inline bool isUserScale(float scale)
 		[scale](float step) { return std::abs(step - scale) < 0.001f; });
 }
 
+/// True when both inputs describe a real window: a minimized 0x0 window and a
+/// lost DPI query are "no information", not "tiny window".
+inline bool validScaleInputs(ScaleInputs inputs)
+{
+	return inputs.logicalSize.x > 0.f && inputs.logicalSize.y > 0.f &&
+		std::isfinite(inputs.logicalSize.x) && std::isfinite(inputs.logicalSize.y) &&
+		inputs.contentScale > 0.f && std::isfinite(inputs.contentScale);
+}
+
 /// Auto policy: the content scale, capped so the authored metrics fit the
-/// window, snapped down to a supported step. Degenerate inputs (0x0 during
-/// minimize) keep the content scale instead of collapsing to the floor.
+/// window, snapped down onto a supported step.
+///
+///   fit = min(width / 900, height / 480)          (the authored fit box)
+///   scale = snapDown(min(contentScale, fit))
+///
+/// There is no branch at `fit >= 1`: crossing the reference size is continuous,
+/// which is what makes the same window keep the same scale while it is resized
+/// around 900x480 (issue #302 F04). Degenerate inputs fall back to the snapped
+/// content scale; `ScaleController` keeps the last valid value instead.
 inline float autoScale(ScaleInputs inputs)
 {
 	const float base = snapDown(inputs.contentScale);
-	if (!(inputs.logicalSize.x > 0.f) || !(inputs.logicalSize.y > 0.f))
+	if (!validScaleInputs(inputs))
 		return base;
 	const float fit = std::min(inputs.logicalSize.x / kFitSize.x, inputs.logicalSize.y / kFitSize.y);
 	if (!(fit > 0.f) || !std::isfinite(fit))
 		return base;
-	return snapDown(std::min(base, fit >= 1.f ? base : fit));
+	return snapDown(std::min(base, fit));
 }
 
 /// Resolve a policy against one frame's inputs. A Fixed policy is snapped onto
@@ -152,6 +168,11 @@ public:
 
 	/// Resolves this frame's scale. Returns true when the effective value
 	/// changed (the host must then cancel in-flight input and rebuild layout).
+	///
+	/// An Auto policy with invalid inputs (minimized window, lost DPI query)
+	/// keeps the last valid Auto scale instead of jumping to the 100% fallback,
+	/// so restoring the window never flashes a different layout (F04). Fixed mode
+	/// never looks at the window size at all.
 	bool resolve(ScaleInputs inputs)
 	{
 		if (m_hasPending)
@@ -160,7 +181,24 @@ public:
 			m_hasPending = false;
 		}
 		m_inputs = inputs;
+		if (m_policy.mode == ScaleMode::Auto && !validScaleInputs(inputs) && m_hasAutoScale)
+		{
+			// No fresh information: keep the last valid Auto scale. If the policy
+			// just switched back from Fixed, restore it instead of resurrecting
+			// the override.
+			m_resolved = true;
+			if (std::abs(m_lastAuto - m_effective) < 0.0001f)
+				return false;
+			m_effective = m_lastAuto;
+			++m_revision;
+			return true;
+		}
 		const float next = resolveScale(m_policy, inputs);
+		if (m_policy.mode == ScaleMode::Auto && validScaleInputs(inputs))
+		{
+			m_lastAuto = next;
+			m_hasAutoScale = true;
+		}
 		if (m_resolved && std::abs(next - m_effective) < 0.0001f)
 		{
 			m_resolved = true;
@@ -184,7 +222,8 @@ private:
 	ScalePolicy m_pending{};
 	ScaleInputs m_inputs{};
 	float m_effective{1.f};
+	float m_lastAuto{1.f};
 	uint64_t m_revision{};
-	bool m_hasPending{}, m_resolved{};
+	bool m_hasPending{}, m_resolved{}, m_hasAutoScale{};
 };
 } // namespace gameui

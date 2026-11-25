@@ -41,9 +41,12 @@ NavKey navKey(SDL_Keycode code)
 
 void GameUiSample::invalidateLayout()
 {
+	// Geometry only (issue #302 F16): a scale or resolution change rebuilds the
+	// layout but keeps focus, selection, notifications, field values and the
+	// scroll offset. Screen entry is detected separately by m_screenRevision and
+	// is the only place that resets presentation state or cancels composition.
 	cancelPointerPress();
 	m_layoutRevision = UINT64_MAX;
-	m_widgets.cancelEditing();
 }
 
 void GameUiSample::resetScreens()
@@ -88,8 +91,16 @@ bool GameUiSample::syncInventory(bool open)
 
 void GameUiSample::buildScreen(Clip scene, float scale)
 {
-	const bool newScreen = m_layoutRevision != m_screens.revision();
-	const float offset = newScreen ? 0.f : m_widgets.viewport().offset;
+	const bool entered = m_screenRevision != m_screens.revision();
+	const bool rebuilt = m_layoutRevision != m_screens.revision();
+	const float offset = entered ? 0.f : m_widgets.viewport().offset;
+	if (entered)
+	{
+		m_screenRevision = m_screens.revision();
+		m_widgets.cancelEditing();
+	}
+	else if (rebuilt)
+		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
 	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 292.f : 164.f);
@@ -147,8 +158,8 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		add(HudMock, Button{}, 36.f, "HUD mock");
 	}
 	auto focus = m_screens.focus();
-	m_widgets.focus(focus, focus, newScreen || moved);
-	if (newScreen && !focus)
+	m_widgets.focus(focus, focus, entered || rebuilt || moved);
+	if (entered && !focus)
 		if (const auto *initial = m_widgets.step(0, false))
 			m_widgets.focus(focus, initial->id, true);
 	m_screens.focus(focus);
@@ -224,7 +235,9 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 {
 	auto *field = interactive && m_screens.nativeScreen() && m_layoutRevision == m_screens.revision()
 		? m_widgets.editor(m_screens.focus()) : nullptr;
-	const auto geometry = field ? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale) : TextGeometry{};
+	const auto geometry = field
+		? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale, m_fontScale)
+		: TextGeometry{};
 	if (geometry.clip.empty())
 		field = nullptr;
 	if (m_sdlEditor && m_sdlEditor != field)
@@ -240,8 +253,10 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 	const auto &clip = geometry.clip.rect;
 	const int left = int(std::floor(clip.x));
 	const int top = int(std::floor(std::clamp(geometry.origin.y, clip.y, clip.w)));
+	// The input area is the editor's own content rect and line: no hardcoded
+	// line height can drift away from the painted caret (issue #302 F01).
 	const SDL_Rect area{left, top, std::max(1, int(std::ceil(clip.z)) - left),
-		std::max(1, int(std::ceil(std::min(clip.w, geometry.origin.y + 13.f * m_screenScale))) - top)};
+		std::max(1, int(std::ceil(std::min(clip.w, geometry.origin.y + geometry.lineHeight))) - top)};
 	SDL_SetTextInputArea(window, &area, int(std::lround(geometry.caretX)) - left);
 }
 
@@ -280,14 +295,16 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		if (event.button.button == SDL_BUTTON_LEFT)
 			result = m_widgets.press({event.button.x, event.button.y}, focus, font(), m_screenScale,
-				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
+				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0, m_fontScale, style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_MOTION:
-		result = m_widgets.drag({event.motion.x, event.motion.y}, m_screenScale);
+		result = m_widgets.drag({event.motion.x, event.motion.y}, m_screenScale,
+			style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 		if (event.button.button == SDL_BUTTON_LEFT)
-			result = m_widgets.release({event.button.x, event.button.y}, m_screenScale);
+			result = m_widgets.release({event.button.x, event.button.y}, m_screenScale,
+				style::baseline());
 		break;
 	case SDL_EVENT_MOUSE_WHEEL:
 		m_widgets.scroll({event.wheel.mouse_x, event.wheel.mouse_y},

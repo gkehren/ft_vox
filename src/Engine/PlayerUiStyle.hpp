@@ -281,22 +281,43 @@ inline constexpr bool disabled(State state)
 	return has(state, State::Disabled);
 }
 
+/// Disabled is final: it clears the *interaction* flags (focus, hover, press)
+/// so a disabled control can never paint an active focus ring or hover face.
+/// Selection survives, because a selected-but-disabled row or slot still tells
+/// the player what is selected (issue #302 F15).
+inline constexpr State settleState(State state)
+{
+	if (!disabled(state))
+		return state;
+	const auto interaction = static_cast<uint8_t>(State::Focused | State::Hovered | State::Pressed);
+	const auto flags = static_cast<uint8_t>(state) & static_cast<uint8_t>(~interaction);
+	return static_cast<State>(flags);
+}
+
 /// The flag combination for an interactive control. One function so the
-/// button, row, field and slot components cannot drift apart.
+/// button, row, field, toggle, slider and slot components cannot drift apart.
 inline constexpr State interactiveState(bool enabled, bool hovered, bool pressed, bool focused, bool selected)
 {
 	State state = State::Rest;
-	if (hovered)
+	if (enabled && hovered)
 		state |= State::Hovered;
-	if (pressed)
+	if (enabled && pressed)
 		state |= State::Pressed;
-	if (focused)
+	if (enabled && focused)
 		state |= State::Focused;
 	if (selected)
 		state |= State::Selected;
 	if (!enabled)
 		state |= State::Disabled;
-	return state;
+	return settleState(state);
+}
+
+/// A slot arrives with its own combination (selected, disabled, pending, error,
+/// focused). One precedence: disabled clears focus, validation outranks
+/// selection for the border, selection outranks focus.
+inline constexpr State slotState(State state)
+{
+	return settleState(state);
 }
 
 // --- Resolved component tokens --------------------------------------------
@@ -372,6 +393,22 @@ enum class Validation : uint8_t { None = 0, Pending, Error };
 /// Field: sunken well, border color carries the validation state. A focused
 /// field with no validation feedback keeps the neutral focus ink so validation
 /// outranks focus (a rejected value must stay visibly rejected while typing).
+/// Toggle indicator face: off is the sunken well, on is the accent, disabled is
+/// never accent (it reads as unavailable, not as "on").
+inline glm::vec4 toggleFace(const Theme &theme, State state, bool on)
+{
+	if (disabled(state))
+		return theme.palette.surfaceSunken;
+	return on ? theme.palette.accent : theme.palette.surfaceSunken;
+}
+
+/// Slider fill: the accent, or the disabled ink so a dead slider never looks
+/// draggable.
+inline glm::vec4 sliderFill(const Theme &theme, State state)
+{
+	return disabled(state) ? theme.palette.inkDisabled : theme.palette.accent;
+}
+
 inline ControlTokens fieldTokens(const Theme &theme, State state, Validation validation)
 {
 	const Palette &p = theme.palette;

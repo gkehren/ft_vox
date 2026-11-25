@@ -168,6 +168,47 @@ void notifications()
 			queue.newest()->id == 99,
 		"an overflowing toast drops the oldest instead of growing the queue");
 	CHECK(queue.at(ToastQueue::kCapacity) == nullptr, "the queue is bounded");
+
+	// F07: the queue owns its text. A toast pushed from temporaries survives
+	// their destruction, and an over-long field is bounded on a scalar boundary.
+	{
+		std::string title = "Saved ";
+		title += "world";
+		ToastQueue owned;
+		owned.push({.title = title, .body = std::string(title) + " state", .id = 1});
+		title.assign("destroyed");
+		CHECK(owned.newest() && owned.newest()->title == "Saved world" &&
+				owned.newest()->body == "Saved world state",
+			"a toast keeps its own copy after the source strings are gone");
+	}
+	{
+		ToastQueue bounded;
+		const std::string longText(size_t(Toast::kMaxText) + 40, 'x');
+		bounded.push({.title = longText, .body = longText, .id = 1});
+		CHECK(bounded.newest() && bounded.newest()->title.size() == Toast::kMaxText &&
+				bounded.newest()->body.size() == Toast::kMaxText,
+			"an over-long notification is bounded instead of growing the queue");
+	}
+
+	// F10: ageing is driven by elapsed time, so the wall-clock lifetime is the
+	// same at every frame rate (30 / 60 / 144 / 240 Hz).
+	const auto expiredAfter = [](float hz) {
+		ToastQueue timed;
+		timed.push({.title = "t", .lifetime = 1.f, .id = 1});
+		float elapsed = 0.f;
+		for (int frame = 0; frame < int(hz) + 1 && timed.size(); ++frame)
+		{
+			timed.advance(presentationStep(1.f / hz));
+			elapsed += 1.f / hz;
+		}
+		return timed.size() == 0 ? elapsed : 1000.f;
+	};
+	float worst = 0.f;
+	for (const float hz : {30.f, 60.f, 144.f, 240.f})
+		worst = std::max(worst, std::abs(expiredAfter(hz) - 1.f));
+	CHECK(worst < 0.05f, "a one-second toast expires after one second at 30-240 FPS");
+	CHECK(presentationStep(-1.f) == 0.f && presentationStep(10.f) == 0.25f,
+		"a negative or hitch-long frame step is clamped for presentation timers");
 }
 
 void confirmations()
@@ -187,6 +228,25 @@ void confirmations()
 	const auto small = confirmationLayout({{0.f, 0.f, 320.f, 200.f}}, {420.f, 180.f}, false, theme(), 1.f);
 	CHECK(inside(small.panel, {{0.f, 0.f, 320.f, 200.f}}),
 		"a confirmation clamps into a window smaller than its preferred size");
+
+	// F05: one viewport transform for the whole layout. Placing a scrolled
+	// confirmation is identical to laying it out at the placed rect, so the
+	// panel and the interactive buttons can never drift apart while scrolling.
+	ScrollViewport scrolled{{{0.f, 0.f, 800.f, 400.f}}, 900.f, 0.f};
+	scrolled.setOffset(150.f);
+	const auto authored = confirmationLayout({{0.f, 600.f, 800.f, 780.f}}, {420.f, 180.f}, true,
+		theme(), 1.f);
+	const auto placedPanel = scrolled.place(authored.panel);
+	const auto placedCancel = scrolled.place(authored.cancel);
+	const auto placedConfirm = scrolled.place(authored.confirm);
+	const auto rebuilt = confirmationLayout(scrolled.place({{0.f, 600.f, 800.f, 780.f}}),
+		{420.f, 180.f}, true, theme(), 1.f);
+	CHECK(placedPanel == rebuilt.panel && placedCancel == rebuilt.cancel &&
+			placedConfirm == rebuilt.confirm,
+		"a scrolled confirmation keeps panel, cancel and confirm in one coordinate space");
+	CHECK(rebuilt.cancel.rect.z <= rebuilt.confirm.rect.x &&
+			inside(rebuilt.cancel, rebuilt.panel) && inside(rebuilt.confirm, rebuilt.panel),
+		"the scrolled confirmation's buttons still align with its panel");
 }
 
 void progressAndIcons()
@@ -313,6 +373,45 @@ void painting()
 	for (const auto &batch : narrow.batches())
 		scissored = scissored && inside(batch.clip, {{500.f, 400.f, 600.f, 460.f}});
 	CHECK(scissored, "component batches are scissored to the surface clip, never beyond it");
+
+	// F12: a fitted label stays inside its own component rect, a border can never
+	// be wider than the box it frames and an indeterminate band never leaves its
+	// track — regardless of how narrow the caller's geometry is.
+	const auto outsideText = [&](const DrawList &list, const Clip &box) {
+		for (const auto &quad : list.quads())
+			if (quad.layer == -2 && (quad.rect.x < box.rect.x - 0.01f ||
+									 quad.rect.z > box.rect.z + 0.01f ||
+									 quad.rect.y < box.rect.y - 0.01f ||
+									 quad.rect.w > box.rect.w + 0.01f))
+				return true;
+		return false;
+	};
+	const Clip buttonBox{{20.f, 300.f, 60.f, 328.f}};
+	const Clip ringBox{{100.f, 300.f, 104.f, 304.f}};
+	const Clip trackBox{{140.f, 300.f, 146.f, 304.f}};
+	DrawList tightDraws;
+	tightDraws.reset({640.f, 480.f}, 7);
+	Surface tight(tightDraws, kFont, theme(), 1.f, view);
+	tight.button(buttonBox, "An extremely long button label", style::ButtonVariant::Primary,
+		style::State::Rest);
+	DrawList isolated;
+	isolated.reset({640.f, 480.f}, 7);
+	Surface ringSurface(isolated, kFont, theme(), 1.f, view);
+	ringSurface.ring(ringBox, theme().palette.border, 20.f, 2.f);
+	bool ringInside = true;
+	for (const auto &quad : isolated.quads())
+		ringInside = ringInside && inside(Clip{quad.rect}, ringBox);
+	CHECK(!outsideText(tightDraws, buttonBox), "a long label is fitted inside its button");
+	CHECK(ringInside, "a border wider than its box is clamped to the geometry");
+	DrawList band;
+	band.reset({640.f, 480.f}, 7);
+	Surface bandSurface(band, kFont, theme(), 1.f, view);
+	bandSurface.progress(trackBox, 0.f, true, 1.f);
+	bool bandInside = true;
+	for (const auto &quad : band.quads())
+		bandInside = bandInside && quad.rect.x >= trackBox.rect.x - 0.01f &&
+			quad.rect.z <= trackBox.rect.z + 0.01f;
+	CHECK(bandInside, "an indeterminate band is clamped to its progress track");
 }
 
 void slotPaintingAndFallbacks()
@@ -323,30 +422,30 @@ void slotPaintingAndFallbacks()
 	};
 	DrawList valid;
 	valid.reset({200.f, 200.f}, 9);
-	paint({.icon = {9, 3}, .count = 42}, valid);
+	paint({.icon = AtlasIcon{9, 3}, .count = 42}, valid);
 	CHECK(countLayer(valid, 3) == 1, "a current icon paints exactly one atlas quad");
 	CHECK(countLayer(valid, -2) > 0, "the stack count paints its glyphs");
 
 	DrawList stale;
 	stale.reset({200.f, 200.f}, 9);
-	paint({.icon = {8, 3}, .count = 42}, stale);
+	paint({.icon = AtlasIcon{8, 3}, .count = 42}, stale);
 	CHECK(countLayer(stale, 3) == 0 && countLayer(stale, -2) > 0 && stale.dropped() == 0,
 		"a stale icon falls back to a placeholder that keeps the slot, count and frame");
 
 	DrawList missing;
 	missing.reset({200.f, 200.f}, 9);
-	paint({.icon = {9, 40}, .count = 1}, missing);
+	paint({.icon = AtlasIcon{9, 40}, .count = 1}, missing);
 	CHECK(countLayer(missing, 40) == 0 && missing.quads().size() > 0,
 		"a missing atlas layer is replaced by the placeholder, not by nothing");
 
 	DrawList durable;
 	durable.reset({200.f, 200.f}, 9);
-	paint({.icon = {9, 3}, .count = 1, .state = style::State::Selected, .durability = 0.15f}, durable);
+	paint({.icon = AtlasIcon{9, 3}, .count = 1, .state = style::State::Selected, .durability = 0.15f}, durable);
 	CHECK(countColor(durable, theme().palette.error) > 0,
 		"an optional durability indicator colours itself from the status tokens");
 	DrawList pending;
 	pending.reset({200.f, 200.f}, 9);
-	paint({.icon = {9, 3}, .count = 1, .state = style::State::Pending, .progress = 0.5f}, pending);
+	paint({.icon = AtlasIcon{9, 3}, .count = 1, .state = style::State::Pending, .progress = 0.5f}, pending);
 	CHECK(countColor(pending, theme().palette.accent) > 0 &&
 			countColor(pending, theme().palette.pending) > 0,
 		"an optional progress indicator and the pending border come from tokens");
@@ -355,13 +454,34 @@ void slotPaintingAndFallbacks()
 	DrawList gridDraws;
 	gridDraws.reset({400.f, 80.f}, 9);
 	std::array<SlotView, 9> slots{};
-	slots[0] = {.icon = {9, 1}, .count = 3, .state = style::State::Selected};
-	slots[4] = {.icon = {9, 2}, .count = 64};
+	slots[0] = {.icon = AtlasIcon{9, 1}, .count = 3, .state = style::State::Selected};
+	slots[4] = {.icon = AtlasIcon{9, 2}, .count = 64};
 	Surface surface(gridDraws, kFont, theme(), 1.f, gridDraws.bounds(), 16);
 	surface.slotGrid(grid, slots, 4);
 	CHECK(countLayer(gridDraws, 1) == 1 && countLayer(gridDraws, 2) == 1,
 		"an empty slot paints its frame without an icon");
 	CHECK(gridDraws.dropped() == 0, "a nine-slot grid stays inside the frame budget");
+
+	// F08: occupancy and icon validity are separate facts. Atlas layer 0 is a
+	// real texture (BEDROCK), an occupied slot without a drawable icon keeps its
+	// count and its frame, and an empty slot stays empty.
+	DrawList bedrock;
+	bedrock.reset({200.f, 200.f}, 9);
+	paint({.icon = AtlasIcon{9, 0}, .count = 5}, bedrock);
+	CHECK(countLayer(bedrock, 0) == 1 && countColor(bedrock, theme().palette.error) == 0,
+		"atlas layer 0 is a valid icon, so an occupied BEDROCK-style slot draws");
+
+	DrawList noIcon;
+	noIcon.reset({200.f, 200.f}, 9);
+	paint({.count = 5}, noIcon);
+	CHECK(countLayer(noIcon, -2) > 0 && countLayer(noIcon, 0) == 0,
+		"an occupied slot without an icon keeps its count and paints the placeholder");
+
+	DrawList emptySlot;
+	emptySlot.reset({200.f, 200.f}, 9);
+	paint({}, emptySlot);
+	CHECK(countLayer(emptySlot, -2) == 0 && SlotView{}.empty(),
+		"an empty slot paints no placeholder and no badge");
 }
 
 void hudMock()
@@ -395,7 +515,7 @@ void hudMock()
 		surface.crosshair(view, theme().palette.ink);
 		const auto grid = slotGrid(layout.hotbar, layout.hotbarSlots, 1, layout.hotbarGap);
 		std::array<SlotView, 9> slots{};
-		slots[2] = {.icon = {5, 1}, .count = 12, .state = style::State::Selected};
+		slots[2] = {.icon = AtlasIcon{5, 1}, .count = 12, .state = style::State::Selected};
 		surface.slotGrid(grid, slots, 2);
 		surface.statusIndicator(layout.status, style::Status::Ok, "60 fps  1/2/3");
 		surface.toast(layout.toast,

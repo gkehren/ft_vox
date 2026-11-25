@@ -319,6 +319,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 
 void Engine::loadPlayerUiPreferences()
 {
+	m_playerUiDirty = false;
 	try
 	{
 		const auto status = m_playerUiSettings.load(m_savesRoot / ".client-profiles" / "player-ui.txt");
@@ -333,8 +334,12 @@ void Engine::loadPlayerUiPreferences()
 	}
 	catch (const std::exception &)
 	{
+		// Same message and log on the exception path: a read failure is never
+		// silent, whichever way it surfaced (F17).
 		m_playerUiSettings = {};
+		m_playerUiDirty = false;
 		m_playerUiError = "Could not read the saved player interface settings. Defaults apply.";
+		std::cerr << "[ui] " << m_playerUiError << '\n';
 	}
 	if (m_playerUi)
 	{
@@ -355,9 +360,15 @@ void Engine::persistPlayerUiPreferences()
 		saved = false;
 	}
 	if (saved)
+	{
 		m_playerUiError.clear();
+		m_playerUiDirty = false;
+	}
 	else
 	{
+		// Stay dirty: the next request retries rather than pretending the value
+		// reached the disk (F17).
+		m_playerUiDirty = true;
 		m_playerUiError = "Could not save the player interface settings. The change applies for this run.";
 		std::cerr << "[ui] " << m_playerUiError << '\n';
 	}
@@ -370,13 +381,17 @@ void Engine::applyPlayerUiScaleRequests()
 	if (!m_playerUi)
 		return;
 	const auto request = m_playerUi->takeScaleRequest();
-	if (!request || *request == m_playerUiSettings.scale)
-	{
-		if (request)
-			m_playerUi->setScalePolicy(*request);
+	if (!request)
 		return;
-	}
-	m_playerUiSettings.scale = *request;
 	m_playerUi->setScalePolicy(*request);
-	persistPlayerUiPreferences();
+	if (*request != m_playerUiSettings.scale)
+	{
+		m_playerUiSettings.scale = *request;
+		m_playerUiDirty = true;
+	}
+	// Selecting the same value again is a deliberate retry: a dirty record is
+	// written again even though the in-memory value already matches (F17). No
+	// frame writes anything when nothing was requested.
+	if (m_playerUiDirty)
+		persistPlayerUiPreferences();
 }

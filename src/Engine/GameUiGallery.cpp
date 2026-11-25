@@ -68,7 +68,7 @@ SlotView sampleSlot(const SampleSlot &sample, uint64_t generation, style::State 
 	view.state = state;
 	if (!sample.count)
 		return view;
-	view.icon = {generation, sample.layer};
+	view.icon = AtlasIcon{generation, sample.layer};
 	view.count = sample.count;
 	return view;
 }
@@ -115,21 +115,28 @@ void GameUiSample::openScreen(Screen screen)
 void GameUiSample::buildGallery(Clip scene, float scale)
 {
 	const auto &theme = gameui::style::baseline();
-	const bool fresh = m_layoutRevision != m_screens.revision();
-	const float offset = fresh ? 0.f : m_widgets.viewport().offset;
+	// Screen entry and layout rebuild are different events (F16): only entering
+	// the gallery resets its sample state; a scale or resolution change keeps the
+	// field value, the list selection, the chosen slot, the notifications and the
+	// scroll offset (clamped by WidgetSet::reset to the new content height).
+	const bool entered = m_screenRevision != m_screens.revision();
+	const bool rebuilt = m_layoutRevision != m_screens.revision();
+	const float offset = entered ? 0.f : m_widgets.viewport().offset;
 	m_gallery = galleryLayout(scene, theme, scale);
 	m_galleryList.items = kSavedWorlds;
 	const bool moved = m_gallery.panel != m_panel;
 	m_panel = m_gallery.panel;
-	if (moved)
-		m_widgets.cancelPress();
-	if (fresh)
+	if (entered)
 	{
+		m_screenRevision = m_screens.revision();
+		m_widgets.cancelEditing();
 		m_toasts.clear();
 		m_toasts.push({.title = "Design system", .body = "All components use the same tokens.",
-			.status = style::Status::Info, .lifetime = 8.f, .id = 1});
+			.status = style::Status::Info, .lifetime = 8.f, .id = nextToastId()});
 		m_gallerySlot = 2;
 	}
+	else if (moved || rebuilt)
+		m_widgets.cancelPress();
 	m_widgets.reset(m_gallery.body, m_gallery.contentHeight, offset);
 	const auto s = m_gallery.scale;
 	// Widgets are positioned from the same geometry the painter uses: the
@@ -231,8 +238,8 @@ void GameUiSample::buildGallery(Clip scene, float scale)
 		}
 	}
 	auto focus = m_screens.focus();
-	m_widgets.focus(focus, focus, fresh || moved);
-	if ((fresh || moved) && !focus)
+	m_widgets.focus(focus, focus, entered || rebuilt || moved);
+	if (entered && !focus)
 		if (const auto *initial = m_widgets.step(0, false))
 			m_widgets.focus(focus, initial->id, true);
 	m_screens.focus(focus);
@@ -245,11 +252,13 @@ void GameUiSample::buildHudMock(Clip scene, float scale)
 	m_screenScale = scale;
 	m_hudMock = hudMockLayout(scene, theme, scale);
 	m_panel = scene;
-	if (m_layoutRevision != m_screens.revision())
+	if (m_screenRevision != m_screens.revision())
 	{
+		m_screenRevision = m_screens.revision();
+		m_widgets.cancelEditing();
 		m_toasts.clear();
 		m_toasts.push({.title = "Welcome back", .body = "Seed 1337 - survival",
-			.status = style::Status::Ok, .lifetime = 0.f, .id = 1});
+			.status = style::Status::Ok, .lifetime = 0.f, .id = nextToastId()});
 		m_gallerySlot = 1;
 	}
 	m_widgets.reset(scene, 0.f, 0.f);
@@ -285,10 +294,13 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 	}
 
 	const auto &theme = gameui::style::baseline();
-	auto paint = surface(m_gallery.body.intersect(m_draws.bounds()));
 	const auto s = m_gallery.scale;
 	const auto viewport = m_widgets.viewport();
-	paint.card(m_gallery.panel);
+	// The card is clipped by the viewport and its content by the scroll body
+	// (F12): the frame keeps its border and padding while the sections scroll
+	// underneath it, and neither needs a per-section scissor.
+	surface(m_draws.bounds()).card(m_gallery.panel);
+	auto paint = surface(m_gallery.body.intersect(m_draws.bounds()));
 	// Sections share the body clip: clipping per section would split the draw
 	// list into one scissor per section and exhaust the batch budget. The
 	// surface clip already stops anything that scrolls out of the body.
@@ -409,10 +421,13 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 		const auto anchor = glm::vec2{area.rect.z - 40.f * s, area.rect.y + 30.f * s};
 		paint.tooltip(area, anchor, "Instanced tooltip inside the section");
 	}
-	// 7 — Confirmation.
+	// 7 — Confirmation. The whole layout — panel, title, body and the two
+	// interactive buttons — is placed by the same viewport transform, so the
+	// dialog stays coherent while the gallery scrolls (F05).
 	{
-		paint.confirmation(m_confirmation, "Delete this world?",
-			"The save and its checkpoints are removed.");
+		const auto area = contentRect(7);
+		paint.confirmation(confirmationLayout(area, size(area), true, theme, s),
+			"Delete this world?", "The save and its checkpoints are removed.");
 	}
 	// 8 — Inventory slots: selection, empty, disabled, pending and durability.
 	{
@@ -477,29 +492,29 @@ GameUiSample::InputResult GameUiSample::applyGalleryActivate(ControlId id)
 	{
 	case PrimaryAction:
 		m_toasts.push({.title = "Primary action", .body = "One command, one intent.",
-			.status = style::Status::Ok, .lifetime = 4.f, .id = uint32_t(m_uiPhase * 100.f) + 10u});
+			.status = style::Status::Ok, .lifetime = 4.f, .id = nextToastId()});
 		return InputResult::Consumed;
 	case SecondaryAction:
 		m_toasts.push({.title = "Secondary action", .status = style::Status::Info, .lifetime = 4.f,
-			.id = uint32_t(m_uiPhase * 100.f) + 20u});
+			.id = nextToastId()});
 		return InputResult::Consumed;
 	case QuietAction:
 		m_toasts.push({.title = "Quiet action", .status = style::Status::Info, .lifetime = 3.f,
-			.id = uint32_t(m_uiPhase * 100.f) + 30u});
+			.id = nextToastId()});
 		return InputResult::Consumed;
 	case DangerAction:
 		m_toasts.push({.title = "Danger action", .body = "Cancelled - nothing was deleted.",
-			.status = style::Status::Error, .lifetime = 4.f, .id = uint32_t(m_uiPhase * 100.f) + 40u});
+			.status = style::Status::Error, .lifetime = 4.f, .id = nextToastId()});
 		return InputResult::Consumed;
 	case ToastAction:
 		m_toasts.push({.title = "Notification", .body = "Queued, bounded, expires on its own.",
-			.status = style::Status::Warning, .lifetime = 4.f, .id = uint32_t(m_uiPhase * 100.f) + 50u});
+			.status = style::Status::Warning, .lifetime = 4.f, .id = nextToastId()});
 		return InputResult::Consumed;
 	case ConfirmCancel:
 	case ConfirmContinue:
 		m_toasts.push({.title = id == ConfirmCancel ? "Cancelled" : "Continued",
 			.body = "A destructive confirmation starts on Cancel.", .status = style::Status::Info,
-			.lifetime = 4.f, .id = uint32_t(m_uiPhase * 100.f) + 60u});
+			.lifetime = 4.f, .id = nextToastId()});
 		return InputResult::Consumed;
 	case SlotStrip:
 		m_gallerySlot = (m_gallerySlot + 1) % int(kSampleStacks.size());

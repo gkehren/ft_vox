@@ -42,14 +42,17 @@ namespace gameui
 /// looks the same in the HUD, the inventory panel and the gallery.
 struct SlotView
 {
-	AtlasIcon icon{};                // generation-tagged atlas layer; layer 0 = empty
-	uint32_t count{};                // 0/1 paint no badge
+	/// Occupancy and icon validity are separate facts (issue #302 F08): atlas
+	/// layer 0 is a real texture (BEDROCK lives there), so an occupied slot with
+	/// no drawable icon keeps its count and state and paints the placeholder.
+	std::optional<AtlasIcon> icon;
+	uint32_t count{};                // 0 = empty; 1 paints no badge
 	style::State state{};            // Selected/Disabled/Focused/Error/Pending
 	std::string_view label{};        // tooltip/accessibility text, never painted inside
 	std::optional<float> durability; // 0..1 — future tool metadata, presentation only
 	std::optional<float> progress;   // 0..1 — pending command feedback
 
-	bool empty() const { return icon.layer == 0; }
+	bool empty() const { return count == 0; }
 };
 
 /// Grid geometry for a hotbar strip or an inventory grid. Cell edges derive
@@ -102,15 +105,28 @@ glm::vec2 tooltipExtent(FontView font, std::string_view text, const style::Theme
 
 // --- Notifications / toasts -----------------------------------------------
 
+/// One notification. The queue OWNS the text (issue #302 F07): a toast pushed
+/// from a temporary string stays valid after that string is gone, and painting
+/// never allocates. Text is bounded to kMaxText bytes per field.
 struct Toast
 {
-	std::string_view title{};
-	std::string_view body{};
+	static constexpr size_t kMaxText = 96;
+
+	std::string title{};
+	std::string body{};
 	style::Status status{style::Status::Info};
 	float lifetime{4.f}; // seconds; <= 0 = sticky until dismissed
 	float age{};
 	uint32_t id{};
 };
+
+/// One clamped frame step for presentation timers (notification ageing, the
+/// indeterminate progress phase). Measured with a monotonic clock, never a frame
+/// count, and capped so a hitch cannot expire a toast early (issue #302 F10).
+inline float presentationStep(float seconds)
+{
+	return std::clamp(seconds, 0.f, 0.25f);
+}
 
 /// Bounded newest-first toast queue with deterministic expiry. Presentation
 /// state only: the host pushes session/world notifications and the queue owns
@@ -120,7 +136,8 @@ class ToastQueue
 public:
 	static constexpr size_t kCapacity = 4;
 
-	/// Push a toast. Returns false and drops the oldest entry when full.
+	/// Push a toast, copying (and bounding) its text. Returns false when the
+	/// queue was full and the oldest entry had to be dropped.
 	bool push(Toast toast);
 	/// Age the queue by `dt` seconds and retire expired entries.
 	void advance(float dt);
@@ -200,7 +217,8 @@ public:
 	/// Glyph-space multiplier for a role at the current player scale.
 	float glyphScale(style::TextRole role) const
 	{
-		return style::typeScale(role) * m_scale * m_fontScale;
+		// The same metric the caret, hit testing and the IME anchor use.
+		return gameui::textStyle(role, m_scale, m_fontScale).glyphScale();
 	}
 	const style::Theme &theme() const { return m_theme; }
 	FontView font() const { return m_font; }

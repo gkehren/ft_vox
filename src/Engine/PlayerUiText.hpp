@@ -62,6 +62,38 @@ inline size_t drawableScalars(FontView font, std::string_view text)
 
 // --- Measurement -----------------------------------------------------------
 
+/// ONE text metric for the whole player UI (issue #302 F01). Rendering, caret
+/// placement, mouse hit testing, selection, horizontal scrolling and IME
+/// candidate placement all multiply the glyph table by the same product:
+/// role ratio x resolved player UI scale x framebuffer compensation. Nothing
+/// derives it from painting order any more.
+struct TextStyle
+{
+	style::TextRole role{style::TextRole::Body};
+	float scale{1.f};
+	float fontScale{1.f};
+
+	/// Glyph-space multiplier: pass this to `FontView::measure`/`paint`.
+	float glyphScale() const
+	{
+		const float player = scale > 0.f ? scale : 1.f;
+		const float glyphs = fontScale > 0.f ? fontScale : 1.f;
+		return style::typeScale(role) * player * glyphs;
+	}
+
+	/// One line advance in logical units (the baked face's line height already
+	/// accounts for the font's own cell height, so no font scale here).
+	float lineHeight() const
+	{
+		return style::lineHeight(role) * (scale > 0.f ? scale : 1.f);
+	}
+};
+
+inline TextStyle textStyle(style::TextRole role, float scale, float fontScale = 1.f)
+{
+	return {role, scale, fontScale};
+}
+
 struct TextMetrics
 {
 	float width{};
@@ -74,9 +106,8 @@ struct TextMetrics
 inline TextMetrics measureRole(FontView font, std::string_view text, style::TextRole role, float scale,
 							   float fontScale = 1.f)
 {
-	const float player = scale > 0.f ? scale : 1.f;
-	const float glyphRow = style::typeScale(role) * player * (fontScale > 0.f ? fontScale : 1.f);
-	return {font.measure(text, glyphRow), style::lineHeight(role) * player};
+	const auto style = textStyle(role, scale, fontScale);
+	return {font.measure(text, style.glyphScale()), style.lineHeight()};
 }
 
 /// Top edge that vertically centers one line of a role inside `rect`.

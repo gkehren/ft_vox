@@ -76,12 +76,6 @@ const Glyph *getGlyph(FontView font, std::string_view text, size_t offset)
 	return index < font.glyphs.size() ? &font.glyphs[index] : nullptr;
 }
 
-Clip listRow(Clip bounds, int row, float scale)
-{
-	return rectangle(glm::vec2(bounds.rect) + glm::vec2(6.f, 19.f + 24.f * row) * scale,
-		{std::max(0.f, size(bounds).x - 12.f * scale), 22.f * scale});
-}
-
 int listSize(const ListBox &list)
 {
 	return static_cast<int>(std::min(list.items.size(), size_t(INT32_MAX)));
@@ -93,31 +87,102 @@ int visibleRows(const ListBox &list)
 }
 
 // Form-field geometry shared by painting, caret hit testing and the SDL text
-// input area, derived from the same tokens the field component paints with
-// (label line, then the sunken well with the value line inside it).
-TextGeometry fieldGeometry(const TextField &field, Clip bounds, Clip viewport, FontView font, float scale,
-						   bool focused, const style::Theme &theme = style::baseline(), float fontScale = 1.f)
+// input area. One metric (`TextStyle`) sizes the glyphs, the line and the
+// caret, so a click, a caret and the painted glyphs cannot disagree
+// (issue #302 F01) and the editor primitives stay inside the well (F02).
+TextGeometry fieldGeometry(const TextField &field, Clip bounds, FontView font, float scale,
+						   bool focused, const style::Theme &theme, float fontScale)
 {
 	const float s = scale > 0.f ? scale : 1.f;
-	const float glyphs = fontScale > 0.f ? fontScale : 1.f;
-	const float labelHeight = style::lineHeight(style::TextRole::Caption) * s;
+	const auto metric = gameui::textStyle(style::TextRole::Body, s, fontScale);
+	const float labelHeight = gameui::textStyle(style::TextRole::Caption, s, fontScale).lineHeight();
+	// The well is the value row of the field group (see formFieldHeight).
 	const Clip well = {{bounds.rect.x, bounds.rect.y + labelHeight, bounds.rect.z, bounds.rect.w}};
-	const auto clip = viewport.intersect(inset(well, theme.space.xs * s));
+	const float insetX = theme.space.sm * s;
+	const float insetY = theme.space.xs * s;
+	const Clip content = {{well.rect.x + insetX, well.rect.y + insetY,
+		std::max(well.rect.x + insetX, well.rect.z - insetX),
+		std::max(well.rect.y + insetY, well.rect.w - insetY)}};
+	TextGeometry out{};
+	out.lineHeight = metric.lineHeight();
+	out.glyphScale = metric.glyphScale();
+	if (content.empty())
+	{
+		out.clip = {};
+		out.origin = glm::vec2(content.rect);
+		out.caretX = out.origin.x;
+		return out;
+	}
+	out.clip = content;
+	out.origin = glm::vec2(content.rect.x,
+		content.rect.y + std::max(0.f, (size(content).y - out.lineHeight) * 0.5f));
 	const bool composing = focused && !field.composition().empty();
 	const auto pos = composing ? field.selectionStart() : field.caret();
-	const float advance = font.measure(std::string_view(field.value()).substr(0, pos), glyphs) +
-		(composing ? font.measure(std::string_view(field.composition()).substr(0, field.compositionCursor()), glyphs) : 0.f);
-	const float lineHeight = style::lineHeight(style::TextRole::Body) * s;
-	glm::vec2 origin = glm::vec2(well.rect) +
-		glm::vec2(theme.space.sm * s, std::max(0.f, (size(well).y - lineHeight) * 0.5f));
-	if (clip.empty())
-		return {clip, origin, origin.x};
-	const float right = std::max(clip.rect.x, clip.rect.z - s);
+	const float advance = font.measure(std::string_view(field.value()).substr(0, pos), out.glyphScale) +
+		(composing ? font.measure(std::string_view(field.composition()).substr(0, field.compositionCursor()),
+			out.glyphScale) : 0.f);
+	const float right = std::max(content.rect.x, content.rect.z - s);
 	if (focused)
-		origin.x -= std::max(0.f, origin.x + advance - right);
-	return {clip, origin, std::clamp(origin.x + advance, clip.rect.x, right)};
+		out.origin.x -= std::max(0.f, out.origin.x + advance - right);
+	out.caretX = std::clamp(out.origin.x + advance, content.rect.x, right);
+	return out;
 }
 } // namespace
+
+ListGeometry listGeometry(Clip bounds, const ListBox &list, const style::Theme &theme, float scale)
+{
+	const float s = scale > 0.f ? scale : 1.f;
+	ListGeometry geometry{};
+	geometry.rowHeight = theme.size.rowHeight * s;
+	geometry.rows = visibleRows(list);
+	geometry.label = {{bounds.rect.x, bounds.rect.y, bounds.rect.z,
+		std::min(bounds.rect.w, bounds.rect.y + style::lineHeight(style::TextRole::Caption) * s)}};
+	const float top = std::min(bounds.rect.w, geometry.label.rect.w + theme.space.xxs * s);
+	geometry.viewport = {{bounds.rect.x, top, bounds.rect.z,
+		std::min(bounds.rect.w, top + geometry.rowHeight * float(geometry.rows))}};
+	return geometry;
+}
+
+Clip listRowRect(const ListGeometry &geometry, int index)
+{
+	if (index < 0 || geometry.rowHeight <= 0.f)
+		return {};
+	const float top = geometry.viewport.rect.y + float(index) * geometry.rowHeight;
+	return {{geometry.viewport.rect.x, top, geometry.viewport.rect.z, top + geometry.rowHeight}};
+}
+
+int listRowAt(const ListGeometry &geometry, glm::vec2 point)
+{
+	if (!hit(geometry.viewport, point))
+		return -1;
+	for (int index = 0; index < geometry.rows; ++index)
+		if (hit(listRowRect(geometry, index).intersect(geometry.viewport), point))
+			return index;
+	return -1;
+}
+
+SliderGeometry sliderGeometry(Clip bounds, const style::Theme &theme, float scale)
+{
+	const float s = scale > 0.f ? scale : 1.f;
+	const auto metric = gameui::textStyle(style::TextRole::Body, s);
+	SliderGeometry geometry{};
+	geometry.label = {{bounds.rect.x, bounds.rect.y, bounds.rect.z, bounds.rect.y + metric.lineHeight()}};
+	const float readout = 48.f * s;
+	geometry.value = {{std::max(bounds.rect.x, bounds.rect.z - readout), geometry.label.rect.y,
+		bounds.rect.z, geometry.label.rect.w}};
+	const float top = std::min(bounds.rect.w, geometry.label.rect.w + theme.space.xs * s);
+	geometry.track = {{bounds.rect.x, top, bounds.rect.z,
+		std::min(bounds.rect.w, top + std::max(2.f, theme.space.xs * s))}};
+	return geometry;
+}
+
+float sliderValueAt(const SliderGeometry &geometry, float x)
+{
+	const float width = size(geometry.track).x;
+	if (!(width > 0.f))
+		return 0.f;
+	return std::clamp((x - geometry.track.rect.x) / width, 0.f, 1.f);
+}
 
 void WidgetSet::reset(Clip clip, float height, float offset)
 {
@@ -215,12 +280,20 @@ TextField *WidgetSet::editor(ControlId focus) const
 	return eligible(widget) ? binding<TextField>(*widget) : nullptr;
 }
 
-TextGeometry WidgetSet::editorGeometry(ControlId focus, FontView font, float scale) const
+TextGeometry WidgetSet::editorGeometry(ControlId focus, FontView font, float scale, float fontScale) const
 {
 	const auto *widget = find(focus);
 	const auto *field = editor(focus);
-	return field ? fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, true,
-		style::baseline(), m_fontScale) : TextGeometry{};
+	if (!field || !widget)
+		return {};
+	auto geometry = fieldGeometry(*field, bounds(*widget), font, scale, true, style::baseline(), fontScale);
+	// The editor's own content rect AND the visible part of the screen: the SDL
+	// text area, the caret and the candidate window all live inside it.
+	geometry.clip = geometry.clip.intersect(m_viewport.clip);
+	const float left = geometry.clip.rect.x;
+	const float right = std::max(left, geometry.clip.rect.z - 1.f);
+	geometry.caretX = std::clamp(geometry.caretX, left, right);
+	return geometry;
 }
 
 void WidgetSet::cancelEditing()
@@ -230,7 +303,8 @@ void WidgetSet::cancelEditing()
 	m_editor = nullptr;
 }
 
-WidgetEvent WidgetSet::press(glm::vec2 point, ControlId &current, FontView font, float scale, bool extend)
+WidgetEvent WidgetSet::press(glm::vec2 point, ControlId &current, FontView font, float scale, bool extend,
+							float fontScale, const style::Theme &theme)
 {
 	const auto *widget = at(point);
 	if (!eligible(widget))
@@ -245,15 +319,15 @@ WidgetEvent WidgetSet::press(glm::vec2 point, ControlId &current, FontView font,
 	m_pressed = widget->id;
 	if (auto *field = editor(current))
 	{
-		const auto geometry = fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, hadFocus,
-			style::baseline(), m_fontScale);
+		const auto geometry = fieldGeometry(*field, bounds(*widget), font, scale, hadFocus, theme,
+			fontScale);
 		const auto value = std::string_view(field->value());
 		float x = geometry.origin.x;
 		size_t byte = 0;
 		while (byte < value.size())
 		{
 			const auto next = nextUtf8(value, byte);
-			const float advance = font.measure(value.substr(byte, next - byte), scale);
+			const float advance = font.measure(value.substr(byte, next - byte), geometry.glyphScale);
 			if (point.x < x + advance * 0.5f)
 				break;
 			x += advance;
@@ -262,10 +336,10 @@ WidgetEvent WidgetSet::press(glm::vec2 point, ControlId &current, FontView font,
 		field->cancelComposition();
 		field->placeCaret(byte, extend);
 	}
-	return drag(point, scale);
+	return drag(point, scale, theme);
 }
 
-WidgetEvent WidgetSet::drag(glm::vec2 point, float scale)
+WidgetEvent WidgetSet::drag(glm::vec2 point, float scale, const style::Theme &theme)
 {
 	const auto *widget = find(m_pressed);
 	if (!eligible(widget))
@@ -275,29 +349,29 @@ WidgetEvent WidgetSet::drag(glm::vec2 point, float scale)
 	}
 	if (auto *slider = binding<Slider>(*widget))
 	{
-		const auto bar = inset(bounds(*widget), 8.f * scale);
-		if (size(bar).x > 0.f)
+		// The same track the painter draws: no legacy interaction margin can
+		// drift away from the visible track (issue #302 F13).
+		const float value = sliderValueAt(sliderGeometry(bounds(*widget), theme, scale), point.x);
+		if (slider->value != value)
 		{
-			const float value = std::clamp((point.x - bar.rect.x) / size(bar).x, 0.f, 1.f);
-			if (slider->value != value)
-			{
-				slider->value = value;
-				return {widget->id, WidgetAction::Change};
-			}
+			slider->value = value;
+			return {widget->id, WidgetAction::Change};
 		}
 	}
 	return {};
 }
 
-WidgetEvent WidgetSet::release(glm::vec2 point, float scale)
+WidgetEvent WidgetSet::release(glm::vec2 point, float scale, const style::Theme &theme)
 {
 	const auto *widget = at(point);
 	const auto pressed = m_pressed;
 	cancelPress();
-	return eligible(widget) && widget->id == pressed ? activate(*widget, &point, scale) : WidgetEvent{};
+	return eligible(widget) && widget->id == pressed ? activate(*widget, &point, scale, theme)
+													  : WidgetEvent{};
 }
 
-WidgetEvent WidgetSet::activate(const Widget &widget, const glm::vec2 *point, float scale)
+WidgetEvent WidgetSet::activate(const Widget &widget, const glm::vec2 *point, float scale,
+								const style::Theme &theme)
 {
 	if (std::holds_alternative<Button>(widget.control))
 		return {widget.id, WidgetAction::Activate};
@@ -308,14 +382,18 @@ WidgetEvent WidgetSet::activate(const Widget &widget, const glm::vec2 *point, fl
 	}
 	if (auto *list = binding<ListBox>(widget); list && point)
 	{
-		const int first = std::clamp(list->selection.first, 0, std::max(0, listSize(*list) - visibleRows(*list)));
-		for (int i = 0; i < visibleRows(*list) && first + i < listSize(*list); ++i)
-			if (hit(listRow(bounds(widget), i, scale).intersect(bounds(widget)), *point))
-			{
-				const int selected = list->selection.selected;
-				list->selection.select(first + i, listSize(*list), visibleRows(*list));
-				return selected != list->selection.selected ? WidgetEvent{widget.id, WidgetAction::Change} : WidgetEvent{};
-			}
+		// Rendering, hover and activation share listGeometry/listRowAt, so the
+		// row a click lands on is exactly the row that was painted (F03).
+		const int row = listRowAt(listGeometry(bounds(widget), *list, theme, scale), *point);
+		if (row >= 0)
+		{
+			const int first = std::clamp(list->selection.first, 0,
+				std::max(0, listSize(*list) - visibleRows(*list)));
+			const int selected = list->selection.selected;
+			list->selection.select(first + row, listSize(*list), visibleRows(*list));
+			return selected != list->selection.selected ? WidgetEvent{widget.id, WidgetAction::Change}
+														: WidgetEvent{};
+		}
 	}
 	return {};
 }
@@ -384,7 +462,8 @@ WidgetEvent WidgetSet::key(ControlId &current, NavKey key, bool shift, bool shor
 		list->selection.select(list->selection.selected + (key == NavKey::Up ? -1 : 1), listSize(*list), visibleRows(*list));
 		return selected != list->selection.selected ? WidgetEvent{current, WidgetAction::Change} : WidgetEvent{};
 	}
-	return !repeat && (key == NavKey::Enter || key == NavKey::Space) ? activate(*widget, nullptr, 0.f) : WidgetEvent{};
+	return !repeat && (key == NavKey::Enter || key == NavKey::Space)
+		? activate(*widget, nullptr, 0.f, style::baseline()) : WidgetEvent{};
 }
 
 WidgetEvent WidgetSet::commitText(ControlId focus, std::string_view text)
@@ -429,7 +508,6 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 	Surface surface(out, font, theme, scale, m_viewport.clip, atlasLayers, fontScale);
 	const auto &p = theme.palette;
 	const float s = scale > 0.f ? scale : 1.f;
-	m_fontScale = fontScale > 0.f ? fontScale : 1.f;
 	const auto *hover = at(pointer);
 	for (const auto &widget : widgets())
 	{
@@ -452,45 +530,51 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 		if (const auto *field = binding<TextField>(widget))
 		{
 			surface.formField(rect, widget.label, {}, widget.validation, state);
-			const auto layout = fieldGeometry(*field, rect, m_viewport.clip, font, s, focused, theme,
-				fontScale);
+			// One metric for glyphs, line and caret (F01); every editor primitive is
+			// clipped by the field's own content rect (F02) so a long value, a full
+			// selection or a preedit never bleeds into the well or a neighbour.
+			const auto layout = fieldGeometry(*field, rect, font, s, focused, theme, fontScale);
+			const auto editorClip = layout.clip.intersect(m_viewport.clip);
+			if (editorClip.empty())
+				continue;
 			const auto live = std::string_view(field->value());
 			const auto preedit = focused ? std::string_view(field->composition()) : std::string_view{};
-			const float glyphs = style::typeScale(style::TextRole::Body) * s *
-				(fontScale > 0.f ? fontScale : 1.f);
 			const auto fg = widget.enabled ? p.ink : p.inkDisabled;
 			const auto highlight = [&](std::string_view text, glm::vec2 pos, size_t first, size_t last) {
 				if (!focused || first >= last)
 					return;
-				const float x = font.measure(text.substr(0, first), glyphs);
-				const float width = font.measure(text.substr(first, last - first), glyphs);
-				const auto fillRect = rectangle(pos + glm::vec2(x, -s),
-					{width, style::lineHeight(style::TextRole::Body) * s});
+				const float x = font.measure(text.substr(0, first), layout.glyphScale);
+				const float width = font.measure(text.substr(first, last - first), layout.glyphScale);
+				const auto fillRect = rectangle(pos, {width, layout.lineHeight}).intersect(editorClip);
+				if (fillRect.empty())
+					return;
 				glm::vec4 selection = p.accent;
 				selection.a = 0.32f;
-				surface.fill(fillRect, selection, 0.f);
+				surface.fill(rectangle({pos.x + x, pos.y}, {width, layout.lineHeight}).intersect(editorClip),
+					selection, 0.f);
 			};
 			if (preedit.empty())
 			{
 				highlight(live, layout.origin, field->selectionStart(), field->selectionEnd());
-				font.paint(out, layout.origin, live, fg, glyphs, layout.clip);
+				font.paint(out, layout.origin, live, fg, layout.glyphScale, editorClip);
 			}
 			else
 			{
 				const auto before = live.substr(0, field->selectionStart());
 				const auto composingAt = layout.origin +
-					glm::vec2(font.measure(before, glyphs), 0.f);
+					glm::vec2(font.measure(before, layout.glyphScale), 0.f);
 				highlight(preedit, composingAt, field->compositionCursor(), field->compositionEnd());
-				font.paint(out, layout.origin, before, fg, glyphs, layout.clip);
-				font.paint(out, composingAt, preedit, p.accent, glyphs, layout.clip);
-				font.paint(out, composingAt + glm::vec2(font.measure(preedit, glyphs), 0.f),
-					live.substr(field->selectionEnd()), fg, glyphs, layout.clip);
+				font.paint(out, layout.origin, before, fg, layout.glyphScale, editorClip);
+				font.paint(out, composingAt, preedit, p.accent, layout.glyphScale, editorClip);
+				font.paint(out, composingAt + glm::vec2(font.measure(preedit, layout.glyphScale), 0.f),
+					live.substr(field->selectionEnd()), fg, layout.glyphScale, editorClip);
 			}
 			if (focused)
 			{
 				const auto caret = rectangle({layout.caretX, layout.origin.y},
-					{std::max(1.f, s), style::lineHeight(style::TextRole::Body) * s});
-				surface.fill(caret, p.accent, 0.f);
+					{std::max(1.f, s), layout.lineHeight}).intersect(editorClip);
+				if (!caret.empty())
+					surface.fill(caret, p.accent, 0.f);
 			}
 			continue;
 		}
@@ -499,7 +583,7 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 			const float box = theme.size.rowHeight * s * 0.55f;
 			const auto indicator = rectangle({rect.rect.z - box - theme.space.md * s,
 				rect.rect.y + (size(rect).y - box) * 0.5f}, {box, box});
-			surface.fill(indicator, toggle->value && widget.enabled ? p.accent : p.surfaceSunken,
+			surface.fill(indicator, style::toggleFace(theme, state, toggle->value),
 				theme.size.radiusSmall * s);
 			surface.ring(indicator, focused ? p.focus : p.border,
 				theme.size.borderWidth * s, theme.size.radiusSmall * s);
@@ -510,42 +594,40 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 		}
 		if (const auto *slider = binding<Slider>(widget))
 		{
-			const float lineHeight = style::lineHeight(style::TextRole::Body) * s;
+			// One track geometry for painting and for pointer->value (F13).
+			const auto geometry = sliderGeometry(rect, theme, s);
 			char value[12];
 			std::snprintf(value, sizeof(value), "%.0f%%",
 				std::clamp(slider->value, 0.f, 1.f) * 100.f);
-			surface.fittedLabel({{rect.rect.x, rect.rect.y, rect.rect.z - theme.space.xl * s,
-					rect.rect.y + lineHeight}}, widget.label, style::TextRole::Body,
+			surface.fittedLabel(geometry.label, widget.label, style::TextRole::Body,
 				widget.enabled ? p.ink : p.inkDisabled, 0.f);
-			surface.labelAligned({{rect.rect.z - theme.space.xl * s, rect.rect.y, rect.rect.z,
-					rect.rect.y + lineHeight}}, value, style::TextRole::Body, p.inkMuted, 1.f);
-			const auto track = rectangle(glm::vec2(rect.rect.x, rect.rect.y + lineHeight * 1.15f),
-				{size(rect).x, std::max(2.f, theme.space.xs * s)});
-			surface.fill(track, p.surfaceSunken, theme.size.radiusSmall * s);
-			surface.fill(progressFill(track, slider->value), widget.enabled ? p.accent : p.inkDisabled,
-				theme.size.radiusSmall * s);
+			surface.fittedLabel(geometry.value, value, style::TextRole::Body, p.inkMuted, 1.f);
+			surface.fill(geometry.track, p.surfaceSunken, theme.size.radiusSmall * s);
+			surface.fill(progressFill(geometry.track, slider->value),
+				style::sliderFill(theme, state), theme.size.radiusSmall * s);
 			if (focused)
 				surface.ring(rect, p.focus, theme.size.borderWidth * s, theme.size.radiusSmall * s);
 			continue;
 		}
 		if (const auto *list = binding<ListBox>(widget))
 		{
-			surface.label({{rect.rect.x, rect.rect.y, rect.rect.z,
-					rect.rect.y + style::lineHeight(style::TextRole::Caption) * s}}, widget.label,
-				style::TextRole::Caption, p.inkMuted);
+			// Painting, hover and activation share one geometry (F03): the rect a
+			// row is painted in is the rect that is hit-tested, a partially
+			// visible row is clipped to the list window, and a row scrolled out of
+			// that window never receives input or overdraws a neighbour.
+			const auto geometry = listGeometry(rect, *list, theme, s);
+			const auto rowsClip = geometry.viewport.intersect(m_viewport.clip);
+			surface.label(geometry.label, widget.label, style::TextRole::Caption, p.inkMuted);
 			const int first = std::clamp(list->selection.first, 0,
-				std::max(0, listSize(*list) - visibleRows(*list)));
-			const float top = rect.rect.y + style::lineHeight(style::TextRole::Caption) * s +
-				theme.space.xxs * s;
-			for (int i = 0; i < visibleRows(*list) && first + i < listSize(*list); ++i)
+				std::max(0, listSize(*list) - geometry.rows));
+			for (int i = 0; i < geometry.rows && first + i < listSize(*list); ++i)
 			{
-				const auto row = rectangle({rect.rect.x, top + float(i) * theme.size.rowHeight * s},
-					{size(rect).x, theme.size.rowHeight * s});
-				if (row.rect.w > m_viewport.clip.rect.w)
-					break;
+				const auto row = listRowRect(geometry, i);
+				if (row.intersect(rowsClip).empty())
+					continue;
 				const bool selected = first + i == list->selection.selected;
-				const bool rowHovered = hit(row.intersect(m_viewport.clip), pointer);
-				surface.listRow(row, list->items[static_cast<size_t>(first + i)], {},
+				const bool rowHovered = hit(row.intersect(rowsClip), pointer);
+				surface.listRow(row.intersect(rowsClip), list->items[static_cast<size_t>(first + i)], {},
 					style::interactiveState(widget.enabled, rowHovered, false, false, selected));
 			}
 			if (focused)
@@ -561,6 +643,54 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 size_t nextUtf8(std::string_view text, size_t offset)
 {
 	return offset >= text.size() ? text.size() : offset + std::max(size_t{1}, scalarLength(text, offset));
+}
+
+size_t scalarCount(std::string_view text, size_t bytes)
+{
+	size_t count = 0;
+	for (size_t offset = 0; offset < std::min(bytes, text.size()); offset = nextUtf8(text, offset))
+		++count;
+	return count;
+}
+
+size_t compositionByteOffset(std::string_view text, int index, CompositionUnit unit)
+{
+	if (index <= 0)
+		return 0;
+	size_t scalar = 0, units = 0, offset = 0;
+	while (offset < text.size())
+	{
+		const size_t length = nextUtf8(text, offset) - offset;
+		const size_t cost = unit == CompositionUnit::Utf16 && length == 4 ? 2 : 1;
+		// A UTF-16 index inside a surrogate pair rounds DOWN to the pair: the
+		// range can never split a supplementary character into invalid bytes.
+		const bool reached = unit == CompositionUnit::Utf16
+			? units >= size_t(index) || units + cost > size_t(index)
+			: scalar >= size_t(index);
+		if (reached)
+			return offset;
+		units += cost;
+		++scalar;
+		offset += length;
+	}
+	return text.size();
+}
+
+CompositionRange compositionRange(std::string_view text, int start, int length,
+								  CompositionUnit unit)
+{
+	if (start < 0)
+		return {};
+	const auto startByte = compositionByteOffset(text, start, unit);
+	const auto startScalar = int(scalarCount(text, startByte));
+	if (length < 0)
+		return {startScalar, -1};
+	// Bounded in 64-bit: a backend may hand over INT32_MAX for "to the end".
+	const auto endUnits = static_cast<int>(
+		std::min<long long>(static_cast<long long>(start) + length, INT32_MAX));
+	const auto endByte = compositionByteOffset(text, endUnits, unit);
+	const auto endScalar = int(scalarCount(text, endByte));
+	return {startScalar, std::max(0, endScalar - startScalar)};
 }
 
 std::string_view TextField::selection() const
@@ -625,16 +755,20 @@ bool TextField::insert(std::string_view text)
 	return changed;
 }
 
-void TextField::preedit(std::string_view text, int start, int length)
+void TextField::preedit(std::string_view text, int start, int length, CompositionUnit unit)
 {
 	m_composition = singleLine(text, kMaxBytes);
-	if (start < 0)
+	// Normalize the platform range (UTF-16 units on Windows, scalars elsewhere)
+	// to scalars before mapping it onto the sanitized composition, so a
+	// supplementary character never corrupts the preedit selection (F09).
+	const auto range = compositionRange(text, start, length, unit);
+	if (range.start < 0)
 	{
 		m_compositionCursor = m_compositionEnd = m_composition.size();
 		return;
 	}
-	const size_t end = static_cast<size_t>(start) + static_cast<size_t>(std::max(0, length));
-	const auto cursorByte = scalarOffset(text, static_cast<size_t>(start));
+	const size_t end = static_cast<size_t>(range.start) + static_cast<size_t>(std::max(0, range.length));
+	const auto cursorByte = scalarOffset(text, static_cast<size_t>(range.start));
 	const auto endByte = scalarOffset(text, end);
 	m_compositionCursor = singleLine(text.substr(0, cursorByte), m_composition.size()).size();
 	m_compositionEnd = singleLine(text.substr(0, endByte), m_composition.size()).size();

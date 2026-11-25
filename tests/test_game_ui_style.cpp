@@ -7,11 +7,14 @@
 #include <Engine/PlayerUiScale.hpp>
 #include <Engine/PlayerUiStyle.hpp>
 
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "TestMain.hpp"
 
@@ -154,6 +157,29 @@ void states()
 	CHECK(statusColor(theme(), Status::Ok) == p.ok && statusColor(theme(), Status::Error) == p.error &&
 			statusColor(theme(), Status::Pending) == p.pending,
 		"status semantics resolve to distinct tokens");
+
+	// F15: one precedence for every combined state. Disabled is final and clears
+	// the interaction flags, so a disabled control can never paint a focus ring;
+	// selection survives because it tells the player what is selected.
+	CHECK(!has(disabledState, State::Focused) && !has(disabledState, State::Hovered) &&
+			!has(disabledState, State::Pressed) && has(disabledState, State::Selected),
+		"a disabled control keeps its selection but never looks interactively focused");
+	const auto settled = settleState(State::Selected | State::Focused | State::Disabled | State::Pending);
+	CHECK(has(settled, State::Selected) && has(settled, State::Pending) &&
+			has(settled, State::Disabled) && !has(settled, State::Focused),
+		"settleState keeps validation and selection, drops focus when disabled");
+	CHECK(slotState(State::Selected | State::Focused) == (State::Selected | State::Focused) &&
+			slotState(State::Error | State::Focused) == (State::Error | State::Focused),
+		"an enabled slot keeps its focus, selection and validation flags");
+	CHECK(has(slotState(State::Selected | State::Focused | State::Disabled), State::Selected) &&
+			!has(slotState(State::Selected | State::Focused | State::Disabled), State::Focused),
+		"a disabled slot keeps the selection marker without a focus ring");
+	CHECK(toggleFace(theme(), State::Rest, true) == p.accent &&
+			toggleFace(theme(), State::Disabled, true) != p.accent,
+		"a disabled toggle never paints the on-state accent");
+	CHECK(sliderFill(theme(), State::Rest) == p.accent &&
+			sliderFill(theme(), State::Disabled) == p.inkDisabled,
+		"a disabled slider fill is the disabled ink, not the accent");
 }
 
 void scaling()
@@ -169,14 +195,32 @@ void scaling()
 	const auto autoAt = [](glm::vec2 size, float content) {
 		return autoScale({size, content});
 	};
-	CHECK(autoAt({1920.f, 1080.f}, 1.f) == 1.f, "a 1080p window at 100% keeps 100%");
-	CHECK(autoAt({1920.f, 1080.f}, 1.5f) == 1.5f, "a 1080p window at 150% follows the OS");
-	CHECK(autoAt({3840.f, 2160.f}, 2.f) == 2.f, "a 4K window at 200% follows the OS");
-	CHECK(autoAt({2560.f, 1080.f}, 1.5f) == 1.5f, "a 21:9 window keeps the OS scale");
-	CHECK(autoAt({1160.f, 680.f}, 1.25f) == 1.25f, "a smaller window keeps the OS scale while it fits");
-	CHECK(autoAt({800.f, 480.f}, 1.5f) == kMinScale && autoAt({640.f, 360.f}, 1.f) == kMinScale,
-		"a window below the authored fit size steps down to the 75% floor instead of overflowing");
-	CHECK(autoAt({0.f, 0.f}, 1.5f) == 1.5f, "a minimized window keeps the last resolved scale");
+	// The accepted Auto table (issue #302 F04): base = snapDown(content scale),
+	// fit = min(width/900, height/480), result = snapDown(min(base, fit)).
+	struct AutoCase { glm::vec2 size; float content; float expected; };
+	const AutoCase autoCases[] = {
+		{{1920.f, 1080.f}, 2.f, 2.f},  // 200% fits the authored box exactly
+		{{1600.f, 900.f}, 2.f, 1.75f}, // fit 1.777 caps the 200% request
+		{{1280.f, 720.f}, 2.f, 1.25f}, // fit 1.422 caps the 200% request
+		{{1160.f, 680.f}, 1.25f, 1.25f},
+		{{900.f, 480.f}, 2.f, 1.f},    // at the fit box the UI is exactly authored size
+		{{800.f, 480.f}, 1.5f, kMinScale},
+		{{3840.f, 2160.f}, 2.f, 2.f},
+		{{2560.f, 1080.f}, 1.5f, 1.5f},
+		{{1920.f, 1080.f}, 1.f, 1.f},
+	};
+	for (const auto &test : autoCases)
+		CHECK(autoAt(test.size, test.content) == test.expected,
+			"auto scale of " << test.size.x << 'x' << test.size.y << " at " << test.content * 100.f
+				<< "% is " << test.expected * 100.f << '%');
+
+	// No discontinuity at the reference size: just above 900x480 the scale is
+	// still the authored one, not the raw content scale.
+	CHECK(autoAt({910.f, 490.f}, 2.f) == 1.f && autoAt({899.f, 479.f}, 2.f) == kMinScale,
+		"crossing the 900x480 fit box changes the scale by one step, never by a jump");
+	CHECK(autoAt({1125.f, 600.f}, 2.f) == 1.25f && autoAt({1124.f, 600.f}, 2.f) == 1.f,
+		"the fit cap lands on the next step only when the window really grew");
+	CHECK(autoAt({0.f, 0.f}, 1.5f) == 1.5f, "a minimized window falls back to the snapped content scale");
 	CHECK(autoAt({1920.f, 1080.f}, 0.f) == 1.f &&
 			autoAt({1920.f, 1080.f}, std::numeric_limits<float>::quiet_NaN()) == 1.f,
 		"a degenerate content scale falls back to 100%");
@@ -206,6 +250,26 @@ void scaling()
 		"switching back to Auto follows the display again");
 	CHECK(controller.policy().mode == ScaleMode::Auto && !controller.hasPending(),
 		"the applied policy is reported back for persistence");
+
+	// Degenerate inputs never change an Auto scale that was already valid, and
+	// restoring the window does not invalidate the layout either (F04).
+	ScaleController degenerate;
+	CHECK(degenerate.resolve({{1600.f, 900.f}, 2.f}) && degenerate.effective() == 1.75f &&
+			degenerate.revision() == 1,
+		"a 1600x900 window at 200% resolves to the 175% step");
+	const auto revision = degenerate.revision();
+	CHECK(!degenerate.resolve({{0.f, 0.f}, 0.f}) && degenerate.effective() == 1.75f &&
+			degenerate.revision() == revision,
+		"a minimized window keeps the last valid Auto scale without rebuilding the layout");
+	CHECK(!degenerate.resolve({{1600.f, 900.f}, 2.f}) && degenerate.effective() == 1.75f &&
+			degenerate.revision() == revision,
+		"restoring the window re-resolves to the same scale, so nothing is invalidated");
+	degenerate.setPolicy({ScaleMode::Fixed, 1.25f});
+	CHECK(degenerate.resolve({{800.f, 480.f}, 1.5f}) && degenerate.effective() == 1.25f,
+		"a Fixed override ignores the window size even when Auto would step down");
+	degenerate.setPolicy({ScaleMode::Auto, 1.f});
+	CHECK(degenerate.resolve({{0.f, 0.f}, 0.f}) && degenerate.effective() == 1.75f,
+		"switching back to Auto with no valid inputs restores the last Auto scale");
 }
 
 void preferences()
@@ -268,6 +332,65 @@ void preferences()
 	untouched.scale = {ScaleMode::Fixed, 1.25f};
 	CHECK(untouched.load(path) == LoadStatus::Corrupt && untouched.scale.value == 1.25f,
 		"a corrupt record is reported and never mutates the running session");
+
+	// F06: the write is atomic and concurrent-safe. Four writers, staggered
+	// values: the record always parses, and no staging file is left behind.
+	{
+		std::atomic<int> failures{0};
+		std::vector<std::thread> writers;
+		for (int i = 0; i < 4; ++i)
+			writers.emplace_back([&path, &failures, i] {
+				PlayerUiSettings local;
+				local.scale = i % 2 ? ScalePolicy{ScaleMode::Fixed, 1.25f}
+									: ScalePolicy{ScaleMode::Auto, 1.f};
+				for (int n = 0; n < 20; ++n)
+					if (!local.save(path))
+						++failures;
+			});
+		for (auto &writer : writers)
+			writer.join();
+		CHECK(failures.load() == 0, "a concurrent writer always succeeds");
+		PlayerUiSettings after;
+		CHECK(after.load(path) == LoadStatus::Ok && isUserScale(after.scale.value),
+			"concurrent writers never leave a partial or corrupt record");
+		bool stagingLeft = false;
+		for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+			stagingLeft = stagingLeft || entry.path().filename().string().find(".tmp.") != std::string::npos;
+		CHECK(!stagingLeft && !ec, "a completed write leaves no staging file behind");
+	}
+
+	// A failed write preserves the previous valid record.
+	{
+		PlayerUiSettings kept;
+		kept.scale = {ScaleMode::Fixed, 1.5f};
+		CHECK(kept.save(path), "the previous record is on disk");
+		std::ifstream before(path, std::ios::binary);
+		const std::string previous((std::istreambuf_iterator<char>(before)),
+			std::istreambuf_iterator<char>());
+		PlayerUiSettings replacement;
+		replacement.scale = {ScaleMode::Fixed, 2.f};
+		CHECK(!replacement.save(dir), "saving onto a directory still fails");
+		std::ifstream after(path, std::ios::binary);
+		const std::string current((std::istreambuf_iterator<char>(after)),
+			std::istreambuf_iterator<char>());
+		CHECK(current == previous && !current.empty(),
+			"a failed write leaves the last valid record untouched");
+	}
+
+	// Locale independence: formatting is integer-based and parsing accepts only
+	// '.' as the decimal separator, so a system locale can never corrupt a
+	// record (a comma-decimal locale would with printf/strtod).
+	PlayerUiSettings localeIndependent;
+	localeIndependent.scale = {ScaleMode::Fixed, 1.5f};
+	const auto serialized = localeIndependent.serialize();
+	CHECK(serialized.find("1.50") != std::string::npos && serialized.find(',') == std::string::npos,
+		"the record always uses a dot decimal separator");
+	PlayerUiSettings strict;
+	CHECK(!strict.parse(std::string(kPlayerUiSettingsHeader) + "\nscale fixed 1,50\n"),
+		"a comma decimal separator is rejected, never misread");
+	CHECK(strict.parse(std::string(kPlayerUiSettingsHeader) + "\nscale fixed 1.5\n") &&
+			strict.scale.value == 1.5f,
+		"a short decimal parses without a locale-dependent conversion");
 
 	std::filesystem::remove_all(dir, ec);
 }

@@ -1,27 +1,131 @@
 #include <Engine/PlayerUiPreferences.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <system_error>
+
+#if defined(_WIN32)
+#include <windows.h>
+
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace gameui
 {
 namespace
 {
+/// Parse a scale step without touching the C locale (issue #302 F06): the
+/// decimal separator is always '.', no sign, no exponent, at most two decimals.
 bool parseStep(std::string_view text, float &value)
 {
-	char buffer[16]{};
-	if (text.empty() || text.size() >= sizeof(buffer))
+	if (text.empty() || text.size() > 8)
 		return false;
-	for (size_t i = 0; i < text.size(); ++i)
-		buffer[i] = text[i];
-	char *end = nullptr;
-	const double parsed = std::strtod(buffer, &end);
-	if (end != buffer + text.size() || !(parsed > 0.0) || parsed > double(kMaxScale))
+	long whole = 0;
+	int fraction = 0, digits = 0;
+	bool dot = false, any = false;
+	for (const char c : text)
+	{
+		if (c == '.')
+		{
+			if (dot)
+				return false;
+			dot = true;
+			continue;
+		}
+		if (c < '0' || c > '9')
+			return false;
+		if (!dot)
+		{
+			whole = whole * 10 + (c - '0');
+			if (whole > 100)
+				return false;
+		}
+		else
+		{
+			if (digits == 2)
+				return false;
+			fraction = fraction * 10 + (c - '0');
+			++digits;
+		}
+		any = true;
+	}
+	if (!any)
+		return false;
+	if (dot)
+		while (digits++ < 2)
+			fraction *= 10;
+	const double parsed = double(whole) + double(fraction) / 100.0;
+	if (!(parsed > 0.0) || parsed > double(kMaxScale))
 		return false;
 	value = static_cast<float>(parsed);
 	return true;
+}
+
+/// Format `value` as a fixed two-decimal ASCII string. Integer formatting is
+/// locale-independent, unlike snprintf("%.2f").
+std::string formatStep(float value)
+{
+	const long hundredths = std::lround(value * 100.f);
+	char buffer[16]{};
+	std::snprintf(buffer, sizeof(buffer), "%ld.%02ld", hundredths / 100, hundredths % 100);
+	return buffer;
+}
+
+unsigned long processId()
+{
+#if defined(_WIN32)
+	return static_cast<unsigned long>(_getpid());
+#else
+	return static_cast<unsigned long>(getpid());
+#endif
+}
+
+/// A staging name no other writer can pick: process id + monotonic clock +
+/// per-process counter (issue #302 F06). Nothing else is ever deleted.
+std::filesystem::path stagingPath(const std::filesystem::path &path)
+{
+	static std::atomic<uint64_t> counter{0};
+	const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+	char suffix[96]{};
+	std::snprintf(suffix, sizeof(suffix), ".tmp.%lu.%llu.%llu", processId(),
+		static_cast<unsigned long long>(stamp),
+		static_cast<unsigned long long>(counter.fetch_add(1)));
+	std::filesystem::path staging = path;
+	staging += suffix;
+	return staging;
+}
+
+/// Atomically replace `to` with `from`. On POSIX rename(2) replaces atomically;
+/// Windows needs MOVEFILE_REPLACE_EXISTING, and NEVER an explicit delete of the
+/// previous record (that would leave a window with no preferences at all).
+bool replaceFile(const std::filesystem::path &from, const std::filesystem::path &to)
+{
+#if defined(_WIN32)
+	// Two game instances can replace the same record at the same time. Windows
+	// reports a sharing/lock violation instead of arbitrating, so a bounded
+	// retry loop turns that race into a normal last-writer-wins outcome.
+	for (int attempt = 0; attempt < 40; ++attempt)
+	{
+		if (MoveFileExW(from.c_str(), to.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
+			return true;
+		const auto error = GetLastError();
+		if (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION &&
+			error != ERROR_LOCK_VIOLATION)
+			return false;
+		Sleep(1);
+	}
+	return false;
+#else
+	std::error_code ec;
+	std::filesystem::rename(from, to, ec);
+	return !ec;
+#endif
 }
 
 std::string_view trimTrailingCarriageReturn(std::string_view line)
@@ -36,9 +140,7 @@ std::string formatScalePolicy(ScalePolicy policy)
 {
 	if (policy.mode == ScaleMode::Auto)
 		return "scale auto";
-	char value[32];
-	std::snprintf(value, sizeof(value), "scale fixed %.2f", double(nearestUserScale(policy.value)));
-	return value;
+	return "scale fixed " + formatStep(nearestUserScale(policy.value));
 }
 
 std::string PlayerUiSettings::serialize() const
@@ -108,38 +210,39 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 bool PlayerUiSettings::save(const std::filesystem::path &path) const
 {
 	std::error_code ec;
-	std::filesystem::create_directories(path.parent_path(), ec);
-	if (ec)
+	if (path.empty())
 		return false;
-	auto temporary = path;
-	temporary += ".tmp";
+	const auto parent = path.parent_path();
+	if (!parent.empty())
 	{
-		std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+		std::filesystem::create_directories(parent, ec);
+		if (ec)
+			return false;
+	}
+	// A sibling directory is never a preference record: refuse instead of
+	// replacing (or deleting) it.
+	if (std::filesystem::is_directory(path, ec))
+		return false;
+	const auto staging = stagingPath(path);
+	{
+		std::ofstream out(staging, std::ios::binary | std::ios::trunc);
+		if (!out)
+			return false;
 		const std::string record = serialize();
 		out.write(record.data(), static_cast<std::streamsize>(record.size()));
 		out.close();
 		if (!out)
 		{
-			std::filesystem::remove(temporary, ec);
+			// Only our own staging file is removed; the previous record stays.
+			std::error_code ignored;
+			std::filesystem::remove(staging, ignored);
 			return false;
 		}
 	}
-	std::filesystem::rename(temporary, path, ec);
-	if (ec)
-	{
-		// Windows keeps a hard failure when the destination exists; the record
-		// is small and re-derivable, so replace a stale FILE explicitly and
-		// retry once. Never remove anything else (a directory stays untouched).
-		std::error_code ignored;
-		if (std::filesystem::is_regular_file(path, ignored))
-			std::filesystem::remove(path, ignored);
-		ec.clear();
-		std::filesystem::rename(temporary, path, ec);
-	}
-	if (ec)
+	if (!replaceFile(staging, path))
 	{
 		std::error_code ignored;
-		std::filesystem::remove(temporary, ignored);
+		std::filesystem::remove(staging, ignored);
 		return false;
 	}
 	return true;

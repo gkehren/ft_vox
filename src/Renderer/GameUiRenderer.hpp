@@ -34,6 +34,10 @@ public:
 			  std::span<const uint8_t> coverage, VkFormat format, VkColorSpaceKHR colorSpace);
 	// Use the host's swapchain recreation barrier for format-dependent pipelines.
 	void setOutput(VkFormat format, VkColorSpaceKHR colorSpace);
+	/// Replace the font atlas after a framebuffer-density change (issue #302
+	/// F11). The device is idled first: no frame in flight can still sample the
+	/// retired image, so the swap is safe without a per-slot retirement queue.
+	void setFont(ImmediateCommands &immediate, VkExtent2D extent, std::span<const uint8_t> coverage);
 	// Prepare only after waiting on this slot's fence. Atlas is borrowed.
 	void prepare(uint32_t slot, VkExtent2D extent, const DrawList &list,
 				 const TextureManager &atlas, uint64_t currentGeneration);
