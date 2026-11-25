@@ -25,6 +25,8 @@
 
 int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
 int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
+int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
+	const std::filesystem::path &evidence, bool restoring);
 
 namespace
 {
@@ -74,6 +76,16 @@ int main(int argc, char **argv)
 		{
 			engine->setSavesRootForTests(argv[3]);
 			return runEngineHostingSmoke(*engine, argv[2]);
+		}
+		if (argc == 6 && std::string_view(argv[1]) == "--hosted-closure")
+		{
+			engine->setSavesRootForTests(argv[4]);
+			const auto phase = std::string_view(argv[5]);
+			if (phase != "first" && phase != "restart")
+				throw std::invalid_argument("invalid hosted closure phase");
+			const std::filesystem::path server = std::string_view(argv[2]) == "guest" ?
+				std::filesystem::path{} : std::filesystem::path(argv[2]);
+			return runEngineHostedClosure(*engine, server, argv[3], phase == "restart");
 		}
 
 		// Unique temp saves root (issue #180 review round 4, item 5): the

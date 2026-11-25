@@ -234,13 +234,25 @@ int fixture(std::string_view world, const fs::path &root, std::optional<uintptr_
 		}
 		else
 		{
+			// Monitor offers are opportunistic. Keep publishing until the
+			// parent has observed a sample, then let freshness expire.
+			while (server::pollLauncherPipe() == server::LauncherInput::Open && !fs::exists(root / "stall-monitor"))
+			{
+				sample.sampledMs = monitoring::monotonicMs();
+				monitor.offer(sample);
+				std::this_thread::sleep_for(20ms);
+			}
 			while (server::pollLauncherPipe() == server::LauncherInput::Open && !fs::exists(root / "resume-monitor"))
 				std::this_thread::sleep_for(10ms);
 			if (world == "monitor crash")
 				std::_Exit(42);
-			sample.sampledMs = monitoring::monotonicMs();
 			sample.transport.count = 0;
-			monitor.offer(sample);
+			while (server::pollLauncherPipe() == server::LauncherInput::Open)
+			{
+				sample.sampledMs = monitoring::monotonicMs();
+				monitor.offer(sample);
+				std::this_thread::sleep_for(20ms);
+			}
 		}
 	}
 	if (world == "log updates")
@@ -295,6 +307,7 @@ void checkMonitoringLifecycle(const fs::path &fixturePath, const fs::path &root)
 	supervisor.start(options("monitor stale"), fixturePath, root);
 	const auto first = await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
 	CHECK(first.status->transport.count == 1, "fixture published a player before stalling");
+	std::ofstream(root / "stall-monitor").put('\n');
 	await(supervisor, [](const Snapshot &s) { return s.state == State::Ready && !s.status; });
 	std::ofstream(root / "resume-monitor").put('\n');
 	const auto resumed = await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
@@ -303,8 +316,10 @@ void checkMonitoringLifecycle(const fs::path &fixturePath, const fs::path &root)
 	finished(supervisor);
 
 	fs::remove(root / "resume-monitor");
+	fs::remove(root / "stall-monitor");
 	supervisor.start(options("monitor crash"), fixturePath, root);
 	await(supervisor, [](const Snapshot &s) { return s.status != nullptr; });
+	std::ofstream(root / "stall-monitor").put('\n');
 	std::ofstream(root / "resume-monitor").put('\n');
 	const auto crashed = finished(supervisor);
 	CHECK(crashed.state == State::Failed && !crashed.status, "process crash clears the roster immediately");

@@ -1,5 +1,9 @@
 # Dedicated server (`ft_vox_server`)
 
+The [hosted multiplayer closure report](multiplayer-hosting-closure.md)
+records the two-client Windows run, CPU gates, fault coverage, and remaining
+manual checks for Epic #282.
+
 The standalone CPU-only authority host (#250) owns one `GameSimulation` and
 one persistent world. Live mode listens for authoritative UDP sessions (#252),
 simulates remote movement from player inputs (#253), replicates each

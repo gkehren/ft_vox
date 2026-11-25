@@ -35,11 +35,18 @@ Public deployment requires evidence for the additional gates below.
 | Confidentiality and integrity | A random 64-bit session capability, epoch and IPv4 endpoint scope the session. Packet decoding checks framing, direction and payload bounds. Chunk checksums verify decoded material bytes. | Hello exposes the profile key. Welcome and gameplay expose the session scope. Gameplay, private inventory and control messages lack authenticated encryption. The chunk checksum detects corruption. It provides no sender authentication. |
 | Replay and lifetime | The exact next reliable sequence is admitted. A reliable gap leaves the cursor unchanged. Fresh cursors discard stale frames. ACKs retire sent pending frames. Input targets only the next six eligible ticks. Rejoin renews the session and process restart renews the wire epoch. | These checks filter duplicates and old scopes. Their inputs are unauthenticated. A copied profile credential can still establish a new session when the actor is available. |
 | Admission and resource use | A compatible Hello can reserve a slot and cause the tick owner to provision an actor before route confirmation. A provisional join expires in 5 seconds. New profiles enter the registry only after confirmation and a successful spawn. Per-family, per-peer and shared traffic buckets and fixed mailbox sizes limit work. | Admission consumes shared slots and may reserve durable IDs before return-routability is established. Confirmed joins can fill the durable profile registry and cause registry writes. Per-source buckets and process limits provide neither fair admission across distributed sources nor protection from upstream link saturation. |
-| Revocation and recovery | `server-identities.state` persists the key-to-actor binding independently of gameplay checkpoints. Departure copies actor state to the in-memory offline roster for the next checkpoint. Rejoin resumes that actor. | There is no supported per-profile revocation, credential rotation or account recovery. Restart renews the session epoch and loads the same profile keys. A backup can contain the same compromised credentials. |
+| Revocation and recovery | `server-identities.state` persists the key-to-actor binding independently of gameplay checkpoints. Local administration can ban a registered profile or require an allowlist. Departure copies actor state to the offline roster for the next checkpoint. | A profile ban applies to one saved identity. A new identity can join in open mode. Restart renews the session epoch and loads the same gameplay profile keys. Gameplay credential rotation and public account recovery are unsupported. |
 
 Implementation references are the [wire protocol](adr/authoritative-wire-protocol.md),
 [UDP sessions](dedicated-server.md#udp-sessions) and
 [identity and checkpoint contracts](adr/multiplayer-checkpoints.md).
+
+Hosted administration authenticates a separate local credential on private
+inherited launcher pipes. Delegation and owner recovery leave the wire v5
+trust boundary in place. Recovery rotates local control authority under
+the world lock. Gameplay admission uses its separate bearer keys. The
+[hosted multiplayer closure report](multiplayer-hosting-closure.md#security-and-recovery)
+records how recovery, session revocation and stale control requests were tested.
 
 ## Supported deployment and operating limits
 

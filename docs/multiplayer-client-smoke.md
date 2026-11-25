@@ -1,5 +1,9 @@
 # Graphical multiplayer smoke
 
+The [Epic #282 closure report](multiplayer-hosting-closure.md) records the
+current two-process Vulkan test and identifies controls that still need a
+physical keyboard and mouse check.
+
 The [issue #260 closure report](multiplayer-closure.md#physical-gpu-and-remaining-work)
 records the closure's physical-GPU dual-client startup, restart and strict
 visual results. The [interactive retest below](#interactive-movement-retest)
@@ -7,6 +11,22 @@ records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
 
 ## In-game hosting (#285)
+
+The opt-in hosted closure test starts separate owner and guest Vulkan
+processes, with separate profiles and one locally supervised dedicated
+server. It runs the Host, Join and Administration frame callbacks,
+presents real swapchain frames, and restarts from the confirmed checkpoint.
+It retains per-process logs and state witnesses under a new output folder.
+
+```powershell
+cmake --build build --config Release --target ft_vox test_engine_reload
+$env:FT_VOX_VALIDATION = "1"
+python tests/test_hosted_closure_native.py --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/hosted-closure
+```
+
+Use the matching graphical and server output paths for your build. Choose
+a new output directory for every run. Keep the generated profile and
+world directories local because they contain private credentials.
 
 Build `ft_vox` with graphics enabled. The build also places
 `ft_vox_server` alongside it. Run from a fresh working directory for the

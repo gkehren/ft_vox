@@ -166,12 +166,12 @@ jobs:
       # TSan slowdown is highly variable and exceeds the test timeout). Both
       # still run natively (cpu-linux/windows) and under ASan; HeadlessSmoke
       # gives the threaded headless path TSan coverage here.
-      - name: Test (network, headless smoke, player streaming and server host under TSan)
+      - name: Test (network, headless smoke, player streaming, host and local control under TSan)
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
           ctest --test-dir build-tsan --output-on-failure --timeout 900
-          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming|ServerHost|UdpTransport|WorldReplication|VoxelActions|EntityReplication|MultiplayerClosure|MultiplayerSoak"
+          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming|ServerHost|UdpTransport|WorldReplication|VoxelActions|EntityReplication|MultiplayerClosure|MultiplayerSoak|ServerAdministration|ServerSupervisor"
 
   graphics-linux:
     runs-on: ubuntu-latest
