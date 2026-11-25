@@ -160,6 +160,7 @@ public:
 
 private:
 	friend struct EngineJoinProbe;
+	friend struct UiSpikeProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
 	void loadHosting();

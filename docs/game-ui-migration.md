@@ -34,7 +34,7 @@ Phase A leaves every legacy binding in normal launch. The following destinations
 
 ## Frame hooks and staged rollout
 
-Today Engine handles SDL events and safe-point operations, builds the mixed `GameUIFrame`, starts and ends the ImGui frame, and hands the postprocessing overlay callback to `WorldRenderer`. The renderer loads the post color in its overlay pass. Biome-map uploads publish after the overlay. `VkFrameContext` owns acquire, submit and present. World/image validation uses the offscreen path. #300 keeps that ownership and adds the Game UI draw batches ahead of Dev UI. #301 consolidates input routing and gives the player layer its own state and action interface.
+Today Engine handles SDL events and safe-point operations, builds the mixed `GameUIFrame`, starts and ends the ImGui frame, and hands the postprocessing overlay callback to `WorldRenderer`. The renderer loads the post color in its overlay pass. Biome-map uploads publish after the overlay. `VkFrameContext` owns acquire, submit and present. World/image validation uses the offscreen path. #300 keeps that ownership and validates both composition paths, translucent elements and independent Game UI and Dev UI profiling as specified in the [backend ADR](adr/game-ui-backend.md#production-composition-contract-for-300). #301 consolidates input routing and gives the player layer its own state and action interface.
 
 1. **#299** proposes the decision and proves a standalone overlay with text, one atlas sample, scissor, focus and resize.
 2. **#300–#302** deliver the renderer, then stack/focus and layout, then tokens and widgets. The first reusable set is a label, button, toggle, text field, list/scroll viewport, modal, tooltip and inventory slot using rows, columns and fixed grids. It includes a keyboard focus ring and enough contrast for the baseline theme.
@@ -46,23 +46,43 @@ The spike can be removed as a unit in #300. During migration the legacy path is 
 
 ## Running the Phase A spike
 
-Run `ft_vox --seed 42 --ui-spike --quality low` in a graphics build. It uses a transient solo scene and closes with Escape. Tab focuses the button. Enter, Space, or a mouse press and release inside the button increments the on-screen counter and writes the input source to stdout. Repeated keydown, release outside the button after pressing inside, and activation after focus loss should leave the counter unchanged. Resize to verify that the panel stays centered, the checker texture stays inside the frame and the button target follows its new position.
+Run `ft_vox --seed 42 --ui-spike --quality low` from the game output directory in a graphics build. It uses a transient solo scene and closes with Escape. The following manual check verifies the rendered output and the controls.
+
+1. Press Enter with no button focus and check that the counter remains at zero. Press Tab, check that the button gains a visible focus ring, then hold Enter long enough for key repeat. The counter should advance to one.
+2. Resize to approximately 1160×680. Check that the panel is centered, the checker texture stays inside its frame, and the focus ring follows the button. Press inside the button, drag to the surrounding scene and release. The counter should stay at one. Click the relocated button and check that the counter advances to two.
+3. Switch to another application, then return without clicking the button. Press Enter before Tab. The counter should stay at two and the button should have no focus ring. Minimize and restore the window, press Tab then Space, and check that the counter advances to three. Press Escape and check that the process exits successfully.
+
+To replay the input assertions with the real SDL event queue, build the existing graphical test runner and run its opt-in smoke mode. The Windows example assumes a configured `build` directory. Use the game executable's directory as the working directory so the test resolves the compiled shaders.
+
+```powershell
+cmake --build build --config Release --target ft_vox test_engine_reload
+$uiBuild = (Resolve-Path build).Path
+Push-Location "$uiBuild/Release"
+try {
+    & "$uiBuild/tests/Release/test_engine_reload.exe" --ui-spike-smoke
+} finally {
+    Pop-Location
+}
+```
+
+On a single-config build, run `./tests/test_engine_reload --ui-spike-smoke` from the build directory. The scenario checks a real SDL resize and swapchain recreation, outside release, pixel-only resize, synthetic minimize/restore and stale events after focus loss, including `Tab → Enter` and Escape. It also verifies that regaining window focus requires fresh button focus before activation. Run the manual check for the presented pixels. The smoke mode is opt-in on a graphical machine.
 
 The spike draws at most two instanced batches, owns one atlas descriptor, and uses a fixed 9 KiB instance buffer per frame slot. It does not add a readback or a per-frame wait. For standard Vulkan validation, set `FT_VOX_VALIDATION=1`. For extra synchronization checking, also set `FT_VOX_SYNC_VALIDATION=1`. Keep this check targeted to hardware runs.
 
 ### Windows GPU evidence
 
-Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, SDL 3.4.18, `B8G8R8A8_SRGB` swapchain, FIFO, seed 42 and Low quality. A temporary test driver posted events into the real SDL queue and called `SDL_SetWindowSize` between frames. The [LunarG screenshot layer](https://vulkan.lunarg.com/doc/view/latest/windows/screenshot_layer.html) captured the presented images in a separate run from validation. These are hardware captures of the on-screen frame path.
+Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, SDL 3.4.18, `B8G8R8A8_SRGB` swapchain, FIFO, seed 42 and Low quality. The original capture driver posted SDL events and called `SDL_SetWindowSize` between frames. The smoke mode above replays and extends the input checks. The [LunarG screenshot layer](https://vulkan.lunarg.com/doc/view/latest/windows/screenshot_layer.html) captured the presented hardware frames in a separate run from validation.
 
 | Check | Observed |
 | --- | --- |
 | At 1920×1080, press Enter before focus, then Tab and Enter, then repeat Enter | Focus ring appears. Exactly one keyboard activation. [1920×1080 keyboard capture](images/game-ui/spike-keyboard.png) |
 | Resize to 1160×680, press inside and release outside, then press and release inside | Panel recenters, checker sample stays within its scissor, and the moved button accepts exactly one mouse activation. [1160×680 mouse capture](images/game-ui/spike-mouse-resized.png) |
-| Deliver focus loss, press Space, then Escape | Counter stays at two after focus loss. Escape exits with status 0. |
+| Focus loss followed by Space in the original capture sequence | Counter stayed at two. |
+| Replay `test_engine_reload --ui-spike-smoke` | All 10 assertions passed on the same Windows GPU. The test also checks delayed Tab, Enter, Escape and clicks while unfocused, and press cancellation on a pixel-only resize or synthetic minimization. |
 | CLI | `--help` lists the spike. The four conflicting modes `--connect`, `--world`, `--benchmark` and `--view` each return status 2. |
 | Vulkan validation | The spike and the normal launch control each presented 325 frames and resized once with synchronization validation enabled. Both logged 325 present/acquire `SYNC-HAZARD-WRITE-AFTER-READ` reports and the same sRGB/STORAGE swapchain and image-view VUIDs (12 and 9). The standard-validation spike run showed those two VUIDs only. The existing sRGB/STORAGE reports are documented in the [Vulkan validation guide](vulkan-validation.md). |
 | CPU-only Release | All 50 configured tests passed, including `CoreIncludeGuard`, `HeadlessDeps` and the nested `CpuOnlyBuild`. |
 | Windows graphical Release | `ft_vox` built with both new shaders. Both SPIR-V files passed `spirv-val --target-env vulkan1.2`. `UiShell`, `PostResizeFormats` and the `VisualRegression` smoke suite passed. `test_engine_reload.exe` passed all 33 checks when run from the game's build output directory, where its compiled shader files were available. |
 | Linux/WSL compile | Debian GCC compiled and linked the graphical executable with the local build's cached shader compiler stub. The shader compile and GPU evidence above use the actual Windows Vulkan SDK toolchain. |
 
-Linux and macOS/MoltenVK graphics, UNORM swapchain output, high-DPI monitor transitions and minimization were untested for the spike. Production UI timing and resource-pack reload measurements are follow-ups in #300–#309.
+Linux and macOS/MoltenVK graphics, UNORM swapchain output, high-DPI monitor transitions and OS-driven minimization were untested for the spike. Production UI timing and resource-pack reload measurements are follow-ups in #300–#309.

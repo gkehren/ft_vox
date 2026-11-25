@@ -893,10 +893,10 @@ void Engine::handleEvents()
 	{
 		if (m_uiSpike)
 		{
-			if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(window) &&
-				event.key.key == SDLK_ESCAPE && !event.key.repeat)
+			const auto result = m_uiSpike->handleEvent(window, event);
+			if (result == UiSpike::InputResult::Exit)
 				requestExit();
-			if (m_uiSpike->handleEvent(window, event))
+			if (result != UiSpike::InputResult::Unhandled)
 				continue;
 		}
 		else if (imgui)
@@ -1882,9 +1882,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 void Engine::enableUiSpike()
 {
 	auto spike = std::make_unique<UiSpike>();
-	spike->init(*vkContext, *immediate, swapchain->getImageFormat());
 	if (!SDL_SetWindowRelativeMouseMode(window, false))
 		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
+	spike->init(window, *vkContext, *immediate, swapchain->getImageFormat());
 	mouseCaptured = false;
 	m_uiSpike = std::move(spike);
 }

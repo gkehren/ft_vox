@@ -13,19 +13,23 @@ class VkContext;
 class UiSpike
 {
 public:
+	enum class InputResult { Unhandled, Consumed, Exit };
+
 	UiSpike() = default;
 	~UiSpike();
 	UiSpike(const UiSpike &) = delete;
 	UiSpike &operator=(const UiSpike &) = delete;
 
-	void init(VkContext &context, ImmediateCommands &immediate, VkFormat target);
+	void init(SDL_Window *window, VkContext &context, ImmediateCommands &immediate, VkFormat target);
 	// Called at the existing swapchain idle barrier.
 	void setTargetFormat(VkFormat target);
-	// Returns true for input owned by this modal preview. Window events pass through.
-	bool handleEvent(SDL_Window *window, const SDL_Event &event);
+	// The modal consumes input and forwards window events to the host.
+	InputResult handleEvent(SDL_Window *window, const SDL_Event &event);
 	void record(VkCommandBuffer cmd, uint32_t frameIndex, SDL_Window *window, VkExtent2D extent);
 
 private:
+	friend struct UiSpikeProbe;
+
 	struct Glyph
 	{
 		glm::vec4 rect{};
@@ -35,6 +39,8 @@ private:
 	};
 
 	void createAtlas(ImmediateCommands &immediate);
+	void handleWindowEvent(Uint32 type);
+	bool windowInteractive() const;
 	void activate(const char *source);
 
 	VkDevice m_device{};
@@ -52,6 +58,7 @@ private:
 	glm::vec4 m_whiteUv{};
 	glm::vec4 m_sampleUv{};
 	unsigned m_activations{};
-	bool m_focused{};
+	SDL_WindowFlags m_windowFlags{};
+	bool m_buttonFocused{};
 	bool m_armed{};
 };

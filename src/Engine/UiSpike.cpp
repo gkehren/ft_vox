@@ -93,8 +93,9 @@ UiSpike::~UiSpike()
 	destroyImage(m_allocator, m_device, m_atlas);
 }
 
-void UiSpike::init(VkContext &context, ImmediateCommands &immediate, VkFormat target)
+void UiSpike::init(SDL_Window *window, VkContext &context, ImmediateCommands &immediate, VkFormat target)
 {
+	m_windowFlags = SDL_GetWindowFlags(window);
 	m_device = context.getDevice();
 	m_allocator = context.getAllocator();
 	createAtlas(immediate);
@@ -257,36 +258,78 @@ void UiSpike::setTargetFormat(VkFormat target)
 	m_target = target;
 }
 
-bool UiSpike::handleEvent(SDL_Window *window, const SDL_Event &event)
+bool UiSpike::windowInteractive() const
+{
+	constexpr SDL_WindowFlags mask = SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED;
+	return (m_windowFlags & mask) == SDL_WINDOW_INPUT_FOCUS;
+}
+
+void UiSpike::handleWindowEvent(Uint32 type)
+{
+	switch (type)
+	{
+	case SDL_EVENT_WINDOW_FOCUS_GAINED:
+		m_windowFlags |= SDL_WINDOW_INPUT_FOCUS;
+		break;
+	case SDL_EVENT_WINDOW_FOCUS_LOST:
+		m_windowFlags &= ~SDL_WINDOW_INPUT_FOCUS;
+		break;
+	case SDL_EVENT_WINDOW_HIDDEN:
+		m_windowFlags |= SDL_WINDOW_HIDDEN;
+		m_windowFlags &= ~SDL_WINDOW_INPUT_FOCUS;
+		break;
+	case SDL_EVENT_WINDOW_SHOWN:
+		m_windowFlags &= ~SDL_WINDOW_HIDDEN;
+		break;
+	case SDL_EVENT_WINDOW_MINIMIZED:
+		m_windowFlags |= SDL_WINDOW_MINIMIZED;
+		break;
+	case SDL_EVENT_WINDOW_RESTORED:
+	case SDL_EVENT_WINDOW_MAXIMIZED:
+		m_windowFlags &= ~SDL_WINDOW_MINIMIZED;
+		break;
+	case SDL_EVENT_WINDOW_RESIZED:
+	case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+	case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+		break;
+	default:
+		return;
+	}
+	m_armed = false;
+	if (!windowInteractive())
+		m_buttonFocused = false;
+}
+
+UiSpike::InputResult UiSpike::handleEvent(SDL_Window *window, const SDL_Event &event)
 {
 	const SDL_WindowID id = SDL_GetWindowID(window);
+	if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)
+	{
+		if (event.window.windowID == id)
+			handleWindowEvent(event.type);
+		return InputResult::Unhandled;
+	}
+
 	switch (event.type)
 	{
-	case SDL_EVENT_WINDOW_FOCUS_LOST:
-		if (event.window.windowID == id)
-			m_focused = m_armed = false;
-		return false;
-	case SDL_EVENT_WINDOW_RESIZED:
-	case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
-		if (event.window.windowID == id)
-			m_armed = false;
-		return false;
 	case SDL_EVENT_KEY_DOWN:
-		if (event.key.windowID == id && !event.key.repeat)
+		if (event.key.windowID == id && windowInteractive() && !event.key.repeat)
 		{
+			if (event.key.key == SDLK_ESCAPE)
+				return InputResult::Exit;
 			if (event.key.key == SDLK_TAB)
-				m_focused = true;
-			else if (m_focused && (event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE))
+				m_buttonFocused = true;
+			else if (m_buttonFocused && (event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE))
 				activate("keyboard");
 		}
-		return true;
+		return InputResult::Consumed;
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP:
-		if (event.button.windowID == id && event.button.button == SDL_BUTTON_LEFT)
+		if (event.button.windowID == id && windowInteractive() && event.button.button == SDL_BUTTON_LEFT)
 		{
 			const bool inside = contains(layoutFor(window).button(), event.button.x, event.button.y);
 			if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
-				m_focused = m_armed = inside;
+				m_buttonFocused = m_armed = inside;
 			else
 			{
 				if (m_armed && inside)
@@ -294,15 +337,15 @@ bool UiSpike::handleEvent(SDL_Window *window, const SDL_Event &event)
 				m_armed = false;
 			}
 		}
-		return true;
+		return InputResult::Consumed;
 	case SDL_EVENT_KEY_UP:
 	case SDL_EVENT_TEXT_INPUT:
 	case SDL_EVENT_TEXT_EDITING:
 	case SDL_EVENT_MOUSE_MOTION:
 	case SDL_EVENT_MOUSE_WHEEL:
-		return true;
+		return InputResult::Consumed;
 	default:
-		return false;
+		return InputResult::Unhandled;
 	}
 }
 
@@ -337,13 +380,13 @@ void UiSpike::record(VkCommandBuffer cmd, uint32_t frameIndex, SDL_Window *windo
 
 	float x = 0.f, y = 0.f;
 	SDL_GetMouseState(&x, &y);
-	const bool hovered = SDL_GetMouseFocus() == window && contains(layout.button(), x, y);
+	const bool hovered = windowInteractive() && SDL_GetMouseFocus() == window && contains(layout.button(), x, y);
 	box({0, 0, kPanelWidth, kPanelHeight}, {0.065f, 0.10f, 0.14f, 1.f});
 	box({0, 0, kPanelWidth, 4}, kAccent);
 	label({24, 20}, "Game UI prototype", kInk, 2.f);
 	label({24, 53}, "Texture atlas sample clipped to this frame", kMuted);
 	box({24, 76, 376, 128}, {0.24f, 0.34f, 0.43f, 1.f});
-	if (m_focused)
+	if (m_buttonFocused)
 		box({22, 141, 222, 187}, kInk);
 	const glm::vec4 fill = m_armed && hovered ? kAccent :
 		(hovered ? glm::vec4(0.23f, 0.55f, 0.50f, 1.f) : glm::vec4(0.15f, 0.38f, 0.37f, 1.f));
