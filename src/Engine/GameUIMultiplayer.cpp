@@ -81,7 +81,7 @@ void drawHostedStatus(const hosting::Snapshot &server)
 		const auto &transport = sample->transport;
 		const auto number = [](uint64_t value) { return static_cast<unsigned long long>(value); };
 		ImGui::Text("Uptime: %.1f s", static_cast<double>(sample->uptimeMs) / 1000.0);
-		ImGui::Text("Online sessions: %u / %u", static_cast<unsigned>(transport.count),
+		ImGui::Text("Admitted sessions: %u / %u", static_cast<unsigned>(transport.count),
 			static_cast<unsigned>(transport.capacity));
 		ImGui::Text("Offline registered profiles: %llu", number(sample->offlineProfiles));
 		ImGui::Text("Completed ticks: %llu   Dropped ticks: %llu", number(sample->ticks), number(sample->droppedTicks));
@@ -195,12 +195,12 @@ void GameUI::drawHostedPlayers(const hosting::Snapshot *server)
 	}
 	const auto players = sample->transport.roster();
 	ImGui::TextWrapped("Hosted world: %s", server->world.c_str());
-	ImGui::Text("Online sessions: %u / %u", static_cast<unsigned>(players.size()),
+	ImGui::Text("Admitted sessions: %u / %u", static_cast<unsigned>(players.size()),
 		static_cast<unsigned>(sample->transport.capacity));
 	ImGui::Text("Offline registered profiles: %llu", static_cast<unsigned long long>(sample->offlineProfiles));
 	if (players.empty())
 	{
-		ImGui::TextUnformatted("No online players.");
+		ImGui::TextUnformatted("No admitted sessions.");
 		return;
 	}
 	ImGui::TextWrapped("Server-side player RTT is unavailable. The Network section shows your client RTT.");

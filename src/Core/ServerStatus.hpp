@@ -25,7 +25,8 @@ struct Player
 struct TransportSample
 {
 	uint64_t receivedBytes{}, sentBytes{}, worldBytes{}, retransmits{}, resyncs{};
-	uint16_t count{}, capacity{}, worldSends{}, baselines{};
+	uint16_t count{}; // Admitted sessions in all phases, including syncing and disconnecting.
+	uint16_t capacity{}, worldSends{}, baselines{};
 	std::array<Player, kMaxPlayers> players{};
 
 	std::span<const Player> roster() const { return std::span{players}.first(count); }
