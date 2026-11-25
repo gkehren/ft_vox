@@ -1,5 +1,7 @@
 #include <Engine/PlayerUiWidgets.hpp>
 
+#include <Engine/PlayerUiComponents.hpp>
+
 #include <cstdio>
 
 namespace gameui
@@ -90,17 +92,27 @@ int visibleRows(const ListBox &list)
 	return std::clamp(list.visibleRows, 1, 16);
 }
 
-TextGeometry fieldGeometry(const TextField &field, Clip bounds, Clip viewport, FontView font, float scale, bool focused)
+// Form-field geometry shared by painting, caret hit testing and the SDL text
+// input area, derived from the same tokens the field component paints with
+// (label line, then the sunken well with the value line inside it).
+TextGeometry fieldGeometry(const TextField &field, Clip bounds, Clip viewport, FontView font, float scale,
+						   bool focused, const style::Theme &theme = style::baseline(), float fontScale = 1.f)
 {
-	const auto clip = viewport.intersect(inset(bounds, 5.f * scale));
+	const float s = scale > 0.f ? scale : 1.f;
+	const float glyphs = fontScale > 0.f ? fontScale : 1.f;
+	const float labelHeight = style::lineHeight(style::TextRole::Caption) * s;
+	const Clip well = {{bounds.rect.x, bounds.rect.y + labelHeight, bounds.rect.z, bounds.rect.w}};
+	const auto clip = viewport.intersect(inset(well, theme.space.xs * s));
 	const bool composing = focused && !field.composition().empty();
 	const auto pos = composing ? field.selectionStart() : field.caret();
-	const float advance = font.measure(std::string_view(field.value()).substr(0, pos), scale) +
-		(composing ? font.measure(std::string_view(field.composition()).substr(0, field.compositionCursor()), scale) : 0.f);
-	glm::vec2 origin = glm::vec2(bounds.rect) + glm::vec2(8.f, 18.f) * scale;
+	const float advance = font.measure(std::string_view(field.value()).substr(0, pos), glyphs) +
+		(composing ? font.measure(std::string_view(field.composition()).substr(0, field.compositionCursor()), glyphs) : 0.f);
+	const float lineHeight = style::lineHeight(style::TextRole::Body) * s;
+	glm::vec2 origin = glm::vec2(well.rect) +
+		glm::vec2(theme.space.sm * s, std::max(0.f, (size(well).y - lineHeight) * 0.5f));
 	if (clip.empty())
 		return {clip, origin, origin.x};
-	const float right = std::max(clip.rect.x, clip.rect.z - scale);
+	const float right = std::max(clip.rect.x, clip.rect.z - s);
 	if (focused)
 		origin.x -= std::max(0.f, origin.x + advance - right);
 	return {clip, origin, std::clamp(origin.x + advance, clip.rect.x, right)};
@@ -207,7 +219,8 @@ TextGeometry WidgetSet::editorGeometry(ControlId focus, FontView font, float sca
 {
 	const auto *widget = find(focus);
 	const auto *field = editor(focus);
-	return field ? fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, true) : TextGeometry{};
+	return field ? fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, true,
+		style::baseline(), m_fontScale) : TextGeometry{};
 }
 
 void WidgetSet::cancelEditing()
@@ -232,7 +245,8 @@ WidgetEvent WidgetSet::press(glm::vec2 point, ControlId &current, FontView font,
 	m_pressed = widget->id;
 	if (auto *field = editor(current))
 	{
-		const auto geometry = fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, hadFocus);
+		const auto geometry = fieldGeometry(*field, bounds(*widget), m_viewport.clip, font, scale, hadFocus,
+			style::baseline(), m_fontScale);
 		const auto value = std::string_view(field->value());
 		float x = geometry.origin.x;
 		size_t byte = 0;
@@ -406,114 +420,142 @@ void FontView::paint(DrawList &out, glm::vec2 origin, std::string_view text, glm
 		}
 }
 
-void WidgetSet::paint(DrawList &out, FontView font, float s, ControlId focus, glm::vec2 pointer) const
+// One paint path for every control: the same Surface the painted components use,
+// so an interactive button, field, row or toggle is indistinguishable from its
+// gallery sample. No color, radius or spacing literal lives in this function.
+void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus, glm::vec2 pointer,
+					  const style::Theme &theme, uint32_t atlasLayers, float fontScale) const
 {
-	constexpr glm::vec4 textColor{0.94f, 0.97f, 1.f, 1.f};
-	constexpr glm::vec4 muted{0.70f, 0.77f, 0.81f, 1.f};
-	constexpr glm::vec4 accent{0.44f, 0.94f, 0.78f, 1.f};
-	constexpr glm::vec4 dark{0.052f, 0.083f, 0.103f, 0.97f};
-	constexpr glm::vec4 fill{0.13f, 0.23f, 0.27f, 1.f};
-	constexpr glm::vec4 hoverFill{0.19f, 0.34f, 0.37f, 1.f};
-	constexpr glm::vec4 disabled{0.086f, 0.13f, 0.15f, 1.f};
+	Surface surface(out, font, theme, scale, m_viewport.clip, atlasLayers, fontScale);
+	const auto &p = theme.palette;
+	const float s = scale > 0.f ? scale : 1.f;
+	m_fontScale = fontScale > 0.f ? fontScale : 1.f;
 	const auto *hover = at(pointer);
 	for (const auto &widget : widgets())
 	{
 		const auto rect = bounds(widget);
-		const auto clip = rect.intersect(m_viewport.clip);
-		if (clip.empty())
+		if (rect.intersect(m_viewport.clip).empty())
 			continue;
-		const glm::vec2 origin(rect.rect);
-		const auto label = [&](std::string_view text, float x, float y, glm::vec4 color) {
-			font.paint(out, origin + glm::vec2(x, y) * s, text, color, s, clip);
-		};
+		const bool focused = eligible(&widget) && widget.id == focus;
+		const auto state = style::interactiveState(widget.enabled, hover == &widget,
+			m_pressed == widget.id, focused, false);
 		if (std::holds_alternative<Label>(widget.control))
 		{
-			label(widget.label, 3, 4, textColor);
+			surface.fittedLabel(rect, widget.label, style::TextRole::Heading, p.ink, 0.f);
 			continue;
 		}
-		const bool focused = eligible(&widget) && widget.id == focus;
-		if (focused)
-			out.panel(rect.rect, accent, clip);
-		const auto face = focused ? inset(rect, 1.f) : rect;
-		out.panel(face.rect, !widget.enabled ? disabled : (hover == &widget || m_pressed == widget.id ? hoverFill : fill), clip);
-		const auto fg = widget.enabled ? textColor : muted;
+		if (std::holds_alternative<Button>(widget.control))
+		{
+			surface.button(rect, widget.label, widget.variant, state);
+			continue;
+		}
 		if (const auto *field = binding<TextField>(widget))
 		{
-			label(widget.label, 8, 2, muted);
-			const auto fieldLayout = fieldGeometry(*field, rect, m_viewport.clip, font, s, focused);
+			surface.formField(rect, widget.label, {}, widget.validation, state);
+			const auto layout = fieldGeometry(*field, rect, m_viewport.clip, font, s, focused, theme,
+				fontScale);
 			const auto live = std::string_view(field->value());
 			const auto preedit = focused ? std::string_view(field->composition()) : std::string_view{};
-			const auto start = fieldLayout.origin;
+			const float glyphs = style::typeScale(style::TextRole::Body) * s *
+				(fontScale > 0.f ? fontScale : 1.f);
+			const auto fg = widget.enabled ? p.ink : p.inkDisabled;
 			const auto highlight = [&](std::string_view text, glm::vec2 pos, size_t first, size_t last) {
-				if (focused && first < last)
-				{
-					const float x = font.measure(text.substr(0, first), s);
-					const float width = font.measure(text.substr(first, last - first), s);
-					out.panel(rectangle(pos + glm::vec2(x, -s), {width, 13.f * s}).rect, hoverFill, fieldLayout.clip);
-				}
+				if (!focused || first >= last)
+					return;
+				const float x = font.measure(text.substr(0, first), glyphs);
+				const float width = font.measure(text.substr(first, last - first), glyphs);
+				const auto fillRect = rectangle(pos + glm::vec2(x, -s),
+					{width, style::lineHeight(style::TextRole::Body) * s});
+				glm::vec4 selection = p.accent;
+				selection.a = 0.32f;
+				surface.fill(fillRect, selection, 0.f);
 			};
 			if (preedit.empty())
 			{
-				highlight(live, start, field->selectionStart(), field->selectionEnd());
-				font.paint(out, start, live, fg, s, fieldLayout.clip);
+				highlight(live, layout.origin, field->selectionStart(), field->selectionEnd());
+				font.paint(out, layout.origin, live, fg, glyphs, layout.clip);
 			}
 			else
 			{
 				const auto before = live.substr(0, field->selectionStart());
-				const auto composingAt = start + glm::vec2(font.measure(before, s), 0.f);
+				const auto composingAt = layout.origin +
+					glm::vec2(font.measure(before, glyphs), 0.f);
 				highlight(preedit, composingAt, field->compositionCursor(), field->compositionEnd());
-				font.paint(out, start, before, fg, s, fieldLayout.clip);
-				font.paint(out, composingAt, preedit, accent, s, fieldLayout.clip);
-				font.paint(out, composingAt + glm::vec2(font.measure(preedit, s), 0.f),
-					live.substr(field->selectionEnd()), fg, s, fieldLayout.clip);
+				font.paint(out, layout.origin, before, fg, glyphs, layout.clip);
+				font.paint(out, composingAt, preedit, p.accent, glyphs, layout.clip);
+				font.paint(out, composingAt + glm::vec2(font.measure(preedit, glyphs), 0.f),
+					live.substr(field->selectionEnd()), fg, glyphs, layout.clip);
 			}
 			if (focused)
-				out.panel(rectangle({fieldLayout.caretX, start.y}, {s, 13.f * s}).rect, accent, fieldLayout.clip);
+			{
+				const auto caret = rectangle({layout.caretX, layout.origin.y},
+					{std::max(1.f, s), style::lineHeight(style::TextRole::Body) * s});
+				surface.fill(caret, p.accent, 0.f);
+			}
+			continue;
 		}
-		else if (const auto *toggle = binding<Toggle>(widget))
+		if (const auto *toggle = binding<Toggle>(widget))
 		{
-			label(widget.label, 8, 7, fg);
-			label(toggle->value ? "On" : "Off", std::max(8.f, size(rect).x / s - 40.f), 7,
-				widget.enabled ? accent : muted);
+			const float box = theme.size.rowHeight * s * 0.55f;
+			const auto indicator = rectangle({rect.rect.z - box - theme.space.md * s,
+				rect.rect.y + (size(rect).y - box) * 0.5f}, {box, box});
+			surface.fill(indicator, toggle->value && widget.enabled ? p.accent : p.surfaceSunken,
+				theme.size.radiusSmall * s);
+			surface.ring(indicator, focused ? p.focus : p.border,
+				theme.size.borderWidth * s, theme.size.radiusSmall * s);
+			surface.fittedLabel({{rect.rect.x, rect.rect.y, indicator.rect.x - theme.space.sm * s,
+					rect.rect.w}}, widget.label, style::TextRole::Body,
+				widget.enabled ? p.ink : p.inkDisabled, 0.f);
+			continue;
 		}
-		else if (const auto *slider = binding<Slider>(widget))
+		if (const auto *slider = binding<Slider>(widget))
 		{
-			label(widget.label, 8, 2, fg);
+			const float lineHeight = style::lineHeight(style::TextRole::Body) * s;
 			char value[12];
-			std::snprintf(value, sizeof(value), "%.0f%%", std::clamp(slider->value, 0.f, 1.f) * 100.f);
-			label(value, std::max(8.f, size(rect).x / s - 40.f), 2, muted);
-			const auto bar = rectangle(origin + glm::vec2(8.f, 20.f) * s,
-				{std::max(0.f, size(rect).x - 16.f * s), 5.f * s});
-			out.panel(bar.rect, dark, clip);
-			out.panel(rectangle(glm::vec2(bar.rect), {size(bar).x * std::clamp(slider->value, 0.f, 1.f), 5.f * s}).rect,
-				widget.enabled ? accent : muted, clip);
+			std::snprintf(value, sizeof(value), "%.0f%%",
+				std::clamp(slider->value, 0.f, 1.f) * 100.f);
+			surface.fittedLabel({{rect.rect.x, rect.rect.y, rect.rect.z - theme.space.xl * s,
+					rect.rect.y + lineHeight}}, widget.label, style::TextRole::Body,
+				widget.enabled ? p.ink : p.inkDisabled, 0.f);
+			surface.labelAligned({{rect.rect.z - theme.space.xl * s, rect.rect.y, rect.rect.z,
+					rect.rect.y + lineHeight}}, value, style::TextRole::Body, p.inkMuted, 1.f);
+			const auto track = rectangle(glm::vec2(rect.rect.x, rect.rect.y + lineHeight * 1.15f),
+				{size(rect).x, std::max(2.f, theme.space.xs * s)});
+			surface.fill(track, p.surfaceSunken, theme.size.radiusSmall * s);
+			surface.fill(progressFill(track, slider->value), widget.enabled ? p.accent : p.inkDisabled,
+				theme.size.radiusSmall * s);
+			if (focused)
+				surface.ring(rect, p.focus, theme.size.borderWidth * s, theme.size.radiusSmall * s);
+			continue;
 		}
-		else if (const auto *list = binding<ListBox>(widget))
+		if (const auto *list = binding<ListBox>(widget))
 		{
-			label(widget.label, 8, 3, muted);
-			const int first = std::clamp(list->selection.first, 0, std::max(0, listSize(*list) - visibleRows(*list)));
+			surface.label({{rect.rect.x, rect.rect.y, rect.rect.z,
+					rect.rect.y + style::lineHeight(style::TextRole::Caption) * s}}, widget.label,
+				style::TextRole::Caption, p.inkMuted);
+			const int first = std::clamp(list->selection.first, 0,
+				std::max(0, listSize(*list) - visibleRows(*list)));
+			const float top = rect.rect.y + style::lineHeight(style::TextRole::Caption) * s +
+				theme.space.xxs * s;
 			for (int i = 0; i < visibleRows(*list) && first + i < listSize(*list); ++i)
 			{
-				const auto row = listRow(rect, i, s);
-				if (widget.enabled && (first + i == list->selection.selected || hit(row.intersect(clip), pointer)))
-					out.panel(row.rect, hoverFill, clip);
-				label(list->items[static_cast<size_t>(first + i)], 12, 24.f + 24.f * i, fg);
+				const auto row = rectangle({rect.rect.x, top + float(i) * theme.size.rowHeight * s},
+					{size(rect).x, theme.size.rowHeight * s});
+				if (row.rect.w > m_viewport.clip.rect.w)
+					break;
+				const bool selected = first + i == list->selection.selected;
+				const bool rowHovered = hit(row.intersect(m_viewport.clip), pointer);
+				surface.listRow(row, list->items[static_cast<size_t>(first + i)], {},
+					style::interactiveState(widget.enabled, rowHovered, false, false, selected));
 			}
+			if (focused)
+				surface.ring(rect, p.focus, theme.size.borderWidth * s, theme.size.radiusSmall * s);
+			continue;
 		}
-		else
-			label(widget.label, 8, 8, fg);
+		surface.fittedLabel(rect, widget.label, style::TextRole::Body, p.ink, 0.f);
 	}
 	if (hover && !hover->tooltip.empty())
-	{
-		const auto clip = m_viewport.clip;
-		const float height = 21.f * s;
-		const auto extent = glm::min(glm::vec2{font.measure(hover->tooltip, s) + 12.f * s, height}, size(clip));
-		const auto desired = pointer + glm::vec2{12.f * s, -height - 4.f * s};
-		const auto pos = glm::clamp(desired, glm::vec2(clip.rect), glm::vec2(clip.rect.z, clip.rect.w) - extent);
-		const auto tip = rectangle(pos, extent).intersect(clip);
-		out.panel(tip.rect, dark, tip);
-		font.paint(out, pos + glm::vec2(6.f, 4.f) * s, hover->tooltip, textColor, s, tip);
-	}
+		surface.tooltip(m_viewport.clip, pointer, hover->tooltip);
 }
 
 size_t nextUtf8(std::string_view text, size_t offset)

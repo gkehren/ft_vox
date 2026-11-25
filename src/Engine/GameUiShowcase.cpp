@@ -7,9 +7,8 @@ namespace
 enum ScreenControl : ControlId
 {
 	Resume = 1, Showcase, Quit, Return, Confirm, Name, Option, Amount, Choices,
-	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled
+	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock
 };
-constexpr glm::vec4 kCard{0.052f, 0.083f, 0.103f, 0.97f};
 constexpr std::array<std::string_view, 8> kBiomes{
 	"Grassland", "Forest", "Desert", "Tundra", "Swamp", "Savanna", "Taiga", "Ocean"};
 constexpr std::array<std::string_view, 6> kMaterials{
@@ -93,7 +92,7 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 	const float offset = newScreen ? 0.f : m_widgets.viewport().offset;
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
-	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 224.f : 164.f);
+	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 292.f : 164.f);
 	const float width = screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
@@ -142,6 +141,10 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		add(Resume, Button{}, 36.f, "Resume");
 		add(Showcase, Button{}, 36.f, "Widget showcase");
 		add(Quit, Button{}, 36.f, "Exit to desktop");
+		// Design-system previews (issue #302) stay after the game actions until
+		// #303-#308 move them into the real screens.
+		add(Gallery, Button{}, 36.f, "Design system");
+		add(HudMock, Button{}, 36.f, "HUD mock");
 	}
 	auto focus = m_screens.focus();
 	m_widgets.focus(focus, focus, newScreen || moved);
@@ -154,10 +157,13 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 
 void GameUiSample::paintScreen(glm::vec2 pointer)
 {
+	const auto &theme = style::baseline();
+	auto paint = surface(m_draws.bounds());
 	if (m_screens.suppressDeveloper())
-		m_draws.panel(m_draws.bounds().rect, {0.02f, 0.03f, 0.04f, 0.68f}, m_draws.bounds());
-	m_draws.panel(m_panel.rect, kCard, m_draws.bounds());
-	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer);
+		paint.backdrop(m_draws.bounds(), theme.palette.scrim);
+	paint.card(m_panel);
+	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer, theme, m_atlasLayers,
+		m_fontScale);
 }
 
 GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
@@ -191,11 +197,15 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 	}
 	if (event.action == WidgetAction::Activate)
 	{
+		if (m_screens.top() == Screen::Gallery)
+			return applyGalleryActivate(event.id);
 		switch (event.id)
 		{
 		case Resume:
 		case Return: back(); break;
 		case Showcase: m_screens.push(Screen::Showcase); invalidateLayout(); break;
+		case Gallery: m_screens.push(Screen::Gallery); invalidateLayout(); break;
+		case HudMock: m_screens.push(Screen::HudMock); invalidateLayout(); break;
 		case Quit: m_screens.push(Screen::ConfirmExit); invalidateLayout(); break;
 		case Confirm: return InputResult::Exit;
 		default: break;

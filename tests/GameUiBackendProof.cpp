@@ -898,6 +898,9 @@ struct GameUiBackendProbe
 			const auto result = engine.applyResourcePack(i % 2 ? (out / "pack").string() : "");
 			CHECK(result.atlasOk && (i % 2 == 0 || result.packHits > 0), "pack published a new atlas");
 			sample.m_activations = i;
+			// The player scale is its own policy now (issue #302); the reload
+			// proof still exercises four distinct scales with it.
+			sample.setScalePolicy({gameui::ScaleMode::Fixed, gameui::kUserScales[i]});
 			frames(4);
 			const auto stats = sample.renderer().stats(0);
 			CHECK(stats.descriptorSets == baseline.descriptorSets && stats.instanceBytes == baseline.instanceBytes &&
@@ -920,6 +923,87 @@ struct GameUiBackendProbe
 		}
 		else
 			std::cout << "WSI validation unavailable or disabled for this run\n";
+	}
+
+	// Player design-system evidence (issue #302): the gallery and the HUD mock
+	// captured from the production composition path at representative
+	// resolutions and player UI scales. Every capture is also checked for a
+	// bounded draw/quad budget and a clean validation counter.
+	void designSystem(const std::filesystem::path &out)
+	{
+		init();
+		auto &device = *engine.vkContext;
+		const auto before = device.validationErrorCount();
+		const auto rtssBefore = device.rtssValidationErrorCount();
+		auto &world = *engine.worldRenderer;
+		auto &sample = *engine.m_playerUi;
+		struct Case
+		{
+			const char *name;
+			int width, height;
+			gameui::ScalePolicy policy;
+			gameui::Screen screen;
+		};
+		const Case cases[] = {
+			{"gallery-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-2560x1080-100", 2560, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-1160x680-100", 1160, 680, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
+			{"gallery-1920x1080-200", 1920, 1080, {gameui::ScaleMode::Fixed, 2.f}, gameui::Screen::Gallery},
+			{"hud-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
+			{"hud-2560x1080-150", 2560, 1080, {gameui::ScaleMode::Fixed, 1.5f}, gameui::Screen::HudMock},
+			{"hud-960x540-100", 960, 540, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
+		};
+		std::filesystem::create_directories(out);
+		for (const auto &test : cases)
+		{
+			resize(test.width, test.height);
+			frames(2);
+			// Drive the real screen stack the pause menu uses; the scale policy
+			// is applied at the next frame boundary, never mid-frame.
+			sample.resetScreens();
+			sample.setScalePolicy(test.policy);
+			if (test.screen == gameui::Screen::Gallery)
+				sample.openGallery();
+			else
+				sample.openScreen(test.screen);
+			frames(3);
+			const auto extent = this->extent();
+			CHECK(sample.screens().top() == test.screen,
+				"the design-system screen is open for " << test.name);
+			CHECK(std::abs(sample.playerUiScale() - sample.scalePolicy().value) < 0.001f,
+				"the resolved player UI scale matches the requested policy for " << test.name
+					<< " (resolved=" << sample.playerUiScale() << ')');
+
+			const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+			world.resizeOutput(extent, format, kColorSpace);
+			sample.renderer().setOutput(format, kColorSpace);
+			Readback target{device};
+			const auto allocator = device.getAllocator();
+			target.output = createImage2D(allocator, device.getDevice(), extent.width, extent.height,
+				format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+			target.buffer = createBuffer(allocator, extent.width * extent.height * 4,
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+				VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+			sample.prepare(engine.window, 0, extent, {}, world.getTextureManager(),
+				engine.m_atlasVersion);
+			const auto stats = sample.renderer().stats(0);
+			const auto image = capture(target, &sample.renderer());
+			CHECK(image.width == extent.width && image.height == extent.height,
+				"the capture keeps the requested extent for " << test.name);
+			CHECK(stats.dropped == 0 && stats.draws <= 32,
+				"the design-system screen stays inside the 32-draw menu budget for " << test.name
+					<< " (draws=" << stats.draws << ", dropped=" << stats.dropped << ')');
+			std::string file = std::string(test.name) + ".png";
+			checked(visual::writePng((out / file).string(), image), "write design-system screenshot");
+		}
+		sample.resetScreens();
+		sample.setScalePolicy({gameui::ScaleMode::Auto, 1.f});
+		frames(2);
+		device.waitIdle();
+		const auto errors = device.validationErrorCount() - before;
+		const auto rtss = device.rtssValidationErrorCount() - rtssBefore;
+		CHECK(errors == rtss, "design-system capture validation errors=" << errors
+			<< ", known RTSS errors=" << rtss);
 	}
 
 	void performance()
@@ -1025,6 +1109,14 @@ int runGameUiShowcaseProof(Engine &engine)
 	GameUiBackendProbe(engine).showcaseProof();
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI showcase proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output)
+{
+	GameUiBackendProbe(engine).designSystem(output);
+	if (testmain::fails == 0)
+		std::cout << "PASS: Game UI design-system proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }
 

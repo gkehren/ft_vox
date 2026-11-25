@@ -1961,6 +1961,11 @@ void Engine::enableGameUi(bool standalone)
 	if (standalone && !setMouseCaptured(false))
 		throw std::runtime_error(std::string("UI spike could not release the cursor: ") + SDL_GetError());
 	sample->init(window, *vkContext, *immediate, swapchain->getImageFormat(), swapchain->getColorSpace(), standalone);
+	// The persisted policy is applied as a request: the first prepare() resolves
+	// it at the frame boundary (issue #302). A store problem is surfaced where
+	// the setting is edited, not silently swallowed.
+	sample->setScalePolicy(m_playerUiSettings.scale);
+	sample->setSettingsNotice(m_playerUiError);
 	m_uiSpike = standalone;
 	m_playerUi = std::move(sample);
 }
@@ -2017,6 +2022,9 @@ void Engine::run()
 	lastFrame = static_cast<double>(m_lastPerfCounter) / static_cast<double>(m_perfFrequency);
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
+	// Player UI preferences are read for every launch mode: the player surface
+	// exists (or will exist) in all of them, and the record is presentation-only.
+	loadPlayerUiPreferences();
 	if (!m_uiSpike && !m_inspectionView && !m_exitAfterBenchmark)
 	{
 		loadJoinPreferences();

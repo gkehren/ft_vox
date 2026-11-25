@@ -1,5 +1,4 @@
 #include <Engine/GameUiSample.hpp>
-#include <imgui/imgui.h>
 #include <utils.hpp>
 
 #include <cstdio>
@@ -7,11 +6,12 @@
 
 namespace
 {
+// Spike/standalone proof composition. The player-facing surfaces take their
+// colors from gameui::style::baseline() instead of these local constants.
 constexpr glm::vec4 kInk{0.94f, 0.97f, 1.f, 1.f};
 constexpr glm::vec4 kMuted{0.69f, 0.78f, 0.85f, 1.f};
 constexpr glm::vec4 kAccent{0.31f, 0.89f, 0.76f, 1.f};
 constexpr glm::vec4 kPanel{0.065f, 0.10f, 0.14f, 0.83f};
-constexpr std::array kScales{1.f, 1.25f, 1.5f, 1.75f};
 
 struct Layout
 {
@@ -24,7 +24,10 @@ struct Layout
 	glm::vec4 button() const { return rect(buttonLocal); }
 };
 
-Layout layoutFor(SDL_Window *window, gameui::Clip view, bool standalone, unsigned activations)
+// The player UI scale is resolved by the ScaleController at the frame
+// boundary; the proof composition only shrinks it further when its own panel
+// would not fit.
+Layout layoutFor(SDL_Window *window, gameui::Clip view, bool standalone, float resolvedScale)
 {
 	int w = 0, h = 0;
 	SDL_GetWindowSize(window, &w, &h);
@@ -34,14 +37,33 @@ Layout layoutFor(SDL_Window *window, gameui::Clip view, bool standalone, unsigne
 	const auto &r = view.rect;
 	const glm::vec2 available{r.z - r.x, r.w - r.y};
 	const glm::vec2 panel = standalone ? glm::vec2(400.f, 240.f) : glm::vec2(384.f, 82.f);
-	const float density = SDL_GetWindowPixelDensity(window);
-	const float display = SDL_GetWindowDisplayScale(window);
-	const float logicalScale = density > 0.f && display > 0.f ? display / density : 1.f;
-	const float scale = std::min({logicalScale * kScales[activations % kScales.size()],
+	const float scale = std::min({resolvedScale > 0.f ? resolvedScale : 1.f,
 		available.x / (panel.x + 24.f), available.y / (panel.y + 32.f)});
 	const glm::vec2 origin{r.x + (available.x - scale * panel.x) * 0.5f,
 		standalone ? r.y + (available.y - scale * panel.y) * 0.5f : r.y + 16.f * scale};
 	return {size, origin, scale, standalone ? glm::vec4(24, 143, 220, 185) : glm::vec4(244, 20, 365, 61)};
+}
+
+/// Logical window size and content scale for the player UI policy: the same two
+/// SDL queries PlayerUiScale.hpp documents, read here so the policy stays pure.
+gameui::ScaleInputs scaleInputsFor(SDL_Window *window)
+{
+	int w = 0, h = 0;
+	SDL_GetWindowSize(window, &w, &h);
+	return {{static_cast<float>(w), static_cast<float>(h)},
+		gameui::contentScale(SDL_GetWindowDisplayScale(window), SDL_GetWindowPixelDensity(window))};
+}
+
+/// Framebuffer pixels per logical point, used to bake the face at device
+/// resolution (the player UI equivalent of ImGuiLayer's FontGlobalScale).
+float framebufferScaleFor(SDL_Window *window)
+{
+	int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+	SDL_GetWindowSize(window, &logicalW, &logicalH);
+	if (!SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH) || logicalW <= 0 || logicalH <= 0 ||
+		pixelW <= 0 || pixelH <= 0)
+		return 1.f;
+	return static_cast<float>(pixelW) / static_cast<float>(logicalW);
 }
 
 bool contains(glm::vec4 rect, float x, float y)
@@ -55,21 +77,13 @@ void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommand
 {
 	m_windowFlags = SDL_GetWindowFlags(window);
 	m_standalone = standalone;
-	ImFontAtlas atlas;
-	atlas.Flags = ImFontAtlasFlags_NoMouseCursors | ImFontAtlasFlags_NoBakedLines;
-	ImFont *font = atlas.AddFontDefault();
-	unsigned char *pixels = nullptr;
-	int width = 0, height = 0;
-	atlas.GetTexDataAsAlpha8(&pixels, &width, &height);
-	if (!pixels || width <= 0 || height <= 0)
+	// One audited face (PlayerUiFonts.hpp), baked once at device resolution.
+	const float pixels = framebufferScaleFor(window);
+	if (!gameui::bakeFace(pixels, m_face))
 		throw std::runtime_error("Game UI font atlas bake failed");
-	for (ImWchar c = 32; c < m_glyphs.size(); ++c)
-	{
-		const ImFontGlyph &g = *font->FindGlyph(c);
-		m_glyphs[c] = {{g.X0, g.Y0, g.X1, g.Y1}, {g.U0, g.V0, g.U1, g.V1}, g.AdvanceX, g.Visible != 0};
-	}
-	m_renderer.init(context, immediate, {uint32_t(width), uint32_t(height)},
-		{pixels, size_t(width) * height}, format, colorSpace);
+	m_fontScale = m_face.fontScale;
+	m_renderer.init(context, immediate, {m_face.width, m_face.height}, m_face.coverage, format,
+		colorSpace);
 }
 
 bool GameUiSample::windowInteractive() const
@@ -152,7 +166,7 @@ GameUiSample::InputResult GameUiSample::handleEvent(SDL_Window *window, const SD
 		if (event.button.windowID != id || event.button.button != SDL_BUTTON_LEFT)
 			return m_standalone ? InputResult::Consumed : InputResult::Unhandled;
 		const bool inside = (m_standalone ? windowInteractive() : canClick) &&
-			contains(m_standalone ? layoutFor(window, {}, true, 0).button() : m_button,
+			contains(m_standalone ? layoutFor(window, {}, true, m_scale.effective()).button() : m_button,
 				event.button.x, event.button.y);
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
@@ -191,21 +205,38 @@ bool GameUiSample::hitsStrip(float x, float y) const
 void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent, gameui::Clip view,
 						   const TextureManager &atlas, uint64_t atlasGeneration)
 {
-	const Layout layout = layoutFor(window, view, m_standalone, m_standalone ? 0 : m_activations);
+	// Player UI scale: resolved ONCE at the frame boundary, before any screen is
+	// built. A changed value cancels the in-flight press and rebuilds the next
+	// layout - never mid-paint (issue #302).
+	m_atlasLayers = uint32_t(COUNT);
+	m_uiPhase += 1.f / 60.f;
+	if (m_uiPhase >= 1.f)
+		m_uiPhase -= 1.f;
+	if (m_scale.resolve(scaleInputsFor(window)))
+		invalidateLayout();
+	const float resolvedScale = m_scale.effective();
+	const Layout layout = layoutFor(window, view, m_standalone, resolvedScale);
 	m_draws.reset(layout.windowSize, atlasGeneration);
 	const auto priorButton = m_button;
 	m_button = {};
 	if (!m_standalone && m_screens.nativeScreen())
 	{
-		const float density = SDL_GetWindowPixelDensity(window);
-		const float display = SDL_GetWindowDisplayScale(window);
-		const float scale = density > 0.f && display > 0.f ? display / density : 1.f;
 		const auto bounds = m_draws.bounds();
-		buildScreen(m_screens.suppressDeveloper() || view.empty() ? bounds : view.intersect(bounds),
-			std::clamp(scale * kScales[m_activations % kScales.size()], 0.75f, 2.f));
+		const auto scene = m_screens.suppressDeveloper() || view.empty() ? bounds : view.intersect(bounds);
+		m_screenScale = resolvedScale;
+		switch (m_screens.top())
+		{
+		case gameui::Screen::Gallery: buildGallery(scene, resolvedScale); break;
+		case gameui::Screen::HudMock: buildHudMock(scene, resolvedScale); break;
+		default: buildScreen(scene, resolvedScale); break;
+		}
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);
-		paintScreen(SDL_GetMouseFocus() == window ? glm::vec2{x, y} : glm::vec2{-1});
+		const auto pointer = SDL_GetMouseFocus() == window ? glm::vec2{x, y} : glm::vec2{-1};
+		if (m_screens.top() == gameui::Screen::Gallery || m_screens.top() == gameui::Screen::HudMock)
+			paintDesignSystem(pointer);
+		else
+			paintScreen(pointer);
 	}
 	else if (layout.scale > 0.f && (m_standalone || m_screens.top() == gameui::Screen::Hud))
 	{
@@ -255,7 +286,7 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 			label({78, 20}, "Game UI", kInk, 1.5f);
 			label({78, 46}, "C releases mouse", kMuted);
 			focusRing();
-			std::snprintf(status, sizeof(status), "Scale %.0f%%", 100.f * kScales[m_activations % kScales.size()]);
+			std::snprintf(status, sizeof(status), "Scale %.0f%%", 100.f * resolvedScale);
 			label({261, 34}, status, buttonText);
 		}
 	}

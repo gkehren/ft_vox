@@ -20,6 +20,7 @@
 #include <Renderer/WorldRenderer.hpp>
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
+#include <Engine/PlayerUiPreferences.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
 #include <Core/ThreadPool.hpp>
@@ -166,6 +167,12 @@ private:
 	friend struct GameUiBackendProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
+	/// Player UI preferences (issue #302): the persisted scale override, loaded
+	/// once at startup, applied at the next frame boundary and re-saved when a
+	/// player surface raises a request through the settings seam.
+	void loadPlayerUiPreferences();
+	void persistPlayerUiPreferences();
+	void applyPlayerUiScaleRequests();
 	void loadHosting();
 	void populateHostingUi(GameUIFrame &frame);
 	void tickHosting();
@@ -409,6 +416,8 @@ private:
 	bool m_returnToSolo{};
 	std::optional<client::JoinRequest> m_joinRequest;
 	client::JoinPreferences m_joinPreferences;
+	gameui::PlayerUiSettings m_playerUiSettings{};
+	std::string m_playerUiError;
 	std::vector<std::string> m_joinProfiles;
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;

@@ -7,7 +7,7 @@
 
 namespace gameui
 {
-enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading };
+enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock };
 using ControlId = uint16_t;
 
 class ScreenStack
@@ -51,7 +51,7 @@ public:
 
 private:
 	struct Entry { Screen screen{}; ControlId focus{}; };
-	std::array<Entry, 5> m_entries{};
+	std::array<Entry, 6> m_entries{};
 	size_t m_size{1};
 	uint64_t m_revision{};
 };

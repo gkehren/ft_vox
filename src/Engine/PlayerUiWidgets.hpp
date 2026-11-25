@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine/PlayerUiInteraction.hpp>
+#include <Engine/PlayerUiStyle.hpp>
 #include <Renderer/GameUiDrawList.hpp>
 
 #include <span>
@@ -83,6 +84,9 @@ struct ListBox
 using Control = std::variant<Label, Button, TextField *, Toggle *, Slider *, ListBox *>;
 
 // Screen-owned bindings must outlive this set's composition and input.
+// `variant`/`validation` are presentation tokens (issue #302): the button and
+// field components read them so an interactive control and a painted sample
+// share one appearance.
 struct Widget
 {
 	ControlId id{};
@@ -90,6 +94,8 @@ struct Widget
 	std::string_view label, tooltip;
 	Control control;
 	bool enabled{true};
+	style::ButtonVariant variant{style::ButtonVariant::Secondary};
+	style::Validation validation{style::Validation::None};
 };
 
 // Change means the bound value effectively changed: committed text, deletion,
@@ -116,6 +122,9 @@ struct TextGeometry
 class WidgetSet
 {
 public:
+	/// Bounded control count per screen (design-system gallery included).
+	static constexpr size_t kMaxWidgets = 24;
+
 	void reset(Clip clip, float height, float offset);
 	void add(Widget widget);
 	void setEnabled(ControlId id, bool enabled, ControlId &focus);
@@ -140,17 +149,24 @@ public:
 	void cancelEditing();
 	void cancelPress() { m_pressed = 0; }
 	bool hasPress() const { return m_pressed != 0; }
-	void paint(DrawList &out, FontView font, float scale, ControlId focus, glm::vec2 pointer) const;
+	/// Paint every widget from the design tokens. One Surface per frame keeps
+	/// interactive controls and painted components visually identical.
+	void paint(DrawList &out, FontView font, float scale, ControlId focus, glm::vec2 pointer,
+			   const style::Theme &theme = style::baseline(), uint32_t atlasLayers = 0,
+			   float fontScale = 1.f) const;
 
 private:
 	bool canFocus(const Widget *widget) const;
 	bool eligible(const Widget *widget) const;
 	WidgetEvent activate(const Widget &widget, const glm::vec2 *point, float scale);
 
-	std::array<Widget, 16> m_items{};
+	std::array<Widget, kMaxWidgets> m_items{};
 	size_t m_count{};
 	ScrollViewport m_viewport{};
 	ControlId m_pressed{};
 	TextField *m_editor{};
+	/// Glyph-space factor of the last paint, so caret hit testing and the SDL
+	/// text area agree with the painted glyphs on high-DPI displays.
+	mutable float m_fontScale{1.f};
 };
 } // namespace gameui

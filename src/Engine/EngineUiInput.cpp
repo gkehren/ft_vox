@@ -4,6 +4,7 @@
 #include <Engine/InputRouting.hpp>
 
 #include <iostream>
+#include <string>
 
 bool Engine::setMouseCaptured(bool captured)
 {
@@ -103,6 +104,7 @@ void Engine::syncUiInput()
 {
 	if (m_uiSpike)
 		return;
+	applyPlayerUiScaleRequests();
 	if (m_playerUi)
 	{
 		m_inventoryPanelOpen = m_playerUi->syncInventory(m_inventoryPanelOpen);
@@ -303,4 +305,78 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			syncUiInput();
 	}
 	return owner != Gameplay && owner != Global;
+}
+
+// ===========================================================================
+// Player UI preferences (issue #302, Epic #298 Phase D)
+//
+// The scale override is presentation-only state in the settings seam next to
+// the other client preferences. It is read once at startup, pushed into the
+// player UI as a policy (never applied mid-frame) and written back when a
+// player surface raises a request. The developer UI scale, its docking layout,
+// the simulation, saves and the wire protocol are untouched.
+// ===========================================================================
+
+void Engine::loadPlayerUiPreferences()
+{
+	try
+	{
+		const auto status = m_playerUiSettings.load(m_savesRoot / ".client-profiles" / "player-ui.txt");
+		if (status == gameui::LoadStatus::Corrupt)
+		{
+			m_playerUiSettings = {};
+			m_playerUiError = "Could not read the saved player interface settings. Defaults apply.";
+			std::cerr << "[ui] " << m_playerUiError << '\n';
+		}
+		else
+			m_playerUiError.clear();
+	}
+	catch (const std::exception &)
+	{
+		m_playerUiSettings = {};
+		m_playerUiError = "Could not read the saved player interface settings. Defaults apply.";
+	}
+	if (m_playerUi)
+	{
+		m_playerUi->setScalePolicy(m_playerUiSettings.scale);
+		m_playerUi->setSettingsNotice(m_playerUiError);
+	}
+}
+
+void Engine::persistPlayerUiPreferences()
+{
+	bool saved = false;
+	try
+	{
+		saved = m_playerUiSettings.save(m_savesRoot / ".client-profiles" / "player-ui.txt");
+	}
+	catch (const std::exception &)
+	{
+		saved = false;
+	}
+	if (saved)
+		m_playerUiError.clear();
+	else
+	{
+		m_playerUiError = "Could not save the player interface settings. The change applies for this run.";
+		std::cerr << "[ui] " << m_playerUiError << '\n';
+	}
+	if (m_playerUi)
+		m_playerUi->setSettingsNotice(m_playerUiError);
+}
+
+void Engine::applyPlayerUiScaleRequests()
+{
+	if (!m_playerUi)
+		return;
+	const auto request = m_playerUi->takeScaleRequest();
+	if (!request || *request == m_playerUiSettings.scale)
+	{
+		if (request)
+			m_playerUi->setScalePolicy(*request);
+		return;
+	}
+	m_playerUiSettings.scale = *request;
+	m_playerUi->setScalePolicy(*request);
+	persistPlayerUiPreferences();
 }

@@ -36,7 +36,18 @@ Phase A leaves every legacy binding in normal launch. The following destinations
 
 Today Engine handles SDL events and safe-point operations, builds the mixed `GameUIFrame`, starts and ends the ImGui frame, and hands the postprocessing overlay callback to `WorldRenderer`. The renderer loads the post color in its overlay pass. Biome-map uploads publish after the overlay. `VkFrameContext` owns acquire, submit and present. World/image validation uses the offscreen path. #300 keeps that ownership and validates both composition paths, translucent elements and independent Game UI and Dev UI profiling as specified in the [backend ADR](adr/game-ui-backend.md#production-composition-contract-for-300). #301 consolidates input routing and gives the player layer its own state and action interface.
 
-The Phase C showcase, screen policy and reproducible input checks are documented in [Game UI interaction](game-ui-interaction.md).
+The Phase C showcase, screen policy and reproducible input checks are documented in [Game UI interaction](game-ui-interaction.md). Phase D adds the player design system: one baseline theme, an audited face with a documented fallback, reusable components, the inventory-slot contract and an independent, persisted player UI scale — see [Player design system](game-ui-design-system.md).
+
+Phase D surfaces and their owners:
+
+| Surface | Owner today | Player-facing path |
+| --- | --- | --- |
+| Tokens, typography, components, slot contract | `PlayerUiStyle.hpp`, `PlayerUiText.hpp`, `PlayerUiComponents.*`, `PlayerUiFonts.*` | Consumed by every native screen; the gallery renders each component class. |
+| Player UI scale | `PlayerUiScale.hpp` + `PlayerUiPreferences.*` (Engine loads/persists) | Auto by default, pause → Design system → **Player UI scale** for the persisted override. ImGui scale/layout untouched. |
+| Component gallery | `Screen::Gallery` (`GameUiGallery.cpp`, layout in `PlayerUiGallery.hpp`) | Pause → **Design system**. |
+| HUD preview | `Screen::HudMock` | Pause → **HUD mock**. Passive mock; #303 replaces it with the live HUD. |
+
+No legacy binding or surface was removed in Phase D: the pause menu only gained two preview entries after Exit to desktop, and the existing ImGui panels, HUD, inventory and multiplayer flows are unchanged.
 
 1. **#299** proposes the decision and proves a standalone overlay with text, one atlas sample, scissor, focus and resize.
 2. **#300–#302** deliver the renderer, then stack/focus and layout, then tokens and widgets. The first reusable set is a label, button, toggle, text field, list/scroll viewport, modal, tooltip and inventory slot using rows, columns and fixed grids. It includes a keyboard focus ring and enough contrast for the baseline theme.
