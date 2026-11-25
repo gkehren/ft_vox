@@ -124,6 +124,5 @@ void Engine::requestExit()
 		gameUi->showHostPanel();
 	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0)
 		SDL_RestoreWindow(window);
-	mouseCaptured = false;
-	SDL_SetWindowRelativeMouseMode(window, false);
+	setMouseCaptured(false);
 }

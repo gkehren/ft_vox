@@ -35,7 +35,7 @@
 #include <utils.hpp>
 
 namespace net::udp { struct Address; }
-class UiSpike;
+class GameUiSample;
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
 class Engine
@@ -47,7 +47,8 @@ public:
 	~Engine();
 
 	void run();
-	void enableUiSpike();
+	void enableGameUi(bool standalone = false);
+	void enableUiSpike() { enableGameUi(true); }
 	void initializeNoiseGenerator(int seed);
 	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
 					   const net::wire::PlayerKey &key);
@@ -161,6 +162,7 @@ public:
 private:
 	friend struct EngineJoinProbe;
 	friend struct UiSpikeProbe;
+	friend struct GameUiBackendProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
 	void loadHosting();
@@ -228,7 +230,10 @@ private:
 	/// Record the frame's passes (issue #209 frame step). Mesh uploads are
 	/// recorded HERE (after acquire) — the only GPU upload point; no device
 	/// idle. ImGui draws and the biome-map upload keep their pass ordering.
-	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget);
+	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
+					 std::optional<uint64_t> gpuTag = std::nullopt);
+	void setMouseCaptured(bool captured);
+	bool gameUiCanClickAt(float x, float y) const;
 	/// FPS / world-state window title, once per second of frame clock.
 	void updateWindowTitle(double currentFrame);
 	void placeCameraOnSurface();
@@ -357,7 +362,8 @@ private:
 	std::unique_ptr<WorldRenderer> worldRenderer;
 	std::unique_ptr<ImGuiLayer> imgui;
 	std::unique_ptr<GameUI> gameUi;
-	std::unique_ptr<UiSpike> m_uiSpike;
+	std::unique_ptr<GameUiSample> m_playerUi;
+	bool m_uiSpike{false};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
 	// Authoritative simulation + derived render projection (Epic #204,

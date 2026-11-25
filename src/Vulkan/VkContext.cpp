@@ -11,16 +11,16 @@
 #include <windows.h>
 #endif
 
-namespace
-{
-VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+VKAPI_ATTR VkBool32 VKAPI_CALL VkContext::debugCallback(
 	VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 	VkDebugUtilsMessageTypeFlagsEXT /*types*/,
 	const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
 	void *userData)
 {
-	if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && userData)
-		static_cast<std::atomic<uint64_t> *>(userData)->fetch_add(1, std::memory_order_relaxed);
+	auto *context = static_cast<VkContext *>(userData);
+	const bool error = severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+	if (error && context)
+		context->m_validationErrors.fetch_add(1, std::memory_order_relaxed);
 	if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 	{
 		std::cerr << "[Vulkan] " << callbackData->pMessage << "\n";
@@ -30,11 +30,15 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 			(std::strcmp(id, "VUID-VkSwapchainCreateInfoKHR-imageFormat-01778") == 0 ||
 			 std::strcmp(id, "VUID-VkImageViewCreateInfo-usage-02275") == 0);
 		static std::atomic<bool> reportedRtss{false};
-		if (swapchainUsageError && (GetModuleHandleW(L"RTSSHooks64.dll") || GetModuleHandleW(L"RTSSHooks.dll")) &&
-			!reportedRtss.exchange(true))
-			std::cerr << "[Vulkan] RTSS hooks are loaded. They can add STORAGE usage to SRGB swapchain images "
-				"outside the Vulkan layer chain. Set Application detection level to None for this executable "
-				"in RivaTuner Statistics Server, then restart it. See docs/vulkan-validation.md.\n";
+		if (swapchainUsageError && (GetModuleHandleW(L"RTSSHooks64.dll") || GetModuleHandleW(L"RTSSHooks.dll")))
+		{
+			if (error && context)
+				context->m_rtssValidationErrors.fetch_add(1, std::memory_order_relaxed);
+			if (!reportedRtss.exchange(true))
+				std::cerr << "[Vulkan] RTSS hooks are loaded. They can add STORAGE usage to SRGB swapchain images "
+					"outside the Vulkan layer chain. Set Application detection level to None for this executable "
+					"in RivaTuner Statistics Server, then restart it. See docs/vulkan-validation.md.\n";
+		}
 		const char *trace = std::getenv("FT_VOX_TRACE_VALIDATION");
 		static std::atomic<bool> traced{false};
 		if (trace && std::strcmp(trace, "1") == 0 &&
@@ -60,6 +64,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 	return VK_FALSE;
 }
 
+namespace
+{
 bool checkLayerSupport(const char *layerName)
 {
 	uint32_t layerCount = 0;
@@ -113,6 +119,7 @@ void VkContext::waitIdle() const
 void VkContext::init(SDL_Window *window)
 {
 	m_validationErrors.store(0, std::memory_order_relaxed);
+	m_rtssValidationErrors.store(0, std::memory_order_relaxed);
 	auto getProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
 	if (!getProcAddr)
 		throw std::runtime_error("Failed to get vkGetInstanceProcAddr from SDL: " + std::string(SDL_GetError()));
@@ -348,7 +355,7 @@ void VkContext::createInstance()
 			VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
 			VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 		debugCreateInfo.pfnUserCallback = debugCallback;
-		debugCreateInfo.pUserData = &m_validationErrors;
+		debugCreateInfo.pUserData = this;
 		createInfo.pNext = &debugCreateInfo;
 
 		// The extension is only added to the instance when requested (see
@@ -409,7 +416,7 @@ void VkContext::setupDebugMessenger()
 		VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
 		VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 	createInfo.pfnUserCallback = debugCallback;
-	createInfo.pUserData = &m_validationErrors;
+	createInfo.pUserData = this;
 
 	if (vkCreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS)
 		throw std::runtime_error("Failed to set up Vulkan debug messenger");

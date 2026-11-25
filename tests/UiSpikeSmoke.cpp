@@ -1,5 +1,5 @@
 #include <Engine/Engine.hpp>
-#include <Engine/UiSpike.hpp>
+#include <Engine/GameUiSample.hpp>
 
 #include "TestMain.hpp"
 
@@ -53,7 +53,7 @@ struct UiSpikeProbe
 		engine.running = true;
 		SDL_Window *window = engine.window;
 		const SDL_WindowID id = SDL_GetWindowID(window);
-		const UiSpike &spike = *engine.m_uiSpike;
+		const GameUiSample &spike = *engine.m_playerUi;
 
 		engine.handleEvents();
 		pushWindowEvent(id, SDL_EVENT_WINDOW_FOCUS_GAINED);

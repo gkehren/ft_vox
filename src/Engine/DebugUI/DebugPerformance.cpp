@@ -57,6 +57,18 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 	ImGui::SameLine();
 	ImGui::TextDisabled("CPU scopes · previous frame");
 
+	if (frame.gameUiStats)
+	{
+		const auto &[recordedFrame, ui] = *frame.gameUiStats;
+		ImGui::SeparatorText("Game UI");
+		ImGui::TextDisabled("Recorded frame %llu", static_cast<unsigned long long>(recordedFrame));
+		ImGui::Text("%u draws, %u vertices, %u dropped quads", ui.draws, ui.vertices, ui.dropped);
+		ImGui::Text("%u sets, %llu KiB instances, %llu KiB font, %llu KiB composition",
+			ui.descriptorSets, static_cast<unsigned long long>(ui.instanceBytes / 1024),
+			static_cast<unsigned long long>(ui.fontBytes / 1024),
+			static_cast<unsigned long long>(ui.compositionBytes / 1024));
+	}
+
 	const float frameMs = prof.lastFrameMs();
 	const float avgMs = prof.avgFrameMs();
 	const float fpsEst = prof.fpsEstimate();

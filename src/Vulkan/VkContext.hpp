@@ -77,6 +77,8 @@ public:
 	bool isValidationEnabled() const { return m_validationEnabled; }
 	/// Includes initialization and shutdown; reset only by the next init().
 	uint64_t validationErrorCount() const { return m_validationErrors.load(std::memory_order_relaxed); }
+	// Subset attributed to RTSS' injected swapchain STORAGE usage.
+	uint64_t rtssValidationErrorCount() const { return m_rtssValidationErrors.load(std::memory_order_relaxed); }
 
 	const VkPhysicalDeviceProperties &getDeviceProperties() const { return m_deviceProperties; }
 
@@ -88,6 +90,9 @@ public:
 	void waitIdle() const;
 
 private:
+	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+		VkDebugUtilsMessageTypeFlagsEXT types, const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
+		void *userData);
 	void createAllocator();
 	void createInstance(); // SDL3 extension query needs no window (review M21)
 	void setupDebugMessenger();
@@ -111,6 +116,7 @@ private:
 
 	bool m_validationEnabled{false};
 	std::atomic<uint64_t> m_validationErrors{0};
+	std::atomic<uint64_t> m_rtssValidationErrors{0};
 	bool m_dynamicRendering{false};
 	bool m_timelineSemaphores{false};
 	bool m_multiDrawIndirect{false};

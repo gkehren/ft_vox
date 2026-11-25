@@ -46,6 +46,11 @@ The spike can be removed as a unit in #300. During migration the legacy path is 
 
 ## Running the Phase A spike
 
+The original Phase A captures are retained below. Since #300, `--ui-spike`
+uses the production renderer in its standalone preview mode. Use
+`--game-ui` to see the interactive strip alongside the existing interface.
+See [renderer verification](game-ui-renderer.md) for current captures.
+
 Run `ft_vox --seed 42 --ui-spike --quality low` from the game output directory in a graphics build. It uses a transient solo scene and closes with Escape. The following manual check verifies the rendered output and the controls.
 
 1. Press Enter with no button focus and check that the counter remains at zero. Press Tab, check that the button gains a visible focus ring, then hold Enter long enough for key repeat. The counter should advance to one.
@@ -67,7 +72,7 @@ try {
 
 On a single-config build, run `./tests/test_engine_reload --ui-spike-smoke` from the build directory. The scenario checks a real SDL resize and swapchain recreation, outside release, pixel-only resize, synthetic minimize/restore and stale events after focus loss, including `Tab → Enter` and Escape. It also verifies that regaining window focus requires fresh button focus before activation. Run the manual check for the presented pixels. The smoke mode is opt-in on a graphical machine.
 
-The spike draws at most two instanced batches, owns one atlas descriptor, and uses a fixed 9 KiB instance buffer per frame slot. It does not add a readback or a per-frame wait. For standard Vulkan validation, set `FT_VOX_VALIDATION=1`. For extra synchronization checking, also set `FT_VOX_SYNC_VALIDATION=1`. Keep this check targeted to hardware runs.
+The original Phase A renderer drew at most two instanced batches, owned one atlas descriptor, and used a fixed 9 KiB instance buffer per frame slot. For standard Vulkan validation, set `FT_VOX_VALIDATION=1`. For extra synchronization checking, also set `FT_VOX_SYNC_VALIDATION=1`. Keep this check targeted to hardware runs.
 
 ### Windows GPU evidence
 

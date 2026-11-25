@@ -60,6 +60,12 @@ binary distributions that ship only the compiled SPIR-V remain compliant.
 Dear ImGui (v1.91.x) by Omar Cornut — MIT License. The upstream license text
 ships in `src/imgui/LICENSE.txt`.
 
+The Game UI sample bakes the ProggyClean face already embedded in the pinned
+Dear ImGui 1.91.9 WIP source. ProggyClean.ttf is copyright (c) 2004, 2005
+Tristan Grimmer and uses the MIT terms in `src/imgui/LICENSE.txt`. The font
+attribution accompanies the compressed source in `src/imgui/imgui_draw.cpp`.
+The sample icon uses the resource-pack atlas described above.
+
 ## stb_image (vendored under `src/stb_image/stb_image.h`)
 
 stb_image v2.28 by Sean Barrett — dual-licensed to the public domain or under

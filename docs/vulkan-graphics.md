@@ -144,8 +144,11 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 | 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`MobRenderer::record`** for passive mobs, then **`OverlayRenderer::record`** for highlight / borders / demo players — all inside the same dynamic-rendering scope |
 | 3 | **WaterPass** | HDR (opaque write, no blending) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
-| 5 | **PostStack** | Swapchain | Exposure metering (auto only) → SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite → spatial AA (FXAA 3.11, only when enabled) |
-| 6 | **imguiDraw** callback | Swapchain (load) | ImGui after composite; not a world pass |
+| 5 | **PostStack** | Swapchain or slot-local linear SDR target | Exposure metering (auto only) → SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite → spatial AA (FXAA 3.11, only when enabled) |
+| 6 | **Game UI** (opt-in) | sRGB swapchain (load) or slot-local linear SDR target | Source-over in display-linear RGB. UNORM output uses a final encode pass. |
+| 7 | **Developer UI** callback | Swapchain (load) | Existing ImGui overlay after Game UI and any final encode. |
+
+See [Game UI renderer](game-ui-renderer.md) for composition, capture and resource lifetime.
 
 **Overlays are not a separate post-sky pass.** They run at the end of **OpaquePass** while HDR/depth are still the color/depth attachments (`OpaquePass.cpp`).
 

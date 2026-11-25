@@ -58,7 +58,8 @@ public:
 					float time,
 					const glm::mat4 &projection,
 					float frameDt = 1.f / 60.f,
-					VkGpuProfiler *profiler = nullptr);
+					VkGpuProfiler *profiler = nullptr,
+					bool linearUiTarget = false);
 
 	/// Debug readout: last value pulled from the frame slot's exposure
 	/// snapshot. Populated ONLY by refreshExposureReadout - the render path
@@ -201,6 +202,8 @@ private:
 	/// (issue #143) — the pipeline's color format must match the attachment.
 	VkPipeline m_compositeLdrPipe{VK_NULL_HANDLE};
 	VkPipeline m_fxaaPipe{VK_NULL_HANDLE};
+	VkPipeline m_compositeUiPipe{VK_NULL_HANDLE};
+	VkPipeline m_fxaaUiPipe{VK_NULL_HANDLE};
 	VkPipeline m_downsamplePipe{VK_NULL_HANDLE};
 	VkPipeline m_adaptPipe{VK_NULL_HANDLE};
 

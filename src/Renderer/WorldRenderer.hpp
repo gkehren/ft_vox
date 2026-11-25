@@ -31,6 +31,8 @@
 #include <string>
 
 /// Thin world-frame orchestrator: sequences Shadow → Opaque → Water → Sky → Post.
+namespace gameui { class Renderer; }
+
 class WorldRenderer
 {
 public:
@@ -45,6 +47,7 @@ public:
 			  GpuResourceRetire &retire, const std::string &resourcePackRoot = {});
 	void shutdown();
 	void onSwapchainRecreate(VkSwapchain &swapchain);
+	void resizeOutput(VkExtent2D extent, VkFormat format, VkColorSpaceKHR colorSpace);
 
 	/// Rebuild block texture array from pack root (empty = bundled). Caller must device-idle first.
 	/// Does not store pack path — Engine owns the authoritative path.
@@ -69,12 +72,13 @@ public:
 					 const std::function<void(VkCommandBuffer)> &preRecord = {},
 					 const std::function<void(VkCommandBuffer)> &uiDraw = {},
 					 const std::function<void(VkCommandBuffer)> &postImGuiRecord = {},
-                     VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
+                     VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0,
+					 gameui::Renderer *playerUi = nullptr);
 
 	/// Offscreen variant for tooling (visual-regression tests): identical pass
 	/// graph and production shaders, but composites into a caller-owned target
-	/// which is left in COLOR_ATTACHMENT_OPTIMAL. No UI overlay, no
-	/// PRESENT transition — the runtime path never records this way. The
+	/// which is left in COLOR_ATTACHMENT_OPTIMAL. A prepared playerUi opts
+	/// into UI captures. Ordinary scene references omit it. The
 	/// command buffer must already be in the recording state and is NOT ended
 	/// here (ImmediateCommands::submitAndWait owns the lifecycle).
 	void recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex, VkImage targetImage,
@@ -82,7 +86,8 @@ public:
 							const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 							const VkClearColorValue &clearColor,
 							const std::function<void(VkCommandBuffer)> &preRecord = {},
-							VkGpuProfiler *gpu = nullptr);
+								VkGpuProfiler *gpu = nullptr, gameui::Renderer *playerUi = nullptr,
+								const std::function<void(VkCommandBuffer)> &devUiDraw = {});
 
 	void setMobs(const std::vector<entities::MobRenderState> &states) { m_mobStates = states; }
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
@@ -169,7 +174,11 @@ private:
 	void recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
 							VkImage targetImage, VkImageView targetView,
 							const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
-							const VkClearColorValue &clearColor, VkGpuProfiler *gpu);
+							const VkClearColorValue &clearColor, VkGpuProfiler *gpu, bool linearUiTarget);
+	void recordSceneAndPlayerUi(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
+								VkImage output, VkImageView view,
+								const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+								const VkClearColorValue &clearColor, VkGpuProfiler *gpu, gameui::Renderer *playerUi);
 
 	VkContext *m_context{nullptr};
 	ImmediateCommands *m_imm{nullptr};

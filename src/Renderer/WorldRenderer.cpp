@@ -1,4 +1,5 @@
 #include "Renderer/WorldRenderer.hpp"
+#include "Renderer/GameUiRenderer.hpp"
 #include "Renderer/MaterialTable.hpp"
 #include "Renderer/ScreenSpace.hpp"
 #include "Engine/Profiler.hpp"
@@ -35,6 +36,39 @@ VkPipelineVertexInputStateCreateInfo makeVertexInput(VkVertexInputBindingDescrip
 
 auto beginR() { return vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR; }
 auto endR() { return vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR; }
+
+void recordDevUi(VkCommandBuffer cmd, VkImage image, VkImageView view, VkExtent2D extent,
+				 const std::function<void(VkCommandBuffer)> &draw, VkGpuProfiler *gpu)
+{
+	if (!draw)
+		return;
+	PROFILE_SCOPE("DevUIDraw");
+	if (gpu) gpu->beginPass(cmd, GpuPass::ImGui);
+	vkbar::cmdTransitionColor(cmd, image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+	VkRenderingAttachmentInfo color{};
+	color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+	color.imageView = view;
+	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	VkRenderingInfo rendering{};
+	rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+	rendering.renderArea = {{0, 0}, extent};
+	rendering.layerCount = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments = &color;
+	beginR()(cmd, &rendering);
+	const VkViewport viewport{0.f, 0.f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.f, 1.f};
+	const VkRect2D full{{0, 0}, extent};
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	vkCmdSetScissor(cmd, 0, 1, &full);
+	draw(cmd);
+	endR()(cmd);
+	if (gpu) gpu->endPass(cmd, GpuPass::ImGui);
+}
 } // namespace
 
 WorldRenderer::~WorldRenderer() { shutdown(); }
@@ -367,9 +401,13 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 
 void WorldRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 {
+	resizeOutput(swapchain.getExtent(), swapchain.getImageFormat(), swapchain.getColorSpace());
+}
+
+void WorldRenderer::resizeOutput(VkExtent2D extent, VkFormat format, VkColorSpaceKHR colorSpace)
+{
 	m_context->waitIdle();
-	const auto extent = swapchain.getExtent();
-	m_post.resize(extent.width, extent.height, swapchain.getImageFormat(), swapchain.getColorSpace());
+	m_post.resize(extent.width, extent.height, format, colorSpace);
 	m_water.resize(extent.width, extent.height, m_post.depthFormat());
 	m_water.writeSceneDescriptors(m_set2Water, m_water.sceneSampler());
 	m_sky.recreatePipeline(m_post.hdrFormat(), m_post.depthFormat());
@@ -472,7 +510,7 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
 									   VkImage targetImage, VkImageView targetView,
 									   const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
-									   const VkClearColorValue &clearColor, VkGpuProfiler *gpu)
+									   const VkClearColorValue &clearColor, VkGpuProfiler *gpu, bool linearUiTarget)
 {
 	const VkDescriptorSet set0 = m_frameUbos[frameIndex].descriptorSet0;
 	auto *drawDataMapped = static_cast<VoxelDrawData *>(m_frameUbos[frameIndex].drawDataMapped);
@@ -533,8 +571,23 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 		if (gpu) gpu->beginPass(cmd, GpuPass::Post);
 		m_post.recordPost(cmd, targetImage, targetView, extent,
 						  frameIndex, set0, m_postSettings, sunScreen,
-						  sunVisibility, m_time, ubo->projection, m_frameDt, gpu);
+						  sunVisibility, m_time, ubo->projection, m_frameDt, gpu, linearUiTarget);
 		if (gpu) gpu->endPass(cmd, GpuPass::Post);
+	}
+}
+
+void WorldRenderer::recordSceneAndPlayerUi(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
+										  VkImage output, VkImageView view,
+										  const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+										  const VkClearColorValue &clearColor, VkGpuProfiler *gpu, gameui::Renderer *playerUi)
+{
+	const auto *linear = playerUi ? playerUi->linearTarget(frameIndex) : nullptr;
+	recordSceneAndPost(cmd, frameIndex, extent, linear ? linear->image : output,
+		linear ? linear->view : view, chunks, shadowChunks, clearColor, gpu, linear != nullptr);
+	if (playerUi && playerUi->hasDraws(frameIndex))
+	{
+		PROFILE_SCOPE("GameUIDraw");
+		playerUi->record(cmd, frameIndex, extent, output, view, gpu);
 	}
 }
 
@@ -544,7 +597,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 								  const std::function<void(VkCommandBuffer)> &preRecord,
 								  const std::function<void(VkCommandBuffer)> &uiDraw,
 								  const std::function<void(VkCommandBuffer)> &postImGuiRecord,
-								  VkGpuProfiler *gpu, uint64_t benchmarkTag)
+								  VkGpuProfiler *gpu, uint64_t benchmarkTag, gameui::Renderer *playerUi)
 {
 	const VkExtent2D extent = swapchain.getExtent();
 	const auto beginRendering = beginR();
@@ -562,32 +615,11 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		preRecord(cmd);
 	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
 
-	recordSceneAndPost(cmd, frameIndex, extent, swapchain.getImages()[imageIndex],
-					   swapchain.getImageViews()[imageIndex], chunks, shadowChunks, clearColor, gpu);
+	const auto output = swapchain.getImages()[imageIndex];
+	const auto view = swapchain.getImageViews()[imageIndex];
+	recordSceneAndPlayerUi(cmd, frameIndex, extent, output, view, chunks, shadowChunks, clearColor, gpu, playerUi);
 
-	if (uiDraw)
-	{
-		PROFILE_SCOPE("ImGuiDraw");
-		if (gpu) gpu->beginPass(cmd, GpuPass::ImGui);
-		VkRenderingAttachmentInfo colorAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-		colorAtt.imageView = swapchain.getImageViews()[imageIndex];
-		colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-		ri.renderArea = {{0, 0}, extent};
-		ri.layerCount = 1;
-		ri.colorAttachmentCount = 1;
-		ri.pColorAttachments = &colorAtt;
-		beginRendering(cmd, &ri);
-		VkViewport vp{0, 0, (float)extent.width, (float)extent.height, 0, 1};
-		VkRect2D sc{{0, 0}, extent};
-		vkCmdSetViewport(cmd, 0, 1, &vp);
-		vkCmdSetScissor(cmd, 0, 1, &sc);
-		uiDraw(cmd);
-		endRendering(cmd);
-		if (gpu) gpu->endPass(cmd, GpuPass::ImGui);
-	}
+	recordDevUi(cmd, output, view, extent, uiDraw, gpu);
 
 	// Post-ImGui recording (issue #191 review round 2): uploads whose
 	// textures ImGui samples directly (biome map) commit here, so this
@@ -612,7 +644,8 @@ void WorldRenderer::recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex,
 									   const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 									   const VkClearColorValue &clearColor,
 									   const std::function<void(VkCommandBuffer)> &preRecord,
-									   VkGpuProfiler *gpu)
+									   VkGpuProfiler *gpu, gameui::Renderer *playerUi,
+									   const std::function<void(VkCommandBuffer)> &devUiDraw)
 {
 	// The caller owns the command-buffer lifecycle (submitAndWait begins and
 	// ends it around this call), unlike recordFrame's VkFrameContext path.
@@ -622,7 +655,8 @@ void WorldRenderer::recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex,
 		preRecord(cmd);
 	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
 
-	recordSceneAndPost(cmd, frameIndex, extent, targetImage, targetView, chunks, shadowChunks, clearColor, gpu);
+	recordSceneAndPlayerUi(cmd, frameIndex, extent, targetImage, targetView, chunks, shadowChunks, clearColor, gpu, playerUi);
+	recordDevUi(cmd, targetImage, targetView, extent, devUiDraw, gpu);
 	// Target stays in COLOR_ATTACHMENT_OPTIMAL: the caller owns any further
 	// transition (test readback to TRANSFER_SRC).
 	if (gpu) gpu->endRecording(cmd);

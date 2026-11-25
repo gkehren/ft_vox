@@ -26,6 +26,9 @@
 int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
 int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
 int runUiSpikeSmoke(Engine &engine);
+int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output);
+int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
+int runGameUiPerformance(Engine &engine);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
 	const std::filesystem::path &evidence, bool restoring);
 
@@ -70,6 +73,12 @@ int main(int argc, char **argv)
 	{
 		if (argc == 2 && std::string_view(argv[1]) == "--ui-spike-smoke")
 			return runUiSpikeSmoke(*engine);
+		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-screenshot")
+			return runGameUiScreenshot(*engine, argv[2]);
+		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-present-proof")
+			return runGameUiPresentProof(*engine, argv[2]);
+		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-performance")
+			return runGameUiPerformance(*engine);
 		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")
 		{
 			engine->setSavesRootForTests(argv[4]);
