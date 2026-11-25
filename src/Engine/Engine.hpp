@@ -242,7 +242,7 @@ private:
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
 	gameui::InputContext inputContext() const;
-	bool developerPointerAt(float x, float y) const;
+	ImGuiLayer::PointerHit developerPointerAt(float x, float y) const;
 	bool routeUiEvent(const SDL_Event &event);
 	/// FPS / world-state window title, once per second of frame clock.
 	void updateWindowTitle(double currentFrame);
@@ -379,7 +379,6 @@ private:
 	gameui::InputRouter m_inputRouter;
 	std::optional<bool> m_captureBeforeScreen;
 	uint64_t m_uiScreenRevision{};
-	int m_pendingDeveloperPressFrame{-2};
 	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
 	bool m_uiSpike{false};
 	std::unique_ptr<ThreadPool> threadPool;

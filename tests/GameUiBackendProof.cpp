@@ -257,6 +257,23 @@ struct GameUiBackendProbe
 		checked(SDL_PushEvent(&event), "queue pointer motion");
 	}
 
+	void clickAt(glm::vec2 point)
+	{
+		SDL_WarpMouseInWindow(engine.window, point.x, point.y);
+		motion(point.x, point.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y);
+	}
+
+	void commitText(const char *text)
+	{
+		SDL_Event event{};
+		event.type = SDL_EVENT_TEXT_INPUT;
+		event.text.windowID = SDL_GetWindowID(engine.window);
+		event.text.text = text;
+		checked(SDL_PushEvent(&event), "queue committed SDL text");
+	}
+
 	void key(SDL_Keycode code, Uint32 type, bool repeat = false, SDL_Keymod mods = SDL_KMOD_NONE)
 	{
 		SDL_Event event{};
@@ -425,7 +442,7 @@ struct GameUiBackendProbe
 			sample.lastRecordedStats()->metrics.dropped == 0, "two widget groups fit the existing draw budget");
 
 		const auto sliderPoint = center("Preview level");
-		const bool overDeveloper = engine.developerPointerAt(50.f, 12.f);
+		const bool overDeveloper = engine.developerPointerAt(50.f, 12.f) == ImGuiLayer::PointerHit::Interactive;
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, sliderPoint.x, sliderPoint.y);
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, 50.f, 12.f, SDL_BUTTON_RIGHT);
 		button(SDL_EVENT_MOUSE_BUTTON_UP, 50.f, 12.f, SDL_BUTTON_RIGHT);
@@ -500,10 +517,98 @@ struct GameUiBackendProbe
 		engine.handleEvents();
 		CHECK(engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "fresh gameplay press works after resume");
 		key(SDLK_W, SDL_EVENT_KEY_UP);
+		keyboardHandoffProof();
 		context.waitIdle();
 		if (context.isValidationEnabled())
 			CHECK(context.validationErrorCount() - before == context.rtssValidationErrorCount() - rtssBefore,
 				"showcase presentation reports only the known RTSS subset if the hook is loaded");
+	}
+
+	void keyboardHandoffProof()
+	{
+		auto &sample = *engine.m_playerUi;
+		char developerValue[96]{};
+		glm::vec2 developerPoint{};
+		const auto developer = [&] {
+			ImGui::SetNextWindowPos({45.f, 210.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({190.f, 90.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Developer text handoff", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				ImGui::InputText("##handoff", developerValue, sizeof(developerValue));
+				const auto position = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				developerPoint = {position.x - origin.x + 15.f, position.y - origin.y + 8.f};
+			}
+			ImGui::End();
+		};
+		const auto redraw = [&] {
+			for (int frame = 0; frame < 7; ++frame)
+				present(developer);
+		};
+		tap(SDLK_ESCAPE);
+		present(developer);
+		tap(SDLK_TAB);
+		tap(SDLK_RETURN);
+		present(developer);
+		present(developer);
+		CHECK(sample.m_sdlEditor == &sample.m_field, "handoff starts with the native editor active");
+		glm::vec2 nativePoint{};
+		for (const auto &widget : sample.m_widgets.widgets())
+			if (widget.label == "Name")
+			{
+				const auto rect = sample.m_widgets.bounds(widget).rect;
+				nativePoint = {(rect.x + rect.z) * 0.5f, (rect.y + rect.w) * 0.5f};
+			}
+		const std::string originalNative = sample.m_field.value();
+		clickAt(developerPoint);
+		tap(SDLK_END);
+		commitText("dev");
+		engine.handleEvents();
+		CHECK(engine.imgui->pendingKeyboard() && SDL_TextInputActive(engine.window) && !sample.m_sdlEditor &&
+			sample.m_field.value() == originalNative, "native-to-developer press hands over SDL in the same event batch");
+		redraw();
+		CHECK(engine.imgui->editingText() && std::string_view(developerValue) == "dev",
+			"real ImGui InputText consumes its same-batch text");
+
+		commitText("-before");
+		clickAt(nativePoint);
+		tap(SDLK_END);
+		commitText("-native");
+		SDL_Event composition{};
+		composition.type = SDL_EVENT_TEXT_EDITING;
+		composition.edit.windowID = SDL_GetWindowID(engine.window);
+		composition.edit.text = "preview";
+		composition.edit.start = 1;
+		checked(SDL_PushEvent(&composition), "queue preedit after native handoff");
+		engine.handleEvents();
+		CHECK(!engine.imgui->editingText() && !engine.imgui->pendingKeyboard() &&
+			sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window) &&
+			sample.m_field.value() == originalNative + "-native" && sample.m_field.composition() == "preview",
+			"developer-to-native press transfers same-batch keys, commit and preedit");
+
+		// Switch back before ImGui builds. The old editor must still receive
+		// its earlier commit, followed by the newer click and text.
+		clickAt(developerPoint);
+		tap(SDLK_END);
+		commitText("-after");
+		engine.handleEvents();
+		CHECK(sample.m_field.composition().empty() && !sample.m_sdlEditor &&
+			engine.imgui->pendingKeyboard() && SDL_TextInputActive(engine.window),
+			"return to developer clears native composition without dropping the reservation");
+		redraw();
+		CHECK(std::string_view(developerValue) == "dev-before-after" && engine.imgui->editingText() &&
+			sample.m_field.value() == originalNative + "-native",
+			"queued developer commits are preserved across the boundary without receiving native text");
+
+		clickAt(nativePoint);
+		tap(SDLK_END);
+		commitText("-end");
+		redraw();
+		CHECK(!engine.imgui->editingText() && sample.m_sdlEditor == &sample.m_field &&
+			SDL_TextInputActive(engine.window) && sample.m_field.value() == originalNative + "-native-end" &&
+			std::string_view(developerValue) == "dev-before-after",
+			"retiring ImGui does not stop the new native SDL session at EndFrame");
 	}
 
 	static int queuedReleases()
@@ -697,6 +802,65 @@ struct GameUiBackendProbe
 		engine.handleEvents();
 		CHECK(!sample.m_armed && sample.m_activations == 4 && queuedReleases() == releasesBeforeDialog,
 			"closing the dialog keeps the cancelled release with its original owner");
+
+		const auto overlay = [&](bool passThrough) {
+			ImGui::SetNextWindowPos({pos.x - 52.f, pos.y - 30.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({104.f, 60.f}, ImGuiCond_Always);
+			if (ImGui::Begin(passThrough ? "Pass through proof" : "Passive cover proof", nullptr,
+				ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				if (passThrough)
+					ImGuiLayer::markCurrentWindowPassThrough();
+				ImGui::TextUnformatted("Status");
+			}
+			ImGui::End();
+		};
+		present([&] { overlay(false); });
+		CHECK(engine.developerPointerAt(pos.x, pos.y) == ImGuiLayer::PointerHit::Occludes,
+			"passive overlay shields its visible rectangle");
+		clickAt(pos);
+		present([&] { overlay(false); });
+		CHECK(sample.m_activations == 4 && !engine.imgui->pendingKeyboard(),
+			"passive overlay consumes neither a native click nor developer keyboard ownership");
+		present([&] { overlay(true); });
+		CHECK(engine.developerPointerAt(pos.x, pos.y) == ImGuiLayer::PointerHit::PassThrough,
+			"marked HUD overlay leaves the lower surface reachable");
+		clickAt(pos);
+		present([&] { overlay(true); });
+		CHECK(sample.m_activations == 5, "pass-through HUD permits the native scale click");
+	}
+
+	void legacyUnfocusProof()
+	{
+		char value[32]{};
+		const auto editor = [&] {
+			ImGui::SetNextWindowPos({45.f, 210.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({190.f, 90.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Legacy unfocus proof", nullptr, ImGuiWindowFlags_NoDecoration |
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings))
+				ImGui::InputText("##legacy", value, sizeof(value));
+			ImGui::End();
+		};
+		present(editor);
+		clickAt({86.f, 225.f});
+		present(editor);
+		present(editor);
+		CHECK(engine.imgui->editingText(), "legacy fixture activates a real ImGui editor");
+		CHECK(engine.developerPointerAt(500.f, 330.f) == ImGuiLayer::PointerHit::PassThrough,
+			"legacy game view is clear at the click-to-unfocus target");
+		commitText("before");
+		clickAt({500.f, 330.f});
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		commitText("ignored");
+		engine.handleEvents();
+		CHECK(!engine.imgui->editingText() && engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W),
+			"legacy gameplay click releases the editor and restores keyboard routing in the batch");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		for (int frame = 0; frame < 4; ++frame)
+			present(editor);
+		CHECK(std::string_view(value) == "before" && !engine.imgui->editingText() && !SDL_TextInputActive(engine.window),
+			"legacy editor commits only its pre-click text and relinquishes SDL");
 	}
 
 	void presentProof(const std::filesystem::path &out)
@@ -744,6 +908,7 @@ struct GameUiBackendProbe
 		developerDragProof(true);
 		auto native = std::move(engine.m_playerUi);
 		developerDragProof(false);
+		legacyUnfocusProof();
 		engine.m_playerUi = std::move(native);
 		context.waitIdle();
 		if (context.isValidationEnabled())

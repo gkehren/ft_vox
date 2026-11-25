@@ -1889,7 +1889,8 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 		{
 			float x = 0.f, y = 0.f;
 			SDL_GetMouseState(&x, &y);
-			if (mouseCaptured || m_benchmark.locksInput() || inputContext().devDialog || developerPointerAt(x, y))
+			if (mouseCaptured || m_benchmark.locksInput() || inputContext().devDialog ||
+				developerPointerAt(x, y) != ImGuiLayer::PointerHit::PassThrough)
 				cancelGameUiPointer();
 		}
 		gameui::Clip view{};

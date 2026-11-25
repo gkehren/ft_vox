@@ -31,7 +31,6 @@ bool Engine::setMouseCaptured(bool captured)
 
 void Engine::cancelDeveloperInput()
 {
-	m_pendingDeveloperPressFrame = -2;
 	m_inputRouter.cancelDeveloper();
 	if (imgui)
 		imgui->cancelInput();
@@ -69,9 +68,7 @@ bool Engine::suppressDeveloperUi() const
 gameui::InputContext Engine::inputContext() const
 {
 	const bool devAvailable = imgui && !m_inspectionView && !m_uiSpike && !suppressDeveloperUi();
-	// ImGui resolves the click's new focus at NewFrame. A second SDL
-	// event in the same batch must already consider that pending focus.
-	const bool pendingDevFocus = devAvailable && m_pendingDeveloperPressFrame == imgui->inputFrame();
+	const bool pendingDevFocus = devAvailable && imgui->pendingKeyboard();
 	return {
 		.interactive = windowFocused && !m_windowHidden && !m_windowMinimized,
 		.locked = m_benchmark.locksInput(),
@@ -88,10 +85,12 @@ gameui::InputContext Engine::inputContext() const
 	};
 }
 
-bool Engine::developerPointerAt(float x, float y) const
+ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 {
-	return imgui && !m_inspectionView && !m_uiSpike && !suppressDeveloperUi() &&
-		(mouseCaptured ? imgui->ownsActiveInput() : imgui->blocksGameUiPointer(x, y));
+	using enum ImGuiLayer::PointerHit;
+	if (!imgui || m_inspectionView || m_uiSpike || suppressDeveloperUi())
+		return PassThrough;
+	return mouseCaptured ? (imgui->ownsActiveInput() ? Interactive : PassThrough) : imgui->pointerHit(x, y);
 }
 
 void Engine::setInventoryOpen(bool open)
@@ -238,7 +237,9 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			return true;
 		const float x = motion ? event.motion.x : (wheel ? event.wheel.mouse_x : event.button.x);
 		const float y = motion ? event.motion.y : (wheel ? event.wheel.mouse_y : event.button.y);
-		policy.devPointer = developerPointerAt(x, y);
+		const auto devHit = developerPointerAt(x, y);
+		policy.devPointer = devHit == ImGuiLayer::PointerHit::Interactive;
+		policy.devOccludes = devHit == ImGuiLayer::PointerHit::Occludes;
 		const auto press = m_inputRouter.pointerOwner();
 		policy.nativePointer = !mouseCaptured && m_playerUi && !wheel &&
 			(motion ? press == PlayerUi : event.button.button == SDL_BUTTON_LEFT) && m_playerUi->hitsStrip(x, y);
@@ -246,7 +247,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const bool continuing = motion ||
 			(event.type == SDL_EVENT_MOUSE_BUTTON_UP && m_inputRouter.activeButton(event.button.button));
 		if (m_playerUi && press == PlayerUi && continuing &&
-			(!policy.interactive || policy.locked || policy.devDialog || policy.devPointer))
+			(!policy.interactive || policy.locked || policy.devDialog || policy.devPointer || policy.devOccludes))
 			cancelGameUiPointer();
 		if (press == Gameplay && continuing && candidate != Gameplay)
 			m_inputRouter.cancelPointer(Gameplay);
@@ -261,6 +262,13 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		if (imgui && policy.interactive && !policy.modal && !mouseCaptured &&
 			((motion && owner != DeveloperUi) || (!motion && owner == DeveloperUi)))
 			imgui->observePointer(x, y);
+		if (imgui && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT &&
+			((owner == PlayerUi && m_playerUi && (policy.nativeScreen ? m_playerUi->canFocusWidget(x, y) : policy.nativePointer)) ||
+			 (owner == Gameplay && !mouseCaptured)))
+		{
+			m_inputRouter.cancelKeyboard(DeveloperUi);
+			imgui->yieldKeyboard();
+		}
 		if (owner == PlayerUi && m_playerUi && !policy.nativeScreen)
 		{
 			deliver(m_playerUi->handleEvent(window, event, candidate == PlayerUi));
@@ -286,14 +294,13 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 	}
 	else if (owner == DeveloperUi && imgui && !policy.modal)
 	{
-		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
-		{
-			m_pendingDeveloperPressFrame = imgui->inputFrame();
-			if (m_playerUi)
-				m_playerUi->yieldTextInput(window);
+		const bool press = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+		const bool takingTextInput = press && m_playerUi && m_playerUi->yieldTextInput(window);
+		if (takingTextInput)
+			m_inputRouter.cancelKeyboard(PlayerUi);
+		imgui->processEvent(event, takingTextInput);
+		if (press)
 			syncUiInput();
-		}
-		imgui->processEvent(event);
 	}
 	return owner != Gameplay && owner != Global;
 }

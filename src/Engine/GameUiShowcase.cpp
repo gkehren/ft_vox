@@ -162,6 +162,33 @@ void GameUiSample::paintScreen(glm::vec2 pointer)
 
 GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 {
+	if (m_sdlEditor && m_sdlEditor == m_widgets.editor(event.id) && event.id == m_screens.focus())
+	{
+		switch (event.action)
+		{
+		case WidgetAction::Copy:
+		case WidgetAction::Cut:
+		{
+			const bool cut = event.action == WidgetAction::Cut;
+			const auto selected = m_sdlEditor->selection();
+			event = !selected.empty() && SDL_SetClipboardText(std::string(selected).c_str()) && cut
+				? m_widgets.completeCut(event.id) : WidgetEvent{};
+			break;
+		}
+		case WidgetAction::Paste:
+		{
+			const auto target = event.id;
+			event = {};
+			if (char *clipboard = SDL_GetClipboardText())
+			{
+				event = m_widgets.commitText(target, clipboard);
+				SDL_free(clipboard);
+			}
+			break;
+		}
+		default: break;
+		}
+	}
 	if (event.action == WidgetAction::Activate)
 	{
 		switch (event.id)
@@ -179,26 +206,6 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 		auto focus = m_screens.focus();
 		m_widgets.setEnabled(SecondaryName, m_enableSecond.value, focus);
 		m_screens.focus(focus);
-	}
-	if (auto *field = m_widgets.editor(m_screens.focus()); field && event.id == m_screens.focus())
-	{
-		switch (event.action)
-		{
-		case WidgetAction::Copy:
-		case WidgetAction::Cut:
-			if (!field->selection().empty() && SDL_SetClipboardText(std::string(field->selection()).c_str()) &&
-				event.action == WidgetAction::Cut)
-				field->erase(NavKey::Delete);
-			break;
-		case WidgetAction::Paste:
-			if (char *clipboard = SDL_GetClipboardText())
-			{
-				field->insert(clipboard);
-				SDL_free(clipboard);
-			}
-			break;
-		default: break;
-		}
 	}
 	return InputResult::Consumed;
 }
@@ -228,15 +235,20 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 	SDL_SetTextInputArea(window, &area, int(std::lround(geometry.caretX)) - left);
 }
 
-void GameUiSample::yieldTextInput(SDL_Window *window)
+bool GameUiSample::yieldTextInput(SDL_Window *window)
 {
-	if (m_sdlEditor)
-	{
-		auto focus = m_screens.focus();
-		m_widgets.focus(focus, 0, false);
-		m_screens.focus(focus);
-		updateTextInput(window, false);
-	}
+	if (!m_sdlEditor)
+		return false;
+	auto focus = m_screens.focus();
+	m_widgets.focus(focus, 0, false);
+	m_screens.focus(focus);
+	updateTextInput(window, false);
+	return true;
+}
+
+bool GameUiSample::canFocusWidget(float x, float y) const
+{
+	return m_layoutRevision == m_screens.revision() && m_widgets.focusableAt({x, y});
 }
 
 GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event)
@@ -249,7 +261,7 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event
 	{
 	case SDL_EVENT_TEXT_INPUT:
 		if (m_sdlEditor && m_sdlEditor == m_widgets.editor(focus) && event.text.text)
-			m_sdlEditor->insert(event.text.text);
+			result = m_widgets.commitText(focus, event.text.text);
 		break;
 	case SDL_EVENT_TEXT_EDITING:
 		if (m_sdlEditor && m_sdlEditor == m_widgets.editor(focus))

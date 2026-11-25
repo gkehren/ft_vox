@@ -21,6 +21,7 @@ void routing()
 	const InputContext unfocused{.interactive = false};
 	const InputContext nativeTarget{.nativePointer = true};
 	const InputContext coveredTarget{.devPointer = true, .nativePointer = true};
+	const InputContext passiveCover{.devOccludes = true, .nativePointer = true};
 	const InputContext devText{.nativeScreen = true, .devText = true};
 	const InputContext loading{.devPointer = true, .transition = true};
 	CHECK(hud.choose(Key) == Gameplay && hud.choose(Pointer) == Gameplay && hud.choose(Text) == Blocked,
@@ -30,6 +31,8 @@ void routing()
 		"developer widgets capture actions while explicit globals bypass text");
 	CHECK(nativeTarget.choose(Pointer) == PlayerUi && coveredTarget.choose(Pointer) == DeveloperUi,
 		"visible HUD control has a pointer target only outside developer occlusion");
+	CHECK(passiveCover.choose(Pointer) == Blocked && passiveCover.choose(Key) == Gameplay &&
+		passiveCover.choose(Text) == Blocked, "an occluding passive overlay claims no keyboard or text");
 	CHECK(devText.choose(Text) == DeveloperUi && devText.choose(Key, false, true) == DeveloperUi,
 		"active developer text takes one keyboard stream while a native nonmodal screen is visible");
 	CHECK(inventory.choose(Key) == Blocked && inventory.choose(Key, false, true) == PlayerUi &&
@@ -277,6 +280,47 @@ void textInput()
 	CHECK(geometry.caretX == geometry.clip.rect.z - 1.f && geometry.origin.x < 0.f,
 		"the long-field IME anchor uses the same horizontally scrolled geometry as painting");
 }
+
+void changeNotifications()
+{
+	TextField first, second;
+	WidgetSet set;
+	set.reset({{0, 0, 200, 100}}, 100, 0);
+	set.add({1, {{0, 0, 190, 36}}, "first", {}, &first});
+	set.add({2, {{0, 40, 190, 76}}, "second", {}, &second});
+	ControlId focus{};
+	set.focus(focus, 1, false);
+	const auto checkEdit = [&](WidgetEvent edit) {
+		CHECK(edit.action == WidgetAction::Change && edit.id == focus, "effective text edit identifies the focused binding");
+	};
+	const auto key = [&](NavKey key, bool shortcut = false) { return set.key(focus, key, false, shortcut, false); };
+	CHECK(key(NavKey::Backspace).action == WidgetAction::None, "deleting from empty text is a no-op");
+	first.preedit("pending", 1, 2);
+	CHECK(key(NavKey::Backspace).action == WidgetAction::None && first.value().empty() &&
+		first.composition() == "pending", "preedit and composition editing do not change committed text");
+	checkEdit(set.commitText(focus, "a\xc3\xa9"));
+	CHECK(first.composition().empty() && key(NavKey::Left).action == WidgetAction::None,
+		"caret movement and clearing preedit are not change actions");
+	checkEdit(key(NavKey::Delete));
+	CHECK(first.value() == "a" && key(NavKey::Delete).action == WidgetAction::None, "delete at end has no event");
+	CHECK(key(NavKey::A, true).action == WidgetAction::None &&
+		key(NavKey::C, true).action == WidgetAction::Copy &&
+		set.commitText(focus, "a").action == WidgetAction::None, "selection, copy and identical replacement do not change text");
+	CHECK(set.completeCut(focus).action == WidgetAction::None && first.value() == "a", "cut requires a selection");
+	first.selectAll();
+	CHECK(key(NavKey::X, true).action == WidgetAction::Cut && first.value() == "a",
+		"cut does not mutate until the clipboard adapter completes it");
+	checkEdit(set.completeCut(focus));
+	CHECK(first.value().empty() && set.completeCut(focus).action == WidgetAction::None, "successful cut emits once");
+	set.focus(focus, 2, false);
+	CHECK(key(NavKey::V, true).action == WidgetAction::Paste && second.value().empty(), "paste asks the clipboard adapter");
+	checkEdit(set.commitText(focus, "paste"));
+	CHECK(second.value() == "paste" && first.value().empty() &&
+		set.commitText(focus, "\n").action == WidgetAction::None, "paste and SDL commits share sanitization and notifications");
+	set.setEnabled(2, false, focus);
+	CHECK(set.commitText(2, "stale").action == WidgetAction::None &&
+		set.completeCut(2).action == WidgetAction::None && second.value() == "paste", "disabled binding rejects delayed completion");
+}
 } // namespace
 
 int main()
@@ -287,5 +331,6 @@ int main()
 	layoutAndWidgets();
 	reusableBindings();
 	textInput();
+	changeNotifications();
 	return testmain::exitCode();
 }

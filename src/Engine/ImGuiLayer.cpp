@@ -233,10 +233,21 @@ void ImGuiLayer::shutdown()
 	m_framebufferScale = 1.f;
 }
 
-void ImGuiLayer::processEvent(const SDL_Event &event)
+void ImGuiLayer::processEvent(const SDL_Event &event, bool takingTextInput)
 {
-	if (m_initialized)
-		ImGui_ImplSDL3_ProcessEvent(&event);
+	if (!m_initialized)
+		return;
+	auto &context = *ImGui::GetCurrentContext();
+	const auto nextEvent = context.InputEventsNextEventId;
+	if (ImGui_ImplSDL3_ProcessEvent(&event) && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+		context.InputEventsNextEventId != nextEvent)
+	{
+		m_pendingPressEvent = context.InputEventsNextEventId - 1;
+		// The new InputText will become active during the next ImGui build.
+		// Keep SDL accepting text while the accepted click is still queued.
+		if (takingTextInput)
+			m_provisionalTextInput = SDL_StartTextInput(m_window);
+	}
 }
 
 void ImGuiLayer::observePointer(float x, float y)
@@ -262,6 +273,8 @@ void ImGuiLayer::cancelInput()
 {
 	if (!m_initialized)
 		return;
+	stopTextInput();
+	m_pendingPressEvent = m_yieldThroughEvent = 0;
 	ImGui_ImplSDL3_CancelMouseCapture();
 	auto &io = ImGui::GetIO();
 	auto &context = *ImGui::GetCurrentContext();
@@ -279,6 +292,54 @@ void ImGuiLayer::cancelInput()
 	ImGui::ClearActiveID();
 	context.MovingWindow = nullptr;
 	ImGui::ClearDragDrop();
+}
+
+void ImGuiLayer::stopTextInput()
+{
+	auto &context = *ImGui::GetCurrentContext();
+	if (context.PlatformImeData.WantVisible || context.PlatformImeDataPrev.WantVisible)
+	{
+		SDL_ClearComposition(m_window);
+		if (const auto setIme = context.PlatformIO.Platform_SetImeDataFn)
+		{
+			ImGuiPlatformImeData hidden{};
+			setIme(&context, ImGui::GetMainViewport(), &hidden);
+		}
+		context.PlatformImeData.WantVisible = context.PlatformImeDataPrev.WantVisible = false;
+	}
+	if (m_provisionalTextInput)
+	{
+		SDL_ClearComposition(m_window);
+		SDL_StopTextInput(m_window);
+		m_provisionalTextInput = false;
+	}
+}
+
+void ImGuiLayer::finishKeyboardYield()
+{
+	ImGui::ClearActiveID();
+	ImGui::FocusWindow(nullptr);
+	ImGui::GetIO().ClearInputKeys();
+	m_yieldThroughEvent = 0;
+	m_keyboardReleasedFrame = ImGui::GetFrameCount();
+}
+
+void ImGuiLayer::yieldKeyboard()
+{
+	if (!m_initialized || (!pendingKeyboard() && !editingText() && !wantCaptureKeyboard() && !ownsActiveInput()))
+		return;
+	stopTextInput();
+	m_pendingPressEvent = 0;
+	const auto &queue = ImGui::GetCurrentContext()->InputEventsQueue;
+	// The next build can apply events already routed here to their original
+	// editor. Events after this boundary may belong to a new Dev UI click.
+	if (std::any_of(queue.begin(), queue.end(), [](const ImGuiInputEvent &event) {
+		return event.Type == ImGuiInputEventType_Key || event.Type == ImGuiInputEventType_Text ||
+			event.Type == ImGuiInputEventType_MouseButton || event.Type == ImGuiInputEventType_MouseWheel;
+	}))
+		m_yieldThroughEvent = queue.back().EventId;
+	else
+		finishKeyboardYield();
 }
 
 void ImGuiLayer::beginFrame()
@@ -321,14 +382,43 @@ void ImGuiLayer::beginFrame()
 
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
+	auto &queue = ImGui::GetCurrentContext()->InputEventsQueue;
+	ImVector<ImGuiInputEvent> nextOwner;
+	if (m_yieldThroughEvent && !queue.empty() && queue.back().EventId > m_yieldThroughEvent)
+	{
+		const auto end = std::find_if(queue.begin(), queue.end(),
+			[this](const ImGuiInputEvent &event) { return event.EventId > m_yieldThroughEvent; });
+		const int count = static_cast<int>(queue.end() - end);
+		nextOwner.resize(count);
+		std::copy(end, queue.end(), nextOwner.begin());
+		queue.resize(queue.Size - count);
+	}
 	ImGui::NewFrame();
+	if (!nextOwner.empty())
+	{
+		const int offset = queue.Size;
+		queue.resize(offset + nextOwner.Size);
+		std::copy(nextOwner.begin(), nextOwner.end(), queue.begin() + offset);
+	}
 }
 
 void ImGuiLayer::endFrame()
 {
 	if (!m_initialized)
 		return;
+	auto &context = *ImGui::GetCurrentContext();
+	if (m_yieldThroughEvent)
+		context.PlatformImeData.WantVisible = false;
 	ImGui::Render();
+	if (m_yieldThroughEvent &&
+		(context.InputEventsQueue.empty() || context.InputEventsQueue.front().EventId > m_yieldThroughEvent))
+		finishKeyboardYield();
+	if (m_provisionalTextInput && !pendingKeyboard())
+	{
+		if (!context.PlatformImeData.WantVisible)
+			SDL_StopTextInput(m_window);
+		m_provisionalTextInput = false;
+	}
 }
 
 void ImGuiLayer::recordDraw(VkCommandBuffer cmd)
@@ -342,7 +432,8 @@ void ImGuiLayer::recordDraw(VkCommandBuffer cmd)
 
 bool ImGuiLayer::wantCaptureKeyboard() const
 {
-	return m_initialized && ImGui::GetIO().WantCaptureKeyboard;
+	return m_initialized && !m_yieldThroughEvent && m_keyboardReleasedFrame != ImGui::GetFrameCount() &&
+		ImGui::GetIO().WantCaptureKeyboard;
 }
 
 bool ImGuiLayer::wantCaptureMouse() const
@@ -352,7 +443,7 @@ bool ImGuiLayer::wantCaptureMouse() const
 
 bool ImGuiLayer::editingText() const
 {
-	if (!m_initialized)
+	if (!m_initialized || m_yieldThroughEvent)
 		return false;
 	const auto &g = *ImGui::GetCurrentContext();
 	return g.ActiveId != 0 && g.InputTextState.ID == g.ActiveId;
@@ -368,31 +459,51 @@ bool ImGuiLayer::ownsActiveInput() const
 	if (!m_initialized)
 		return false;
 	const auto &g = *ImGui::GetCurrentContext();
-	return g.ActiveId != 0 || !g.OpenPopupStack.empty();
+	return (!m_yieldThroughEvent && g.ActiveId != 0) || !g.OpenPopupStack.empty();
 }
 
-int ImGuiLayer::inputFrame() const
+bool ImGuiLayer::pendingKeyboard() const
 {
-	return m_initialized ? ImGui::GetFrameCount() : -1;
+	if (!m_initialized || !m_pendingPressEvent)
+		return false;
+	const auto &queue = ImGui::GetCurrentContext()->InputEventsQueue;
+	return !queue.empty() && queue.front().EventId <= m_pendingPressEvent;
 }
 
-bool ImGuiLayer::blocksGameUiPointer(float x, float y) const
+namespace
+{
+ImGuiID passThroughKey()
+{
+	return ImHashStr("ft_vox.pointer_pass_through");
+}
+}
+
+void ImGuiLayer::markCurrentWindowPassThrough()
+{
+	ImGui::GetCurrentWindowRead()->StateStorage.SetBool(passThroughKey(), true);
+}
+
+ImGuiLayer::PointerHit ImGuiLayer::pointerHit(float x, float y) const
 {
 	if (!m_initialized)
-		return false;
+		return PointerHit::PassThrough;
 	const ImGuiContext &ctx = *ImGui::GetCurrentContext();
 	if (!ctx.OpenPopupStack.empty() || ctx.MovingWindow || ctx.DragDropActive ||
 		(ctx.ActiveId && ctx.ActiveIdMouseButton == ImGuiMouseButton_Left && ctx.IO.MouseDown[0]))
-		return true;
+		return PointerHit::Interactive;
 
 	const auto *viewport = ImGui::GetMainViewport();
 	const ImVec2 pos{viewport->Pos.x + x, viewport->Pos.y + y};
-	for (const ImGuiWindow *window : ctx.Windows)
+	for (int index = ctx.Windows.Size - 1; index >= 0; --index)
 	{
+		const ImGuiWindow *window = ctx.Windows[index];
 		// NewFrame's hover uses WasActive and the previous event position.
 		// Active and OuterRectClipped describe the most recently drawn layout.
 		if (!window->Active || window->Hidden || window->Viewport != viewport ||
 			(window->IsFallbackWindow && !window->WriteAccessed))
+			continue;
+		const bool passive = (window->Flags & ImGuiWindowFlags_NoMouseInputs) != 0;
+		if (passive && window->StateStorage.GetBool(passThroughKey()))
 			continue;
 		const bool resizable = !(window->Flags & (ImGuiWindowFlags_NoResize |
 			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMouseInputs));
@@ -406,7 +517,7 @@ bool ImGuiLayer::blocksGameUiPointer(float x, float y) const
 		const ImRect passthrough(hole, ImVec2(hole.x + window->HitTestHoleSize.x,
 			hole.y + window->HitTestHoleSize.y));
 		if (!passthrough.Contains(pos))
-			return true;
+			return passive ? PointerHit::Occludes : PointerHit::Interactive;
 	}
-	return false;
+	return PointerHit::PassThrough;
 }

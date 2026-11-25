@@ -20,6 +20,7 @@ public:
 	void cancelPointerPress() { m_armed = false; m_widgets.cancelPress(); }
 	bool hasArmedPress() const { return m_armed || m_widgets.hasPress(); }
 	bool hitsStrip(float x, float y) const;
+	bool canFocusWidget(float x, float y) const;
 	void resetScreens();
 	void invalidateLayout();
 	void back();
@@ -27,7 +28,7 @@ public:
 	void closePause();
 	bool syncInventory(bool open);
 	void updateTextInput(SDL_Window *window, bool interactive);
-	void yieldTextInput(SDL_Window *window);
+	bool yieldTextInput(SDL_Window *window);
 	const gameui::ScreenStack &screens() const { return m_screens; }
 	void prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent, gameui::Clip view,
 				 const TextureManager &atlas, uint64_t atlasGeneration);

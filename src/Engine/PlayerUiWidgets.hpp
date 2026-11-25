@@ -31,8 +31,8 @@ public:
 	void placeCaret(size_t byte, bool extend = false);
 	void move(NavKey key, bool extend);
 	void selectAll() { m_anchor = 0; m_caret = m_value.size(); }
-	void erase(NavKey key);
-	void insert(std::string_view text);
+	bool erase(NavKey key);
+	bool insert(std::string_view text);
 	// Platform offsets are scalar indices, translated to bounded byte offsets.
 	void preedit(std::string_view text, int start = -1, int length = -1);
 	void cancelComposition()
@@ -42,7 +42,7 @@ public:
 	}
 
 private:
-	void removeSelection();
+	bool removeSelection();
 	std::string m_value, m_composition;
 	size_t m_caret{}, m_anchor{};
 	size_t m_compositionCursor{}, m_compositionEnd{};
@@ -92,6 +92,11 @@ struct Widget
 	bool enabled{true};
 };
 
+// Change means the bound value effectively changed: committed text, deletion,
+// cut and paste each report it once, tagged with the control that owns the
+// binding. Unchanged values, IME preedit, caret movement and selection report
+// nothing. Copy and Paste name the selection only; the host SDL adapter owns
+// the clipboard and completes a paste through commitText.
 enum class WidgetAction { None, Activate, Change, Copy, Cut, Paste };
 struct WidgetEvent
 {
@@ -119,6 +124,7 @@ public:
 	Clip bounds(const Widget &widget) const { return m_viewport.place(widget.bounds); }
 	const Widget *find(ControlId id) const;
 	const Widget *at(glm::vec2 point) const;
+	bool focusableAt(glm::vec2 point) const { return eligible(at(point)); }
 	const Widget *step(ControlId id, bool reverse) const;
 	void focus(ControlId &current, ControlId next, bool reveal);
 	void revalidate(ControlId &current);
@@ -127,6 +133,8 @@ public:
 	WidgetEvent release(glm::vec2 point, float scale);
 	void scroll(glm::vec2 point, float delta, float scale, ControlId &focus);
 	WidgetEvent key(ControlId &focus, NavKey key, bool shift, bool shortcut, bool repeat);
+	WidgetEvent commitText(ControlId focus, std::string_view text);
+	WidgetEvent completeCut(ControlId focus);
 	TextField *editor(ControlId focus) const;
 	TextGeometry editorGeometry(ControlId focus, FontView font, float scale) const;
 	void cancelEditing();

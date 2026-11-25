@@ -80,6 +80,7 @@ struct InputContext
 	bool paused{};
 	bool devKeyboard{};
 	bool devPointer{};
+	bool devOccludes{};
 	bool devDialog{};
 	bool devText{};
 	bool nativePointer{};
@@ -108,6 +109,8 @@ struct InputContext
 		}
 		if (kind == InputKind::Pointer)
 		{
+			if (devOccludes)
+				return InputOwner::Blocked;
 			if (devPointer)
 				return InputOwner::DeveloperUi;
 			if (nativePointer)
@@ -196,6 +199,12 @@ public:
 	void cancelGameplay() { cancel(InputOwner::Gameplay); }
 	void cancelDeveloper() { cancel(InputOwner::DeveloperUi); }
 	void cancelPlayerUi() { cancel(InputOwner::PlayerUi); }
+	void cancelKeyboard(InputOwner owner)
+	{
+		for (auto &key : m_keys)
+			if (key == owner)
+				key = InputOwner::Blocked;
+	}
 	void cancelAll()
 	{
 		cancelGameplay();
@@ -247,9 +256,7 @@ private:
 	}
 	void cancel(InputOwner owner)
 	{
-		for (auto &key : m_keys)
-			if (key == owner)
-				key = InputOwner::Blocked;
+		cancelKeyboard(owner);
 		cancelPointer(owner);
 	}
 	std::array<InputOwner, kKeys> m_keys{};

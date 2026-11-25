@@ -298,8 +298,9 @@ WidgetEvent WidgetSet::activate(const Widget &widget, const glm::vec2 *point, fl
 		for (int i = 0; i < visibleRows(*list) && first + i < listSize(*list); ++i)
 			if (hit(listRow(bounds(widget), i, scale).intersect(bounds(widget)), *point))
 			{
+				const int selected = list->selection.selected;
 				list->selection.select(first + i, listSize(*list), visibleRows(*list));
-				return {widget.id, WidgetAction::Change};
+				return selected != list->selection.selected ? WidgetEvent{widget.id, WidgetAction::Change} : WidgetEvent{};
 			}
 	}
 	return {};
@@ -350,25 +351,39 @@ WidgetEvent WidgetSet::key(ControlId &current, NavKey key, bool shift, bool shor
 		else if (field->composition().empty())
 		{
 			if (key == NavKey::Backspace || key == NavKey::Delete)
-			{
-				field->erase(key);
-				return {current, WidgetAction::Change};
-			}
+				return field->erase(key) ? WidgetEvent{current, WidgetAction::Change} : WidgetEvent{};
 			field->move(key, shift);
 		}
 		return {};
 	}
 	if (auto *slider = binding<Slider>(*widget); slider && (key == NavKey::Left || key == NavKey::Right))
 	{
-		slider->value = std::clamp(slider->value + (key == NavKey::Left ? -0.05f : 0.05f), 0.f, 1.f);
+		const float value = std::clamp(slider->value + (key == NavKey::Left ? -0.05f : 0.05f), 0.f, 1.f);
+		if (value == slider->value)
+			return {};
+		slider->value = value;
 		return {current, WidgetAction::Change};
 	}
 	if (auto *list = binding<ListBox>(*widget); list && vertical)
 	{
+		const int selected = list->selection.selected;
 		list->selection.select(list->selection.selected + (key == NavKey::Up ? -1 : 1), listSize(*list), visibleRows(*list));
-		return {current, WidgetAction::Change};
+		return selected != list->selection.selected ? WidgetEvent{current, WidgetAction::Change} : WidgetEvent{};
 	}
 	return !repeat && (key == NavKey::Enter || key == NavKey::Space) ? activate(*widget, nullptr, 0.f) : WidgetEvent{};
+}
+
+WidgetEvent WidgetSet::commitText(ControlId focus, std::string_view text)
+{
+	auto *field = editor(focus);
+	return field && field->insert(text) ? WidgetEvent{focus, WidgetAction::Change} : WidgetEvent{};
+}
+
+WidgetEvent WidgetSet::completeCut(ControlId focus)
+{
+	auto *field = editor(focus);
+	return field && !field->selection().empty() && field->erase(NavKey::Delete)
+		? WidgetEvent{focus, WidgetAction::Change} : WidgetEvent{};
 }
 
 float FontView::measure(std::string_view text, float scale) const
@@ -536,29 +551,36 @@ void TextField::move(NavKey key, bool extend)
 	}
 }
 
-void TextField::removeSelection()
+bool TextField::removeSelection()
 {
 	const auto first = selectionStart();
-	m_value.erase(first, selectionEnd() - first);
+	const auto count = selectionEnd() - first;
+	if (!count)
+		return false;
+	m_value.erase(first, count);
 	placeCaret(first);
+	return true;
 }
 
-void TextField::erase(NavKey key)
+bool TextField::erase(NavKey key)
 {
 	if (m_caret == m_anchor)
 		m_anchor = key == NavKey::Backspace ? previousUtf8(m_value, m_caret) : nextUtf8(m_value, m_caret);
-	removeSelection();
+	return removeSelection();
 }
 
-void TextField::insert(std::string_view text)
+bool TextField::insert(std::string_view text)
 {
 	const auto clean = singleLine(text, kMaxBytes - m_value.size() + selection().size());
 	cancelComposition();
 	if (clean.empty())
-		return;
-	removeSelection();
-	m_value.insert(m_caret, clean);
-	placeCaret(m_caret + clean.size());
+		return false;
+	const auto first = selectionStart();
+	const bool changed = clean != selection();
+	if (changed)
+		m_value.replace(first, selection().size(), clean);
+	placeCaret(first + clean.size());
+	return changed;
 }
 
 void TextField::preedit(std::string_view text, int start, int length)

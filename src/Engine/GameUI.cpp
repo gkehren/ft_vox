@@ -10,6 +10,7 @@
 #include <Engine/BuildInfo.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/ImGuiLayer.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/UiShortcuts.hpp>
 #include <Engine/UiTheme.hpp>
@@ -310,6 +311,7 @@ void GameUI::draw(GameUIFrame &frame)
 			ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize))
 		{
+			ImGuiLayer::markCurrentWindowPassThrough();
 			const auto &status = *frame.multiplayerStatus;
 			ImGui::TextUnformatted(status.detail ? status.detail : status.label);
 			if (frame.multiplayerAction)
@@ -361,6 +363,7 @@ void GameUI::drawStatusOverlay(GameUIFrame &frame)
 		ImGui::End();
 		return;
 	}
+	ImGuiLayer::markCurrentWindowPassThrough();
 
 	// Frame health line is the whole Minimal density; the ms value is the
 	// hierarchical-profiler CPU frame time — the same quantity the shell
