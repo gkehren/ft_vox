@@ -171,6 +171,10 @@ public:
 		return accepted;
 	}
 	InputOwner pointerOwner() const { return m_gesture; }
+	bool activeButton(size_t button) const
+	{
+		return button < m_buttons.size() && isPointerOwner(m_buttons[button]);
+	}
 	InputOwner motionOwner(InputOwner candidate) const
 	{
 		return m_gesture == InputOwner::None ? candidate : m_gesture;

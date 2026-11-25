@@ -393,7 +393,7 @@ void FontView::paint(DrawList &out, glm::vec2 origin, std::string_view text, glm
 
 void WidgetSet::paint(DrawList &out, FontView font, float s, ControlId focus, glm::vec2 pointer) const
 {
-	static constexpr glm::vec4 textColor{0.94f, 0.97f, 1.f, 1.f};
+	constexpr glm::vec4 textColor{0.94f, 0.97f, 1.f, 1.f};
 	constexpr glm::vec4 muted{0.70f, 0.77f, 0.81f, 1.f};
 	constexpr glm::vec4 accent{0.44f, 0.94f, 0.78f, 1.f};
 	constexpr glm::vec4 dark{0.052f, 0.083f, 0.103f, 0.97f};
@@ -408,12 +408,12 @@ void WidgetSet::paint(DrawList &out, FontView font, float s, ControlId focus, gl
 		if (clip.empty())
 			continue;
 		const glm::vec2 origin(rect.rect);
-		const auto label = [&](std::string_view text, float x, float y, glm::vec4 color = textColor) {
+		const auto label = [&](std::string_view text, float x, float y, glm::vec4 color) {
 			font.paint(out, origin + glm::vec2(x, y) * s, text, color, s, clip);
 		};
 		if (std::holds_alternative<Label>(widget.control))
 		{
-			label(widget.label, 3, 4);
+			label(widget.label, 3, 4, textColor);
 			continue;
 		}
 		const bool focused = eligible(&widget) && widget.id == focus;

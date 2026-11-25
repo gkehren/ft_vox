@@ -243,8 +243,10 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		policy.nativePointer = !mouseCaptured && m_playerUi && !wheel &&
 			(motion ? press == PlayerUi : event.button.button == SDL_BUTTON_LEFT) && m_playerUi->hitsStrip(x, y);
 		const auto candidate = m_captureFailed && mouseCaptured ? Blocked : policy.choose(InputKind::Pointer);
-		const bool continuing = motion || event.type == SDL_EVENT_MOUSE_BUTTON_UP;
-		if (m_playerUi && press == PlayerUi && continuing && (!policy.interactive || policy.devDialog || policy.devPointer))
+		const bool continuing = motion ||
+			(event.type == SDL_EVENT_MOUSE_BUTTON_UP && m_inputRouter.activeButton(event.button.button));
+		if (m_playerUi && press == PlayerUi && continuing &&
+			(!policy.interactive || policy.locked || policy.devDialog || policy.devPointer))
 			cancelGameUiPointer();
 		if (press == Gameplay && continuing && candidate != Gameplay)
 			m_inputRouter.cancelPointer(Gameplay);

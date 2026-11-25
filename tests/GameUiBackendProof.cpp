@@ -425,7 +425,14 @@ struct GameUiBackendProbe
 			sample.lastRecordedStats()->metrics.dropped == 0, "two widget groups fit the existing draw budget");
 
 		const auto sliderPoint = center("Preview level");
+		const bool overDeveloper = engine.developerPointerAt(50.f, 12.f);
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, sliderPoint.x, sliderPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, 50.f, 12.f, SDL_BUTTON_RIGHT);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, 50.f, 12.f, SDL_BUTTON_RIGHT);
+		motion(sliderPoint.x + 40.f, sliderPoint.y);
+		engine.handleEvents();
+		CHECK(overDeveloper && sample.m_slider.value > 0.55f && sample.m_widgets.hasPress(),
+			"cross-surface blocked release cannot cancel the native slider");
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, sliderPoint.x, sliderPoint.y, SDL_BUTTON_RIGHT);
 		motion(sliderPoint.x + 50.f, sliderPoint.y);
 		engine.handleEvents();

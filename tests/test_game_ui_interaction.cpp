@@ -98,6 +98,7 @@ void pointerGestures()
 	InputRouter router;
 	CHECK(router.button(3, true, DeveloperUi) == DeveloperUi &&
 		router.button(1, true, PlayerUi) == Blocked &&
+		router.activeButton(3) && !router.activeButton(1) &&
 		router.motionOwner(Gameplay) == DeveloperUi && router.wheelOwner(PlayerUi) == Blocked,
 		"first live owner wins independent of SDL button number");
 	CHECK(router.button(1, false, Gameplay) == Blocked &&
@@ -109,7 +110,8 @@ void pointerGestures()
 		"same-surface buttons share the gesture until the last release");
 	router.cancelPointer(PlayerUi);
 	CHECK(router.pointerOwner() == None && router.motionOwner(DeveloperUi) == DeveloperUi &&
-		router.button(2, true, DeveloperUi) == DeveloperUi && router.motionOwner(PlayerUi) == DeveloperUi,
+		!router.activeButton(3) && router.button(2, true, DeveloperUi) == DeveloperUi &&
+		router.motionOwner(PlayerUi) == DeveloperUi,
 		"a quarantined button cannot mask or claim a fresh gesture");
 	CHECK(router.button(3, false, Gameplay) == Blocked &&
 		router.button(2, false, PlayerUi) == DeveloperUi && router.pointerOwner() == None,
