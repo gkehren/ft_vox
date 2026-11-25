@@ -4,6 +4,7 @@
 #include <Engine/PlayerUiStyle.hpp>
 #include <Renderer/GameUiDrawList.hpp>
 
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -109,8 +110,12 @@ struct FontView
 {
 	std::span<const Glyph> glyphs;
 	float measure(std::string_view text, float scale) const;
+	/// `bounds` is the component rectangle the text belongs to: every glyph quad is
+	/// geometrically clipped to it, with its UVs remapped, so text can never paint
+	/// outside its component even where the surface scissor would only hide it
+	/// (issue #302 S01). `nullopt` keeps the previous behavior for standalone text.
 	void paint(DrawList &out, glm::vec2 origin, std::string_view text, glm::vec4 color,
-			   float scale, Clip clip) const;
+			   float scale, Clip clip, std::optional<Clip> bounds = std::nullopt) const;
 };
 
 struct Label {};

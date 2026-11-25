@@ -170,13 +170,15 @@ SliderGeometry sliderGeometry(Clip bounds, const style::Theme &theme, float scal
 	const float gap = theme.space.sm * s;
 	const float labelRight = std::max(bounds.rect.x, bounds.rect.z - readout - gap);
 	// R04: the label and the percentage readout own disjoint rectangles, so a
-	// long label elides instead of painting over the value.
-	geometry.label = {{bounds.rect.x, bounds.rect.y, labelRight, bounds.rect.y + metric.lineHeight()}};
+	// long label elides instead of painting over the value. S02: their height is
+	// clamped to the widget, so a short slider cannot paint text below itself.
+	const float line = std::min(metric.lineHeight(), size(bounds).y);
+	geometry.label = {{bounds.rect.x, bounds.rect.y, labelRight, bounds.rect.y + line}};
 	geometry.value = {{labelRight + gap, geometry.label.rect.y, bounds.rect.z,
 		geometry.label.rect.w}};
 	const float top = std::min(bounds.rect.w, geometry.label.rect.w + theme.space.xs * s);
 	geometry.track = {{bounds.rect.x, top, bounds.rect.z,
-		std::min(bounds.rect.w, top + std::max(2.f, theme.space.xs * s))}};
+		std::max(top, std::min(bounds.rect.w, top + std::max(2.f, theme.space.xs * s)))}};
 	return geometry;
 }
 
@@ -492,13 +494,19 @@ float FontView::measure(std::string_view text, float scale) const
 	return width * scale;
 }
 
-void FontView::paint(DrawList &out, glm::vec2 origin, std::string_view text, glm::vec4 color, float scale, Clip clip) const
+void FontView::paint(DrawList &out, glm::vec2 origin, std::string_view text, glm::vec4 color,
+					 float scale, Clip clip, std::optional<Clip> bounds) const
 {
 	for (size_t i = 0; i < text.size(); i = nextUtf8(text, i))
 		if (const auto *glyph = getGlyph(*this, text, i))
 		{
-			if (glyph->visible)
-				out.glyph(glyph->rect * scale + glm::vec4(origin, origin), glyph->uv, color, clip);
+			glm::vec4 rect = glyph->rect * scale + glm::vec4(origin, origin);
+			glm::vec4 uv = glyph->uv;
+			// S01: geometry, not only the scissor, stays inside the component; the
+			// advance still moves so alignment, ellipsis and kerning are unaffected.
+			const bool visible = glyph->visible && (!bounds || clipGlyph(rect, uv, *bounds));
+			if (visible)
+				out.glyph(rect, uv, color, clip);
 			origin.x += glyph->advance * scale;
 		}
 }
@@ -563,7 +571,7 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 			if (preedit.empty())
 			{
 				highlight(live, layout.origin, field->selectionStart(), field->selectionEnd());
-				font.paint(out, layout.origin, live, fg, layout.glyphScale, editorClip);
+				font.paint(out, layout.origin, live, fg, layout.glyphScale, editorClip, editorClip);
 			}
 			else
 			{
@@ -571,10 +579,10 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 				const auto composingAt = layout.origin +
 					glm::vec2(font.measure(before, layout.glyphScale), 0.f);
 				highlight(preedit, composingAt, field->compositionCursor(), field->compositionEnd());
-				font.paint(out, layout.origin, before, fg, layout.glyphScale, editorClip);
-				font.paint(out, composingAt, preedit, p.accent, layout.glyphScale, editorClip);
+				font.paint(out, layout.origin, before, fg, layout.glyphScale, editorClip, editorClip);
+				font.paint(out, composingAt, preedit, p.accent, layout.glyphScale, editorClip, editorClip);
 				font.paint(out, composingAt + glm::vec2(font.measure(preedit, layout.glyphScale), 0.f),
-					live.substr(field->selectionEnd()), fg, layout.glyphScale, editorClip);
+					live.substr(field->selectionEnd()), fg, layout.glyphScale, editorClip, editorClip);
 			}
 			if (focused)
 			{
@@ -587,16 +595,25 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 		}
 		if (const auto *toggle = binding<Toggle>(widget))
 		{
-			const float box = theme.size.rowHeight * s * 0.55f;
-			const auto indicator = rectangle({rect.rect.z - box - theme.space.md * s,
-				rect.rect.y + (size(rect).y - box) * 0.5f}, {box, box});
-			surface.fill(indicator, style::toggleFace(theme, state, toggle->value),
-				theme.size.radiusSmall * s);
-			surface.ring(indicator, focused ? p.focus : p.border,
-				theme.size.borderWidth * s, theme.size.radiusSmall * s);
-			surface.fittedLabel({{rect.rect.x, rect.rect.y, indicator.rect.x - theme.space.sm * s,
-					rect.rect.w}}, widget.label, style::TextRole::Body,
-				widget.enabled ? p.ink : p.inkDisabled, 0.f);
+			// S02: the indicator is clamped to the widget, so an undersized toggle
+			// paints a smaller switch instead of one outside its own row.
+			const float box = std::min({theme.size.rowHeight * s * 0.55f, size(rect).x * 0.5f,
+				size(rect).y});
+			const float left = std::max(rect.rect.x,
+				rect.rect.z - box - theme.space.md * s);
+			const auto indicator = rectangle({left, rect.rect.y + (size(rect).y - box) * 0.5f},
+				{box, box});
+			if (box > 0.f)
+			{
+				surface.fill(indicator, style::toggleFace(theme, state, toggle->value),
+					theme.size.radiusSmall * s);
+				surface.ring(indicator, focused ? p.focus : p.border,
+					theme.size.borderWidth * s, theme.size.radiusSmall * s);
+			}
+			const float labelRight = std::max(rect.rect.x,
+				std::min(indicator.rect.x, rect.rect.z) - theme.space.sm * s);
+			surface.fittedLabel({{rect.rect.x, rect.rect.y, labelRight, rect.rect.w}}, widget.label,
+				style::TextRole::Body, widget.enabled ? p.ink : p.inkDisabled, 0.f);
 			continue;
 		}
 		if (const auto *slider = binding<Slider>(widget))

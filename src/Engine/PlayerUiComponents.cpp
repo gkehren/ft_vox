@@ -321,13 +321,16 @@ void Surface::fittedLabel(Clip rect, std::string_view text, style::TextRole role
 	const float width = fittedWidth(text, role, size(rect).x, fitted);
 	const float roleScale = glyphScale(role);
 	const float x = rect.rect.x + (size(rect).x - width) * std::clamp(alignX, 0.f, 1.f);
+	// S01: the component rect is passed as the glyph clipping bound, so a label in
+	// a short or narrow rect is clipped geometrically instead of relying on the
+	// surface scissor alone.
 	m_font.paint(m_out, {x, centeredLineTop(rect, role, m_scale)}, text.substr(0, fitted.bytes), color,
-		roleScale, m_clip);
+		roleScale, m_clip, rect);
 	if (fitted.elided)
 	{
 		const float advance = m_font.measure(text.substr(0, fitted.bytes), roleScale);
 		m_font.paint(m_out, {x + advance, centeredLineTop(rect, role, m_scale)}, "...", color, roleScale,
-			m_clip);
+			m_clip, rect);
 	}
 }
 
@@ -453,11 +456,18 @@ void Surface::formField(Clip rect, std::string_view label, std::string_view valu
 
 void Surface::statusIndicator(Clip rect, style::Status status, std::string_view text) const
 {
-	const float dot = px(m_theme.space.sm);
-	const float y = rect.rect.y + (size(rect).y - dot) * 0.5f;
-	fill({{rect.rect.x, y, rect.rect.x + dot, y + dot}}, style::statusColor(m_theme, status),
-		px(m_theme.size.radiusSmall));
-	Clip textRect = {{rect.rect.x + dot + px(m_theme.space.sm), rect.rect.y, rect.rect.z, rect.rect.w}};
+	if (rect.empty())
+		return;
+	// S02: the marker never outgrows a narrow or short status row.
+	const float dot = std::min(px(m_theme.space.sm), std::min(size(rect).x, size(rect).y));
+	if (dot > 0.f)
+	{
+		const float y = rect.rect.y + (size(rect).y - dot) * 0.5f;
+		fill({{rect.rect.x, y, rect.rect.x + dot, y + dot}}, style::statusColor(m_theme, status),
+			std::min(px(m_theme.size.radiusSmall), dot * 0.5f));
+	}
+	const float textLeft = rect.rect.x + (dot > 0.f ? dot + px(m_theme.space.sm) : 0.f);
+	Clip textRect = {{std::min(textLeft, rect.rect.z), rect.rect.y, rect.rect.z, rect.rect.w}};
 	fittedLabel(textRect, text, style::TextRole::Body, m_theme.palette.ink, 0.f);
 }
 
@@ -484,14 +494,22 @@ void Surface::progress(Clip rect, float value, bool pending, float phase) const
 
 void Surface::toast(Clip rect, const Toast &entry) const
 {
+	if (rect.empty())
+		return;
 	glm::vec4 face = m_theme.palette.surface;
 	face.a = m_theme.overlay.toast;
 	frame(rect, face, m_theme.palette.border, px(m_theme.size.borderWidth), px(m_theme.size.radiusLarge));
-	const float accent = px(m_theme.size.borderStrongWidth) + px(m_theme.space.xxs);
-	fill({{rect.rect.x, rect.rect.y, rect.rect.x + accent, rect.rect.w}},
-		style::statusColor(m_theme, entry.status), px(m_theme.size.radiusSmall));
+	// S02: the accent strip is clamped to the notification rectangle, so a very
+	// narrow toast can never paint a wider marker than the card it marks.
+	const float accent = std::min(px(m_theme.size.borderStrongWidth) + px(m_theme.space.xxs),
+		size(rect).x);
+	if (accent > 0.f)
+		fill({{rect.rect.x, rect.rect.y, rect.rect.x + accent, rect.rect.w}},
+			style::statusColor(m_theme, entry.status), px(m_theme.size.radiusSmall));
 	Clip body = inset(rect, px(m_theme.space.md));
-	body.rect.x += accent;
+	body.rect.x = std::min(body.rect.x + accent, body.rect.z);
+	if (body.empty())
+		return;
 	const float titleHeight = style::lineHeight(style::TextRole::Body) * m_scale;
 	Clip title = lineBelow(body, titleHeight);
 	fittedLabel(title, entry.title, style::TextRole::Body, m_theme.palette.ink, 0.f);
@@ -527,12 +545,15 @@ void Surface::confirmation(const ConfirmationLayout &layout, std::string_view ti
 
 void Surface::slot(Clip rect, const SlotView &entry) const
 {
+	if (rect.empty())
+		return;
 	const auto &p = m_theme.palette;
 	// One resolver for combined states (R06): disabled never paints a focus ring,
 	// validation always wins the border color, focus keeps its width.
 	const auto tokens = style::slotTokens(m_theme, entry.state);
 	frame(rect, tokens.face, tokens.border, px(tokens.borderWidth), px(m_theme.size.radiusSmall));
-	const Clip iconRect = inset(rect, px(m_theme.space.xs));
+	const Clip iconRect = inset(rect, std::min(px(m_theme.space.xs),
+		std::min(size(rect).x, size(rect).y) * 0.5f));
 	const uint32_t layers = m_atlasLayers ? m_atlasLayers : UINT32_MAX;
 	// Occupancy is `count != 0`; an icon is an optional, generation-tagged
 	// handle (F08). Layer 0 is a real texture, a stale handle is not sampled and
@@ -541,8 +562,11 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 	const auto status = entry.icon ? iconStatus(*entry.icon, m_out.atlasGeneration(), layers)
 								   : IconStatus::MissingLayer;
 	if (occupied && entry.icon && drawable(status))
-		m_out.icon(iconRect.rect, *entry.icon, tokens.tint, m_clip);
-	else if (occupied)
+	{
+		if (!iconRect.empty())
+			m_out.icon(iconRect.rect, *entry.icon, tokens.tint, m_clip);
+	}
+	else if (occupied && !iconRect.empty())
 	{
 		// Missing/stale icon fallback: keep the slot, mark it, never drop it.
 		fill(iconRect, p.surfaceRaised, px(m_theme.size.radiusSmall));
@@ -552,12 +576,15 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 
 	// Durability/progress owns a reserved band at the bottom; the quantity badge
 	// sits above it and always paints a contrast backing (F14).
+	// S02: the progress/durability band and its badge are clamped to the slot, so
+	// an undersized slot paints no bar at all instead of a bar outside its frame.
 	const float barInset = px(m_theme.space.xxs);
 	const float barHeight = std::max(px(2.f), px(m_theme.size.borderWidth) * 2.f);
-	const Clip track = {{rect.rect.x + barInset, rect.rect.w - barHeight - barInset,
+	const float barSpan = std::min(size(rect).y * 0.5f, barHeight);
+	const Clip track = {{rect.rect.x + barInset, rect.rect.w - barInset - barSpan,
 		rect.rect.z - barInset, rect.rect.w - barInset}};
 	const auto bar = entry.progress ? entry.progress : entry.durability;
-	const float bandBottom = (bar ? track.rect.y : rect.rect.w) - barInset;
+	const float bandBottom = (bar && !track.empty() ? track.rect.y : rect.rect.w) - barInset;
 	char badge[8]{};
 	const auto count = formatCount(entry.count, badge);
 	if (!count.empty())
@@ -566,9 +593,9 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 		const float lineHeight = textStyle(style::TextRole::Caption, m_scale, m_fontScale).lineHeight();
 		const float width = std::min(size(rect).x, m_font.measure(count, roleScale) +
 			2.f * px(m_theme.space.xxs));
-		const float top = std::max(iconRect.rect.y, bandBottom - lineHeight);
+		const float top = std::max({rect.rect.y, iconRect.rect.y, bandBottom - lineHeight});
 		const Clip badgeRect = {{std::max(rect.rect.x, rect.rect.z - width - barInset), top,
-			rect.rect.z - barInset, std::max(top, bandBottom)}};
+			rect.rect.z - barInset, std::min(rect.rect.w, std::max(top, bandBottom))}};
 		if (badgeRect.rect.y < badgeRect.rect.w)
 		{
 			glm::vec4 backing = p.surface;
@@ -578,7 +605,7 @@ void Surface::slot(Clip rect, const SlotView &entry) const
 				tokens.indicator, 1.f);
 		}
 	}
-	if (bar)
+	if (bar && !track.empty())
 	{
 		const float value = progressFraction(*bar);
 		const glm::vec4 color = entry.progress ? p.accent

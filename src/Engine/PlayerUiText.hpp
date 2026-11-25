@@ -110,6 +110,27 @@ inline TextMetrics measureRole(FontView font, std::string_view text, style::Text
 	return {font.measure(text, style.glyphScale()), style.lineHeight()};
 }
 
+/// Clip one glyph quad to `bounds`, remapping its UV rectangle so a partially
+/// visible glyph keeps sampling the texels that remain on screen (issue #302
+/// S01). Returns false when nothing of the glyph is visible, so the painter can
+/// skip it instead of emitting a quad the surface scissor would only waste.
+inline bool clipGlyph(glm::vec4 &rect, glm::vec4 &uv, Clip bounds)
+{
+	const glm::vec2 span{rect.z - rect.x, rect.w - rect.y};
+	if (!(span.x > 0.f) || !(span.y > 0.f))
+		return false;
+	const glm::vec4 visible{std::max(rect.x, bounds.rect.x), std::max(rect.y, bounds.rect.y),
+		std::min(rect.z, bounds.rect.z), std::min(rect.w, bounds.rect.w)};
+	if (!(visible.x < visible.z) || !(visible.y < visible.w))
+		return false;
+	const glm::vec2 low{(visible.x - rect.x) / span.x, (visible.y - rect.y) / span.y};
+	const glm::vec2 high{(visible.z - rect.x) / span.x, (visible.w - rect.y) / span.y};
+	uv = {uv.x + (uv.z - uv.x) * low.x, uv.y + (uv.w - uv.y) * low.y,
+		uv.x + (uv.z - uv.x) * high.x, uv.y + (uv.w - uv.y) * high.y};
+	rect = visible;
+	return true;
+}
+
 /// Top edge that vertically centers one line of a role inside `rect`.
 inline float centeredLineTop(Clip rect, style::TextRole role, float scale)
 {

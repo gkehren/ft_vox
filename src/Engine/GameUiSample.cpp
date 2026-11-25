@@ -89,35 +89,41 @@ void GameUiSample::advancePresentation()
 	m_uiPhase -= std::floor(m_uiPhase);
 }
 
+bool GameUiSample::refreshFaceForDensity(float pixels)
+{
+	if (!(pixels > 0.f))
+		return false;
+	if (std::abs(pixels / m_facePixels - 1.f) < 0.01f)
+		return true; // same density: nothing to rebuild
+	// Bake and upload into locals; nothing is published until the GPU accepted it.
+	gameui::BakedFace next;
+	if (!gameui::bakeFace(pixels, next) ||
+		(m_immediate &&
+			!m_renderer.setFont(*m_immediate, {next.width, next.height}, next.coverage)))
+		return false;
+	m_face = std::move(next);
+	m_facePixels = pixels;
+	m_fontScale = m_face.fontScale;
+	// Glyph metrics changed with the density: rebuild the geometry, keep state.
+	invalidateLayout();
+	return true;
+}
+
 void GameUiSample::refreshFace(SDL_Window *window)
 {
-	const auto pixels = framebufferScaleFor(window);
+	// S03: an explicit density wins over the queries; the window density is only
+	// the default source.
+	const auto pixels = m_faceDensityOverride ? m_faceDensityOverride : framebufferScaleFor(window);
 	if (!pixels)
 		return;
 	// R07: a density whose replacement already failed is not retried every frame;
 	// a new density (or a restore) clears the tombstone.
 	if (m_faceFailedPixels && std::abs(*pixels - *m_faceFailedPixels) < 0.001f)
 		return;
-	if (std::abs(*pixels / m_facePixels - 1.f) < 0.01f)
-	{
+	if (refreshFaceForDensity(*pixels))
 		m_faceFailedPixels.reset();
-		return;
-	}
-	// Bake and upload into locals; nothing is published until the GPU accepted it.
-	gameui::BakedFace next;
-	if (!gameui::bakeFace(*pixels, next) ||
-		(m_immediate &&
-			!m_renderer.setFont(*m_immediate, {next.width, next.height}, next.coverage)))
-	{
+	else
 		m_faceFailedPixels = pixels;
-		return;
-	}
-	m_face = std::move(next);
-	m_facePixels = *pixels;
-	m_fontScale = m_face.fontScale;
-	m_faceFailedPixels.reset();
-	// Glyph metrics changed with the density: rebuild the geometry, keep state.
-	invalidateLayout();
 }
 
 void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommands &immediate,
@@ -299,7 +305,7 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 		const auto label = [&](glm::vec2 pos, std::string_view caption, glm::vec4 color,
 							   float roleScale = 1.f) {
 			font().paint(m_draws, layout.origin + pos * layout.scale, caption, color,
-				layout.scale * roleScale * m_fontScale, clip);
+				layout.scale * roleScale * m_fontScale, clip, clip);
 		};
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);

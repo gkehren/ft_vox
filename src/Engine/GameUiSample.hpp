@@ -86,6 +86,19 @@ private:
 	/// Re-bakes the face when the framebuffer density changed (issue #302 F11)
 	/// and hands the new atlas to the renderer at a safe synchronization point.
 	void refreshFace(SDL_Window *window);
+	/// Re-bake the face for `pixels` framebuffer points per logical point and
+	/// publish it only if the GPU accepted the replacement (issue #302 R07/S03).
+	/// Returns false when the bake or the replacement failed — the previous face,
+	/// `m_facePixels` and `m_fontScale` then stay untouched. An unchanged density
+	/// returns true without rebuilding. `refreshFace` is this applied to the
+	/// window; the GPU proof drives it directly to exercise a real transition.
+	bool refreshFaceForDensity(float pixels);
+	/// Bake the face for `pixels` instead of the SDL-reported density (issue #302
+	/// S03). `refreshFace` prefers the override, so a host that knows the target
+	/// density better than SDL — and the GPU proof exercising a real transition —
+	/// can drive it without moving the window between displays. `nullopt` returns
+	/// to the queries.
+	void setFaceDensityOverride(std::optional<float> pixels) { m_faceDensityOverride = pixels; }
 	/// Ages notifications and the indeterminate phase from a monotonic clock
 	/// (issue #302 F10): the timers are frame-rate independent.
 	void advancePresentation();
@@ -112,6 +125,8 @@ private:
 	float m_facePixels{1.f};
 	/// Density whose atlas replacement failed; not retried while unchanged (R07).
 	std::optional<float> m_faceFailedPixels;
+	/// Explicit density for the face bake, over the SDL queries (S03).
+	std::optional<float> m_faceDensityOverride;
 	ImmediateCommands *m_immediate{};
 	SDL_WindowFlags m_windowFlags{};
 	glm::vec4 m_button{};

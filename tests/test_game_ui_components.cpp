@@ -517,9 +517,97 @@ void degenerateGeometry()
 			0.f);
 		surface.progress(test.box, 0.5f, false, 0.f);
 		surface.progress(test.box, 0.f, true, 1.f);
+		// S02: composite components clamp their decorations to the same rect.
+		surface.statusIndicator(test.box, style::Status::Warning, "Reconnecting to the world");
+		surface.toast(test.box, Toast{.title = "Welcome back", .body = "Seed 1337",
+			.status = style::Status::Error, .lifetime = 4.f, .id = 1});
+		surface.slot(test.box, SlotView{.icon = AtlasIcon{3, 1}, .count = 64,
+			.progress = 0.8f});
 		CHECK(!outside(draws, test.box),
 			"no primitive leaves " << test.name << " component rectangle");
 		CHECK(draws.dropped() == 0, "degenerate geometry never exhausts the draw budget");
+	}
+
+	// S02: a toggle and a slider clamp their own decorations to the widget bounds,
+	// so an undersized row never paints outside itself.
+	{
+		Toggle toggle{true};
+		Slider slider{0.35f};
+		const Clip boxes[] = {
+			{{10.f, 10.f, 90.f, 40.f}},   // nominal
+			{{10.f, 10.f, 24.f, 40.f}},   // narrower than the switch
+			{{10.f, 10.f, 90.f, 14.f}},   // shorter than the switch
+			{{10.f, 10.f, 12.f, 12.f}},   // undersized in both axes
+		};
+		for (const auto &box : boxes)
+		{
+			WidgetSet set;
+			set.reset({{0.f, 0.f, 200.f, 200.f}}, 200.f, 0.f);
+			set.add({1, box, "Toggle label that is too long", {}, &toggle});
+			set.add({2, Clip{{box.rect.x, box.rect.w + 4.f, box.rect.z, box.rect.w + 44.f}},
+				"Slider label that is too long", {}, &slider});
+			DrawList draws;
+			draws.reset({200.f, 200.f}, 3);
+			set.paint(draws, kFont, 1.f, {}, {-10.f, -10.f}, theme());
+			// The two widgets are separated by a 4 px gap, so a primitive is
+			// attributed by its vertical center and must stay inside its own box.
+			const Clip row{{box.rect.x, box.rect.y, box.rect.z, box.rect.w}};
+			const Clip track{{box.rect.x, box.rect.w + 4.f, box.rect.z, box.rect.w + 44.f}};
+			const auto within = [](const Quad &quad, Clip box) {
+				return quad.rect.x >= box.rect.x - 0.01f && quad.rect.z <= box.rect.z + 0.01f &&
+					quad.rect.y >= box.rect.y - 0.01f && quad.rect.w <= box.rect.w + 0.01f;
+			};
+			bool toggleInside = true, sliderInside = true;
+			for (const auto &quad : draws.quads())
+			{
+				const float center = (quad.rect.y + quad.rect.w) * 0.5f;
+				if (center < box.rect.w + 2.f)
+					toggleInside = toggleInside && within(quad, row);
+				else
+					sliderInside = sliderInside && within(quad, track);
+			}
+			CHECK(toggleInside && sliderInside,
+				"a toggle and a slider stay inside a " << size(box).x << 'x' << size(box).y
+					<< " widget");
+			CHECK(draws.dropped() == 0, "clamped toggle and slider never drop a primitive");
+		}
+	}
+
+	// S01: a label between half and a full line height clips its glyphs
+	// geometrically instead of spilling over the neighbouring component.
+	{
+		const style::TextRole role = style::TextRole::Body;
+		const float nominal = style::lineHeight(role);
+		for (const float scale : {1.f, 1.5f, 2.f})
+			for (const float ratio : {0.6f, 0.75f, 0.9f})
+			{
+				const Clip box{{10.f, 10.f, 130.f, 10.f + nominal * scale * ratio}};
+				DrawList draws;
+				draws.reset({640.f, 480.f}, 3);
+				Surface surface(draws, kFont, theme(), scale, {{0.f, 0.f, 640.f, 480.f}}, 16);
+				surface.fittedLabel(box, "Clipped caption", role, theme().palette.ink, 0.f);
+				size_t glyphs = 0, remapped = 0;
+				bool inside = true;
+				for (const auto &quad : draws.quads())
+					if (quad.layer == -2)
+					{
+						++glyphs;
+						inside = inside && quad.rect.x >= box.rect.x - 0.01f &&
+							quad.rect.z <= box.rect.z + 0.01f && quad.rect.y >= box.rect.y - 0.01f &&
+							quad.rect.w <= box.rect.w + 0.01f;
+						// A clipped glyph keeps its UVs inside the source glyph.
+						remapped += quad.uv.y >= -0.0001f && quad.uv.w <= 1.0001f &&
+							quad.uv.w > quad.uv.y;
+					}
+				CHECK(glyphs > 0 && inside,
+					"a label at " << ratio * 100.f << "% of its line height stays inside its rect at "
+						<< scale * 100.f << "% scale");
+				CHECK(remapped == glyphs,
+					"clipped glyphs keep a valid, non-inverted UV rectangle");
+				CHECK(draws.batches().size() <= 2,
+					"glyph clipping does not add a scissor batch (batches="
+						<< draws.batches().size() << ')');
+			}
 	}
 
 	// A section header and a divider keep their rules inside a short rect.

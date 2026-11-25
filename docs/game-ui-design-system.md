@@ -254,29 +254,34 @@ test_engine_reload --game-ui-showcase-proof     # existing interaction proof
   toggle / slider tokens, preference round-trip, concurrent readers vs writers,
   an injected replacement failure, repair of a corrupt record and every
   corruption case.
-- `GameUiComponents` (184 checks) — slot grid geometry/hit testing, tooltip
+- `GameUiComponents` (219 checks) — slot grid geometry/hit testing, tooltip
   placement and flipping, toast capacity/expiry/sticky/dismissal, confirmation
   geometry and destructive focus, progress fractions, text fitting and glyph
   fallback, icon fallback, owned/bounded notifications, toast timing at
   30–240 Hz, the field-group height contract, slot occupancy vs icon validity,
   label/border/band clamping, component painting/scissoring, a full HUD mock at
   eight size × scale combinations inside the 8-draw budget, the gallery layout
-  at 16:9, 21:9, small windows, 100% and 200%, in-place notification ageing, and
-  degenerate (empty/fractional/narrow/flat) component geometry.
+  at 16:9, 21:9, small windows, 100% and 200%, in-place notification ageing,
+  degenerate (empty/fractional/narrow/flat) component geometry, clamped
+  composite decorations (status, toast, slot, toggle, slider) and glyph clipping
+  between 50% and 100% of a line height at 100/150/200%.
 - `GameUiInteraction` — routing, focus, and the geometry contracts behind them:
   one text metric for painting/caret/hit testing at 100–200% with 1×/2×
   framebuffer density, scrolled-selection highlight visibility and clipping at
   the same scales, slider track mapping at 0/25/50/75/100%, disjoint slider
   label/value rects, and the IME composition-unit normalization (UTF-16 on
   Windows, scalars on Linux).
-- `--game-ui-design-system` (36 checks, Vulkan validation enabled) — captures
+- `--game-ui-design-system` (49 checks, Vulkan validation enabled) — captures
   the gallery and HUD mock through the production composition path at
   1920×1080 / 2560×1080 / 1160×680 and 100% / 150% / 200%, checks the resolved
   scale against the requested policy, the destructive confirmation sample on the
   danger variant, the ≤ 32-draw menu budget with zero dropped quads, and the
   validation counters. `--game-ui-showcase-proof` (39 checks) additionally
   asserts that the real exit confirmation styles its action as danger and that
-  one Enter right after opening it activates Cancel.
+  one Enter right after opening it activates Cancel. The same proof exercises a
+  failed and a successful font-atlas replacement on the GPU (metrics, descriptor
+  footprint and resource round-trip) and the Engine preference seam (missing,
+  corrupt, repaired, failed write and retry) on an isolated temporary directory.
 
 Screenshots (canonical physical GPU, Vulkan validation on):
 [gallery 1920×1080 100%](images/game-ui-design-system/gallery-1920x1080-100.png),
@@ -340,6 +345,19 @@ correction.
 | R08 | `ToastQueue::advance` ages entries in place and compacts with a move only when an entry actually expires (never self-moves, retired slots cleared). | `PlayerUiComponents.cpp` | `GameUiComponents::notificationLifetime` asserts stable `std::string` buffers/capacity across 20 steps, ordering, expiry, stickiness and capacity |
 | R09 | A corrupt or unreadable preference record marks the settings dirty so an explicit selection of the current default rewrites it; a missing record stays a fresh install and nothing is overwritten at startup. | `EngineUiInput.cpp` | `GameUiStyle::preferences` corrupt → explicit save → valid record; missing stays `Missing` |
 | R10 | The destructive action uses `ButtonVariant::Danger` in the gallery sample and in the real exit confirmation, Cancel stays first so it takes the initial focus, and Enter on a freshly opened dialog activates Cancel. | `GameUiShowcase.cpp`, `GameUiGallery.cpp` | design-system proof (gallery sample variants), showcase proof (danger styling + `ConfirmExit` → Enter → `Pause`) |
+
+### Round 3 (S01–S04)
+
+| # | Correction | Where | Evidence |
+| --- | --- | --- | --- |
+| S01 | `clipGlyph` intersects one glyph quad with its component rect and remaps the UV rectangle proportionally; `FontView::paint` takes an optional bound and skips fully clipped glyphs. `label`, `labelAligned` and `fittedLabel` all funnel into the clipped path, the field editor clips to `editorClip`, the surface scissor is unchanged (no extra batches), and the advance still moves so alignment, ellipsis and framebuffer compensation are untouched. | `PlayerUiText.hpp`, `PlayerUiWidgets.*`, `PlayerUiComponents.cpp` | `GameUiComponents`: 60/75/90% of a line height × 100/150/200% → every glyph quad inside the rect, valid non-inverted UVs, ≤ 2 batches |
+| S02 | Composite decorations clamp or skip: `statusIndicator` shrinks its marker and text band, `toast` clamps the accent strip and body, `slot` clamps the icon inset, progress/durability band and badge (and paints no bar when there is no room), the toggle clamps its switch and label, the slider clamps label/value height and track. Empty and inverted rects return early. | `PlayerUiComponents.cpp`, `PlayerUiWidgets.cpp` | `GameUiComponents::degenerateGeometry` (empty, inverted, fractional, narrow, flat) plus a toggle and a slider at 90×40, 24×40, 90×14 and 12×12 |
+| S03 | `GameUiSample::refreshFaceForDensity` is the explicit density seam (`setFaceDensityOverride` lets a host or a proof pick the target); the GPU proof refuses an invalid replacement (zero extent, mismatched coverage), keeps rendering on the working atlas, then performs a real 2× replacement, asserts the published CPU metrics match the GPU image, round-trips three times and restores the original footprint. | `GameUiSample.*`, `GameUiBackendProof.cpp` | `--game-ui-design-system`: `fontBytes`, `descriptorSets`, `m_face.width·height`, `m_fontScale`, `dropped == 0`, validation counters |
+| S04 | The Engine preference seam is proven end to end on an isolated temporary directory: missing record → Auto defaults, no warning, no write; corrupt record → warning + dirty, file untouched while the player does nothing; explicit Auto selection → record repaired and warning cleared; failed write (a directory in place of the record) → in-memory value kept, still dirty; the same selection after recovery → persisted, warning cleared. | `EngineUiInput.cpp`, `GameUiBackendProof.cpp` | `--game-ui-design-system` (six checks on `loadPlayerUiPreferences`, `applyPlayerUiScaleRequests`, `m_playerUiDirty` and `m_playerUiError`) |
+
+The only visible capture difference is a handful of ±1 pixels at label edges:
+glyphs that used to extend a pixel past their component are now cut by the same
+rect, which is exactly what S01 guarantees.
 
 ### IME platform facts (F09)
 

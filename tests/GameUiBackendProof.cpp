@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 
 namespace
@@ -1049,6 +1051,122 @@ struct GameUiBackendProbe
 				sample.m_toasts.size() == toastCount && sample.m_toasts.newest() &&
 				sample.m_toasts.newest()->id == toastId,
 			"changing the player UI scale keeps focus, selection and notifications");
+
+		// S03: dynamic atlas replacement on the real GPU path — invalid input is
+		// refused without touching the working atlas, a valid density change swaps
+		// the image and its CPU metrics together, and repeated round-trips return
+		// to the same footprint.
+		{
+			auto &renderer = sample.renderer();
+			const auto baseline = renderer.stats(0);
+			const auto baselinePixels = sample.m_facePixels;
+			const auto baselineFontScale = sample.m_fontScale;
+			CHECK(baseline.draws > 0 && baseline.dropped == 0,
+				"the proof renders with the original atlas before any replacement");
+			const bool refusedEmpty = renderer.setFont(*sample.m_immediate, {0, 0}, {});
+			const std::array<uint8_t, 16> wrongSpan{};
+			const bool refusedSpan = renderer.setFont(*sample.m_immediate, {8, 8}, wrongSpan);
+			CHECK(!refusedEmpty && !refusedSpan,
+				"an invalid atlas replacement reports failure instead of publishing");
+			frames(2);
+			const auto afterFailure = renderer.stats(0);
+			CHECK(afterFailure.fontBytes == baseline.fontBytes && afterFailure.draws > 0 &&
+					afterFailure.dropped == 0 && std::abs(sample.m_facePixels - baselinePixels) < 0.001f,
+				"the original atlas stays usable after a failed replacement");
+			const float other = baselinePixels < 1.5f ? 2.f : 1.f;
+			sample.setFaceDensityOverride(other);
+			frames(2);
+			const auto replaced = renderer.stats(0);
+			CHECK(std::abs(sample.m_facePixels - other) < 0.001f && replaced.draws > 0 &&
+					replaced.dropped == 0 && replaced.descriptorSets == baseline.descriptorSets &&
+					replaced.fontBytes == VkDeviceSize(sample.m_face.width) * sample.m_face.height,
+				"a valid atlas replacement publishes matching GPU and CPU metrics");
+			CHECK(sample.m_fontScale != baselineFontScale,
+				"the framebuffer compensation follows the new density");
+			for (int round = 0; round < 3; ++round)
+			{
+				sample.setFaceDensityOverride(baselinePixels);
+				frames(1);
+				sample.setFaceDensityOverride(other);
+				frames(1);
+			}
+			sample.setFaceDensityOverride(std::nullopt);
+			sample.refreshFaceForDensity(baselinePixels);
+			frames(2);
+			const auto restored = renderer.stats(0);
+			CHECK(std::abs(sample.m_facePixels - baselinePixels) < 0.001f &&
+					sample.m_fontScale == baselineFontScale && restored.fontBytes == baseline.fontBytes &&
+					restored.descriptorSets == baseline.descriptorSets && restored.draws > 0,
+				"repeated atlas replacements leak no font or descriptor resources");
+		}
+
+		// S04: the Engine settings seam, on an isolated directory. A missing record
+		// stays silent, a corrupt one warns and stays untouched until the player
+		// selects a value, a failed write stays dirty and the next explicit
+		// selection persists.
+		{
+			namespace fs = std::filesystem;
+			const auto previousRoot = engine.m_savesRoot;
+			const auto root = fs::temp_directory_path() / "ftvox-player-ui-proof";
+			std::error_code ec;
+			fs::remove_all(root, ec);
+			engine.setSavesRootForTests(root);
+			const auto record = root / ".client-profiles" / "player-ui.txt";
+			const auto readRecord = [&record] {
+				std::ifstream in(record, std::ios::binary);
+				return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			};
+
+			engine.loadPlayerUiPreferences();
+			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto &&
+					!engine.m_playerUiDirty && engine.m_playerUiError.empty() && !fs::exists(record),
+				"a missing preference record loads Auto defaults without a warning or a write");
+			engine.applyPlayerUiScaleRequests();
+			CHECK(!fs::exists(record), "no unsolicited write happens without a selection");
+
+			fs::create_directories(record.parent_path(), ec);
+			{
+				std::ofstream out(record, std::ios::binary | std::ios::trunc);
+				out << "ftvox-player-ui 9\nscale auto\n";
+			}
+			const auto corruptBytes = readRecord();
+			engine.loadPlayerUiPreferences();
+			CHECK(engine.m_playerUiDirty && !engine.m_playerUiError.empty() &&
+					engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto,
+				"a corrupt preference record warns and asks for a repair");
+			engine.applyPlayerUiScaleRequests();
+			CHECK(readRecord() == corruptBytes,
+				"a corrupt record stays untouched while the player does not interact");
+
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Auto, 1.f};
+			engine.applyPlayerUiScaleRequests();
+			gameui::PlayerUiSettings repaired;
+			CHECK(repaired.load(record) == gameui::LoadStatus::Ok && engine.m_playerUiError.empty() &&
+					!engine.m_playerUiDirty,
+				"selecting the current default repairs the record and clears the warning");
+
+			// A destination that cannot be replaced (a directory in its place) keeps
+			// the change in memory and the store dirty.
+			fs::remove(record, ec);
+			fs::create_directories(record, ec);
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
+			engine.applyPlayerUiScaleRequests();
+			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Fixed &&
+					engine.m_playerUiSettings.scale.value == 1.5f && engine.m_playerUiDirty &&
+					!engine.m_playerUiError.empty(),
+				"a failed write keeps the in-memory preference and the dirty state");
+			fs::remove_all(record, ec);
+			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
+			engine.applyPlayerUiScaleRequests();
+			gameui::PlayerUiSettings persisted;
+			CHECK(persisted.load(record) == gameui::LoadStatus::Ok &&
+					persisted.scale.mode == gameui::ScaleMode::Fixed && persisted.scale.value == 1.5f &&
+					engine.m_playerUiError.empty() && !engine.m_playerUiDirty,
+				"the same selection after recovery persists and clears the warning");
+
+			engine.setSavesRootForTests(previousRoot);
+			fs::remove_all(root, ec);
+		}
 
 		sample.resetScreens();
 		sample.setScalePolicy({gameui::ScaleMode::Auto, 1.f});
