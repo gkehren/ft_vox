@@ -267,7 +267,10 @@ pending and accepted or rejected actions. Chunk and inventory displays
 follow the server's updates.
 
 Release the cursor with **C**, then use **Multiplayer → Disconnect** and
-**Multiplayer → Reconnect**. The other client should lose the departing
+**Multiplayer → Reconnect**. The player HUD states the same steps when a
+session ends: with the developer workspace hidden its recovery line asks for
+`Ctrl+Shift+D` first, then `C` if the mouse is still captured, and always ends
+at **Multiplayer → Reconnect**. The other client should lose the departing
 avatar, then see the same player return. The reconnecting client's
 position and inventory resume after the new session synchronizes. Walk far enough to leave and re-enter
 the server's interest radius and check that terrain and entities return

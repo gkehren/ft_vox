@@ -70,6 +70,9 @@ struct GameUiBackendProbe
 {
 	explicit GameUiBackendProbe(Engine &host) : engine(host) {}
 	Engine &engine;
+	/// Backing storage for io.IniFilename during the ini-persistence proof: ImGui
+	/// keeps the pointer, so it has to outlive every frame.
+	std::string m_iniPath;
 
 	void init()
 	{
@@ -1178,6 +1181,362 @@ struct GameUiBackendProbe
 			<< ", known RTSS errors=" << rtss);
 	}
 
+	void playerHudProof()
+	{
+		init();
+		auto &sample = *engine.m_playerUi;
+		const auto &context = *engine.vkContext;
+		const auto errorsBefore = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
+		sample.setPreviewStripVisible(false);
+		// F01/F04: the launch state is a hidden workspace (--no-dev-ui), and the
+		// whole workspace can be shown, hidden and restored at runtime. The
+		// dockspace identity must survive every transition, so the central game
+		// view keeps its exact rectangle (that rectangle IS the persisted split
+		// tree: side/bottom docks included).
+		engine.setDeveloperWorkspaceVisible(false);
+		frames(2);
+		CHECK(!engine.developerUiAvailable() && !engine.developerWorkspaceVisible(),
+			"the proof starts without the developer workspace");
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(3);
+		const auto dockedView = engine.gameUi->shell().gameViewRect();
+		CHECK(engine.developerUiAvailable() && dockedView.size.x > 0.f && dockedView.size.y > 0.f,
+			"showing the workspace restores the developer chrome and its input ownership");
+		for (int round = 0; round < 3; ++round)
+		{
+			engine.setDeveloperWorkspaceVisible(false);
+			present();
+			CHECK(!engine.developerUiAvailable(),
+				"hiding the workspace removes the chrome and its input ownership");
+			engine.setDeveloperWorkspaceVisible(true);
+			frames(2);
+			const auto restored = engine.gameUi->shell().gameViewRect();
+			CHECK(engine.developerUiAvailable() &&
+					std::abs(restored.pos.x - dockedView.pos.x) < 0.5f &&
+					std::abs(restored.pos.y - dockedView.pos.y) < 0.5f &&
+					std::abs(restored.size.x - dockedView.size.x) < 0.5f &&
+					std::abs(restored.size.y - dockedView.size.y) < 0.5f,
+				"the persisted docking layout is restored after every toggle");
+		}
+		// The legacy inventory keeps working in both layouts: docked/floating in
+		// the workspace, and floating over gameplay while it is hidden.
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable(),
+			"the inventory opens inside the developer workspace");
+		tap(SDLK_E);
+		present();
+		CHECK(!engine.inventoryPanelOpen(),
+			"the inventory closes again without touching the workspace layout");
+		engine.setDeveloperWorkspaceVisible(false);
+		present();
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() &&
+				!engine.developerWorkspaceVisible(),
+			"a hidden workspace still opens the legacy inventory as a floating window");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && engine.mouseCaptured,
+			"Escape closes the floating inventory and returns to the HUD");
+		engine.setShowDeveloperUi(false);
+		engine.sim->grantItems(items::ItemId::Stone, 12);
+		engine.sim->grantItems(items::ItemId::Dirt, 4);
+		resize(960, 540);
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 2.f});
+		frames(3);
+		const auto hasStoneIcon = [&] {
+			return std::ranges::any_of(sample.m_draws.quads(), [](const gameui::Quad &q) { return q.layer == STONE; });
+		};
+		CHECK(hasStoneIcon() && sample.renderer().stats(0).dropped == 0 && !engine.developerUiAvailable(),
+			"live hotbar draws in a small window at 200% without the developer workspace");
+		CHECK(engine.playerHudView().hotbar.slots[0].count == 12,
+			"live HUD reads the solo snapshot");
+
+		tap(SDLK_2);
+		present();
+		CHECK(engine.playerHudView().hotbar.selectedName == "Dirt", "number key selects via the existing adapter");
+		SDL_Event wheel{};
+		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
+		wheel.wheel.y = 1.f;
+		checked(SDL_PushEvent(&wheel), "queue gameplay scroll");
+		key(SDLK_Q, SDL_EVENT_KEY_DOWN);
+		key(SDLK_Q, SDL_EVENT_KEY_DOWN, true);
+		key(SDLK_Q, SDL_EVENT_KEY_UP);
+		present();
+		CHECK(engine.playerHudView().hotbar.selectedName == "Stone" &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"one wheel event and one non-repeat drop produce one selection and one count decrement");
+
+		tap(SDLK_E);
+		tap(SDLK_Q);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() && !hasStoneIcon() &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"inventory hides the HUD and consumes gameplay input without the workspace");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && hasStoneIcon() && engine.mouseCaptured,
+			"closing inventory restores the HUD and capture");
+
+		// F06: the creative block selection is explicit and stays on screen when
+		// the optional hints (F6) are off — same band, more copy.
+		const auto hudSelectionGlyphs = [&] {
+			const auto scene = sample.m_draws.bounds();
+			const auto area = engine.gameUi->shell().gameViewRect();
+			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
+			const gameui::Clip safe{{area.pos.x - origin.x, area.pos.y - origin.y,
+				area.pos.x - origin.x + area.size.x, area.pos.y - origin.y + area.size.y}};
+			const auto layout = gameui::hudLayout(scene, safe, gameui::style::baseline(),
+				sample.playerUiScale());
+			size_t glyphs = 0;
+			for (const auto &quad : sample.m_draws.quads())
+			{
+				const glm::vec2 centre{(quad.rect.x + quad.rect.z) * 0.5f,
+					(quad.rect.y + quad.rect.w) * 0.5f};
+				glyphs += quad.layer == -2 && gameui::hit(layout.selection, centre);
+			}
+			return glyphs;
+		};
+		tap(SDLK_V);
+		present();
+		CHECK(engine.playerHudView().creative && !engine.playerHudView().creativeBlock.empty(),
+			"debug flight exposes the creative block selection");
+		if (engine.gameUi->showOverlayHints())
+		{
+			tap(SDLK_F6);
+			present();
+		}
+		const auto creativeView = engine.playerHudView();
+		CHECK(!creativeView.hints && creativeView.creative,
+			"the creative label does not depend on the optional F6 hints");
+		const auto creativeGlyphs = hudSelectionGlyphs();
+		tap(SDLK_V);
+		present();
+		CHECK(!engine.playerHudView().creative, "leaving creative restores the normal selection");
+		const auto plainGlyphs = hudSelectionGlyphs();
+		CHECK(plainGlyphs > 0 && creativeGlyphs > plainGlyphs,
+			"the creative prefix adds copy to the selection band (creative=" << creativeGlyphs
+				<< ", inventory=" << plainGlyphs << ')');
+		if (!engine.gameUi->showOverlayHints())
+		{
+			tap(SDLK_F6);
+			present();
+		}
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(engine.nativePause() && !hasStoneIcon(), "pause supersedes the gameplay HUD");
+		const auto toggle = std::ranges::find_if(sample.m_widgets.widgets(),
+			[](const gameui::Widget &widget) { return widget.label == "Hide HUD"; });
+		checked(toggle != sample.m_widgets.widgets().end(), "pause exposes the HUD toggle");
+		const auto bounds = sample.m_widgets.bounds(*toggle);
+		clickAt(glm::vec2(bounds.rect) + gameui::size(bounds) * 0.5f);
+		present();
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!sample.hudVisible() && sample.m_draws.quads().empty() &&
+			engine.playerHudView().hotbar.slots[0].count == 11,
+			"the visibility toggle changes presentation without touching inventory");
+		sample.setHudVisible(true);
+		const auto generation = engine.m_atlasVersion;
+		CHECK(engine.applyResourcePack("").atlasOk && engine.m_atlasVersion != generation,
+			"resource-pack reload publishes a new atlas");
+		frames(3);
+		CHECK(hasStoneIcon() && sample.m_draws.atlasGeneration() == engine.m_atlasVersion,
+			"live icon is repainted using the new atlas after both slots cycle");
+		CHECK(engine.reloadWorld(43), "new solo epoch starts");
+		present();
+		CHECK(!hasStoneIcon() && engine.playerHudView().hotbar.selectedName == "Empty slot",
+			"new epoch paints its own inventory with no stale item icon");
+		const auto hudFrame = sample.lastRecordedStats()->frameNumber;
+		engine.m_inspectionView = true;
+		present();
+		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "inspection skips player UI preparation");
+		engine.m_inspectionView = false;
+		engine.m_benchmark.requestStart();
+		present();
+		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "active benchmarks skip player UI preparation");
+		engine.m_benchmark.cancel();
+		workspaceProof();
+		context.waitIdle();
+		const auto errors = context.validationErrorCount() - errorsBefore;
+		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;
+		std::cout << "HUD validation errors=" << errors << " known_rtss_errors=" << rtss << '\n';
+		CHECK(errors == rtss, "HUD adds no validation errors outside known RTSS messages");
+	}
+
+	/// The persisted inventory record of the canonical window, straight out of the
+	/// settings blob ImGui would write (issue #303 F01/F12). Empty when the record
+	/// is absent.
+	std::string inventoryIniRecord()
+	{
+		const char *ini = ImGui::SaveIniSettingsToMemory();
+		const std::string text = ini ? ini : "";
+		const auto start = text.find("[Window][Inventory]\n");
+		if (start == std::string::npos)
+			return {};
+		const auto end = text.find("\n[", start + 1);
+		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
+	}
+
+	/// F04/F09/F11/F12: the workspace visibility chord, its benchmark guard,
+	/// developer-input cancellation and the inventory docking identity are
+	/// exercised through real SDL events, not through direct setter calls.
+	void workspaceProof()
+	{
+		auto &shell = engine.gameUi->shell();
+		const SDL_Keymod chord = SDL_KMOD_CTRL | SDL_KMOD_SHIFT;
+		engine.setDeveloperWorkspaceVisible(true);
+		engine.setInventoryOpen(false);
+		frames(3);
+		CHECK(engine.developerWorkspaceVisible() && shell.dockspaceId() != 0,
+			"the workspace proof starts with a visible workspace and a live dockspace");
+
+		// (1) One press, one transition, both directions.
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible(), "Ctrl+Shift+D hides the whole workspace");
+		tap(SDLK_D, chord);
+		present();
+		CHECK(engine.developerWorkspaceVisible(), "Ctrl+Shift+D shows it again");
+
+		// (2) Repeats and incomplete chords are not the shortcut.
+		key(SDLK_D, SDL_EVENT_KEY_DOWN, true, chord);
+		present();
+		key(SDLK_D, SDL_EVENT_KEY_UP, false, chord);
+		present();
+		CHECK(engine.developerWorkspaceVisible(), "a key repeat does not toggle the workspace again");
+		for (const auto partial : std::array<SDL_Keymod, 4>{SDL_KMOD_NONE, SDL_KMOD_CTRL, SDL_KMOD_SHIFT,
+				 SDL_KMOD_ALT})
+		{
+			tap(SDLK_D, partial);
+			present();
+			CHECK(engine.developerWorkspaceVisible(),
+				"plain D and incomplete chords stay plain keys (mods=" << int(partial) << ')');
+		}
+
+		// (3) Hiding cancels developer-owned input instead of leaking it.
+		constexpr size_t kDevButton = 1;
+		engine.m_inputRouter.button(kDevButton, true, gameui::InputOwner::DeveloperUi);
+		checked(engine.m_inputRouter.pointerOwner() == gameui::InputOwner::DeveloperUi &&
+			engine.m_inputRouter.activeButton(kDevButton), "a developer pointer drag owns the surface");
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible() && !engine.m_inputRouter.activeButton(kDevButton) &&
+			engine.m_inputRouter.pointerOwner() != gameui::InputOwner::DeveloperUi,
+			"hiding the workspace cancels the in-flight developer drag");
+		tap(SDLK_D, chord);
+		frames(2);
+		checked(engine.developerWorkspaceVisible(), "the workspace is back for the docking proof");
+
+		// (4) The benchmark guard covers both the chord and the menu action.
+		engine.m_benchmark.requestStart();
+		const bool benchmarkActive = engine.m_benchmark.isActive();
+		tap(SDLK_D, chord);
+		present();
+		CHECK(benchmarkActive && engine.developerWorkspaceVisible(),
+			"the chord is consumed without changing visibility during a benchmark");
+		engine.setDeveloperWorkspaceVisible(false);
+		CHECK(!engine.m_benchmark.isActive() || engine.developerWorkspaceVisible(),
+			"the menu action obeys the same benchmark guard");
+		engine.m_benchmark.cancel();
+		tap(SDLK_D, chord);
+		present();
+		CHECK(!engine.developerWorkspaceVisible(),
+			"the chord works again once the benchmark ended");
+
+		// (5) F09: with the workspace hidden and the inventory closed only the
+		// dockspace is maintained, so the developer frame is not built at all.
+		// The main menu bar belongs to that frame, so the last frame it was
+		// submitted in makes the difference observable.
+		const auto menuBarFrame = [] {
+			const ImGuiWindow *bar = ImGui::FindWindowByName("##MainMenuBar");
+			return bar ? bar->LastFrameActive : 0;
+		};
+		engine.setInventoryOpen(false);
+		engine.setDeveloperWorkspaceVisible(false);
+		frames(4);
+		const int hiddenBarFrame = menuBarFrame();
+		const auto hiddenDockspace = shell.dockspaceId();
+		const auto medianDevBuild = [&](int samples) {
+			std::vector<float> values;
+			for (int i = 0; i < samples; ++i)
+			{
+				present();
+				values.push_back(GetProfiler().lastScopeMs("DevUIBuild"));
+			}
+			return percentile(values, 0.5f);
+		};
+		const auto hiddenMs = medianDevBuild(40);
+		CHECK(hiddenDockspace != 0 && hiddenBarFrame > 0 && menuBarFrame() == hiddenBarFrame,
+			"the full-window path maintains the dockspace without building the developer frame");
+		// The developer keys still own their overlay toggles on that path: B has to
+		// reach the overlay layer even though no developer panel is drawn.
+		const bool bordersBefore = engine.worldRenderer->overlays().showChunkBorders();
+		tap(SDLK_B);
+		present();
+		CHECK(engine.worldRenderer->overlays().showChunkBorders() != bordersBefore,
+			"chunk borders still toggle with the workspace hidden and the inventory closed");
+		tap(SDLK_B);
+		present();
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(2);
+		const auto visibleMs = medianDevBuild(40);
+		std::cout << "DevUIBuild median: hidden=" << hiddenMs << "ms visible=" << visibleMs << "ms\n";
+		CHECK(menuBarFrame() >= ImGui::GetFrameCount() - 1,
+			"the developer frame is built again as soon as the workspace returns");
+
+		// (6) F01: the hidden-workspace inventory is a separate, non-persistent
+		// identity, so the canonical window keeps its dock and its settings record.
+		tap(SDLK_E);
+		frames(2);
+		checked(engine.inventoryPanelOpen(), "the inventory opens in the visible workspace");
+		const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(shell.dockspaceId());
+		checked(central && central->ID != 0, "the dockspace exposes a central node to dock into");
+		ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : shell.dockspaceId());
+		ImGui::DockBuilderFinish(shell.dockspaceId());
+		frames(2);
+		const ImGuiWindow *canonical = ImGui::FindWindowByName("Inventory");
+		checked(canonical != nullptr, "the canonical inventory window exists");
+		const ImGuiID dockedId = canonical ? canonical->DockId : 0;
+		const auto recordBefore = inventoryIniRecord();
+		CHECK(dockedId != 0 && recordBefore.find("DockId=") != std::string::npos,
+			"the inventory is docked with a persisted association before hiding (dock=" << dockedId
+				<< " record=[" << recordBefore << "])");
+		tap(SDLK_D, chord);
+		present();
+		frames(2);
+		const ImGuiWindow *floating = ImGui::FindWindowByName("Inventory###inventory-floating");
+		CHECK(engine.inventoryPanelOpen() && floating != nullptr,
+			"the hidden workspace keeps the inventory open through its temporary identity");
+		CHECK(floating && floating->DockId == 0 &&
+			(floating->Flags & ImGuiWindowFlags_NoDocking) &&
+			(floating->Flags & ImGuiWindowFlags_NoSavedSettings),
+			"the temporary inventory refuses docking and the settings file");
+		const ImGuiWindow *stillCanonical = ImGui::FindWindowByName("Inventory");
+		CHECK(stillCanonical && stillCanonical->DockId == dockedId,
+			"opening the floating inventory does not undock the canonical window");
+		const auto recordWhileHidden = inventoryIniRecord();
+		CHECK(recordWhileHidden == recordBefore &&
+			recordWhileHidden.find("inventory-floating") == std::string::npos,
+			"the persisted inventory record is untouched while the workspace is hidden");
+		tap(SDLK_E);
+		present();
+		CHECK(!engine.inventoryPanelOpen(), "the floating inventory still closes normally");
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(2);
+		tap(SDLK_E);
+		frames(2);
+		const ImGuiWindow *restored = ImGui::FindWindowByName("Inventory");
+		CHECK(engine.inventoryPanelOpen() && restored && restored->DockId == dockedId &&
+			inventoryIniRecord() == recordBefore,
+			"restoring the workspace reopens the inventory in its original dock");
+		tap(SDLK_E);
+		present();
+	}
+
 	void performance()
 	{
 		auto &gpuProfiler = engine.frameCtx->gpuProfiler();
@@ -1187,7 +1546,11 @@ struct GameUiBackendProbe
 			return;
 		}
 		init();
-		engine.m_inspectionView = true;
+		engine.setShowDeveloperUi(false);
+		engine.m_playerUi->setPreviewStripVisible(false);
+		for (auto item : {items::ItemId::Stone, items::ItemId::Dirt, items::ItemId::Sand,
+				items::ItemId::Cobblestone, items::ItemId::GrassBlock})
+			engine.sim->grantItems(item, 32);
 		engine.setVSync(false);
 		resize(1920, 1080);
 		auto sample = std::move(engine.m_playerUi);
@@ -1258,8 +1621,83 @@ struct GameUiBackendProbe
 			<< " sets=" << stats.descriptorSets << " instance_bytes=" << stats.instanceBytes
 			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
+	/// F01/F12 across a real process boundary: the same ini file is written by the
+	/// `dock` phase (workspace visible, inventory docked into the central node) and
+	/// then re-opened by the `hidden` phase, which starts without the developer
+	/// workspace and opens the inventory through the temporary identity. The
+	/// canonical `[Window][Inventory]` record must come back byte-identical.
+	void iniPersistence(const std::filesystem::path &ini, std::string_view phase)
+	{
+		init();
+		m_iniPath = ini.string();
+		ImGui::GetIO().IniFilename = m_iniPath.c_str();
+		if (std::filesystem::exists(ini))
+			ImGui::LoadIniSettingsFromDisk(m_iniPath.c_str());
+		const bool dock = phase == "dock";
+		engine.setDeveloperWorkspaceVisible(dock);
+		engine.setInventoryOpen(false);
+		frames(3);
+		tap(SDLK_E);
+		frames(2);
+		checked(engine.inventoryPanelOpen(), "the inventory is open for the ini proof");
+		if (dock)
+		{
+			const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(engine.gameUi->shell().dockspaceId());
+			checked(central && central->ID != 0, "the dockspace exposes a central node");
+			ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : engine.gameUi->shell().dockspaceId());
+			ImGui::DockBuilderFinish(engine.gameUi->shell().dockspaceId());
+			frames(2);
+			tap(SDLK_E);
+			frames(1);
+			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
+			const auto record = iniFileInventoryRecord(ini);
+			std::cout << "ini dock phase record: " << record << '\n';
+			CHECK(record.find("DockId=") != std::string::npos &&
+				record.find("DockId=0x00000000") == std::string::npos,
+				"the dock phase persists a real docking association");
+		}
+		else
+		{
+			const auto before = iniFileInventoryRecord(ini);
+			checked(before.find("DockId=0x00000000") == std::string::npos && !before.empty(),
+				"the hidden phase starts from a persisted docking association");
+			tap(SDLK_E); // close through the temporary identity
+			frames(1);
+			tap(SDLK_E); // and open it again
+			frames(2);
+			checked(engine.inventoryPanelOpen() &&
+				ImGui::FindWindowByName("Inventory###inventory-floating") != nullptr,
+				"the hidden workspace opens the inventory through its temporary identity");
+			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
+			const auto after = iniFileInventoryRecord(ini);
+			std::cout << "ini hidden phase record: " << after << '\n';
+			CHECK(after == before,
+				"opening and closing the inventory with the workspace hidden keeps its persisted record");
+		}
+	}
+
+	std::string iniFileInventoryRecord(const std::filesystem::path &ini) const
+	{
+		std::ifstream stream(ini);
+		if (!stream)
+			return {};
+		std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+		const auto start = text.find("[Window][Inventory]\n");
+		if (start == std::string::npos)
+			return {};
+		const auto end = text.find("\n[", start + 1);
+		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
+	}
 };
 
+int runGameUiIniPersistence(Engine &engine, const std::filesystem::path &ini, std::string_view phase)
+{
+	GameUiBackendProbe(engine).iniPersistence(ini, phase);
+	if (testmain::fails == 0)
+		std::cout << "PASS: inventory ini persistence, " << phase << " phase (" << testmain::checks
+			<< " checks)\n";
+	return testmain::exitCode();
+}
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output)
 {
 	GameUiBackendProbe(engine).screenshot(output);
@@ -1295,5 +1733,13 @@ int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output)
 int runGameUiPerformance(Engine &engine)
 {
 	GameUiBackendProbe(engine).performance();
+	return testmain::exitCode();
+}
+
+int runPlayerHudProof(Engine &engine)
+{
+	GameUiBackendProbe(engine).playerHudProof();
+	if (testmain::fails == 0)
+		std::cout << "PASS: live player HUD proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }

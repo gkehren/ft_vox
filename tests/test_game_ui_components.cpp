@@ -4,10 +4,12 @@
 // Each CHECK names the acceptance criterion it protects: geometry inside the
 // viewport, tokens reaching the draw list, fallback behavior for missing
 // glyphs/icons, and the bounded draw budget.
+#include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiGallery.hpp>
 #include <Engine/PlayerUiStyle.hpp>
 #include <Engine/PlayerUiText.hpp>
+#include <Items/ItemRegistry.hpp>
 
 #include <array>
 #include <cmath>
@@ -742,6 +744,332 @@ void hudMock()
 	}
 }
 
+void liveHud()
+{
+	using enum style::State;
+	std::array<items::ItemStack, items::kInventorySize> snapshot{};
+	snapshot[0] = {items::ItemId::Stone, 12};
+	snapshot[1] = {items::ItemId::Dirt, 3};
+	snapshot[5] = {static_cast<items::ItemId>(UINT16_MAX), 4};
+	snapshot[6] = {items::ItemId::Stone, UINT16_MAX};
+	const auto first = makeHudHotbar(snapshot, 0, 15, true);
+	CHECK(first.available && first.selectedName == "Stone" && first.canPlace &&
+		first.slots[0].count == 12 && first.slots[0].state == (Selected | Pending),
+		"pending preserves the authoritative count and selection");
+	CHECK(first.slots[0].icon && first.slots[0].icon->generation == 15 &&
+		first.slots[0].icon->layer == STONE, "the real atlas layer is tagged with this frame's generation");
+	CHECK(first.slots[5].empty() && !first.slots[5].icon && first.slots[6].empty(),
+		"unknown item and invalid quantity paint empty slots");
+
+	snapshot[0].count = 11;
+	const auto second = makeHudHotbar(snapshot, 1, 16, false);
+	CHECK(second.slots[0].count == 11 && second.slots[0].state == Rest &&
+		second.slots[0].icon && second.slots[0].icon->generation == 16 &&
+		second.slots[1].state == Selected && second.selectedName == "Dirt",
+		"next snapshot replaces counts, selection and atlas handles");
+	CHECK(!makeHudHotbar({}, 0, 16, false).available,
+		"absent snapshot produces no hotbar, including after an occupied frame");
+	const auto invalid = makeHudHotbar(snapshot, -1, 16, false);
+	CHECK(invalid.selectedName.empty() && invalid.slots[0].state == Rest,
+		"invalid selection neither indexes a slot nor highlights a substitute");
+	CHECK(makeHudHotbar(snapshot, 8, 16, false).selectedName == "Empty slot",
+		"authoritative selection of an empty slot remains visible");
+
+	struct Case { Clip scene, safe; bool aim; };
+	const std::array cases{
+		Case{{{0, 0, 1920, 1080}}, {{0, 0, 1920, 1080}}, true},
+		Case{{{0, 0, 2560, 1080}}, {{590, 26, 1940, 766}}, true},
+		Case{{{0, 0, 960, 540}}, {{224, 24, 695, 385}}, true},
+		Case{{{0, 0, 960, 540}}, {{520, 24, 900, 385}}, false},
+		Case{{{0, 0, 960, 540}}, {{310, 20, 740, 295}}, false},
+	};
+	for (const auto &test : cases)
+	{
+		for (const float scale : {1.f, 1.5f, 2.f})
+		{
+			const auto layout = hudLayout(test.scene, test.safe, theme(), scale);
+			const auto &bar = layout.hotbar.bounds;
+			const auto last = slotCell(layout.hotbar, items::kHotbarSize - 1, 0);
+			CHECK(layout.scale > 0.f && layout.scale <= scale && inside(bar, test.safe) &&
+				!last.empty() && inside(last, bar) &&
+				std::abs(bar.rect.x + bar.rect.z - test.safe.rect.x - test.safe.rect.z) < 0.01f,
+				"all nine slots stay at the bottom center of the safe area");
+			CHECK(inside(layout.status, test.safe) && inside(layout.activity, test.safe) &&
+				inside(layout.recovery, test.safe) && inside(layout.hint, test.safe) &&
+				inside(layout.selection, test.safe) &&
+				layout.activity.rect.w < layout.recovery.rect.y &&
+				layout.recovery.rect.w < layout.hint.rect.y &&
+				layout.hint.rect.w < layout.selection.rect.y &&
+				layout.selection.rect.w < bar.rect.y,
+				"feedback, hints, selection and the bar occupy separate bands");
+			CHECK(layout.detailLines >= 1 && layout.detailLines <= kHudDetailLines,
+				"the detail keeps at least one line at scale " << scale);
+			// F02: geometry is content-independent. The aim point follows the FULL
+			// window projection (never the safe area's centre) and empty bands
+			// cannot take it away.
+			const glm::vec2 aim = glm::vec2(test.scene.rect) + size(test.scene) * 0.5f;
+			CHECK((glm::vec2(layout.reticle.rect) + size(layout.reticle) * 0.5f) == aim,
+				"the reticle geometry is the scene's exact centre at scale " << scale);
+			HudView empty{};
+			empty.hotbar = second;
+			empty.aim = test.aim;
+			CHECK(resolveHud(layout, empty).reticle == test.aim,
+				"empty status and activity bands cannot hide the reticle at scale " << scale);
+
+			DrawList draws;
+			draws.reset(size(test.scene), 16);
+			const Surface paint(draws, kFont, theme(), layout.scale, layout.view);
+			HudView view{};
+			view.hotbar = second;
+			view.status = "Network degraded";
+			view.activity = "Player snapshots or input acknowledgments are delayed.";
+			view.recovery = "Gameplay continues; try Reconnect if it persists.";
+			view.aim = view.captured = view.target = true;
+			const auto resolved = resolveHud(layout, view);
+			CHECK(resolved.reticle == test.aim,
+				"true aim point visibility at scale " << scale << " in safe area starting at "
+					<< test.safe.rect.x << ", " << test.safe.rect.y);
+			paintHud(paint, layout, view);
+			CHECK(draws.dropped() == 0 && countLayer(draws, STONE) == 1 && countLayer(draws, DIRT) == 1,
+				"the HUD budget carries exactly one icon per populated slot");
+			for (const auto &batch : draws.batches())
+				CHECK(inside(batch.clip, test.safe), "HUD draw batches never extend into developer docks");
+			for (const auto &quad : draws.quads())
+				CHECK(inside({quad.rect}, layout.view), "no HUD quad leaves the unobstructed area");
+		}
+	}
+
+	// F02: the reticle wins over copy that happens to sit on the aim point, and
+	// only visible content is allowed to collide with it.
+	auto overlapped = hudLayout(cases[1].scene, cases[1].safe, theme(), 1.f);
+	overlapped.status = overlapped.reticle;
+	overlapped.activity = overlapped.reticle;
+	overlapped.recovery = overlapped.reticle;
+	HudView blank{};
+	blank.hotbar = second;
+	blank.aim = true;
+	auto resolved = resolveHud(overlapped, blank);
+	CHECK(resolved.reticle && !resolved.status && !resolved.activity && !resolved.recovery,
+		"empty bands reserve nothing at the aim point");
+	HudView occupied = blank;
+	occupied.status = "Timed out";
+	occupied.activity = "The server did not respond in time.";
+	occupied.recovery = recoveryInstruction(false, true);
+	resolved = resolveHud(overlapped, occupied);
+	CHECK(resolved.reticle && !resolved.status && !resolved.activity && !resolved.recovery,
+		"secondary copy yields to the reticle instead of hiding it");
+
+	// A short safe area puts the optional hint band on the aim point: the hint
+	// yields, the aim point survives.
+	const Clip shortScene{{0.f, 0.f, 640.f, 180.f}};
+	const auto shortLayout = hudLayout(shortScene, shortScene, theme(), 1.f);
+	CHECK(!shortLayout.reticle.empty() && !shortLayout.hint.intersect(shortLayout.reticle).empty(),
+		"the compact layout really overlaps the hint band and the aim point");
+	HudView hints{};
+	hints.hotbar = second;
+	hints.aim = true;
+	hints.hints = true;
+	CHECK(resolveHud(shortLayout, hints).reticle && !resolveHud(shortLayout, hints).hint,
+		"the optional hint yields to the reticle");
+	hints.aim = false;
+	CHECK(resolveHud(shortLayout, hints).hint, "without an aim point the hint is painted again");
+
+	// F03: bounded multiline feedback — the wrap never overflows, the message
+	// keeps its beginning, and the block stays above the hint band.
+	std::array<WrappedLine, kMaxWrappedLines> lines{};
+	const std::string_view timeout =
+		"The server did not respond in time. Check the endpoint or try Reconnect.";
+	const float lineWidth = 120.f; // six pixels per glyph in the synthetic face
+	const int bounded = wrapText(kFont, timeout, style::TextRole::Body, 1.f, lineWidth,
+		std::span<WrappedLine>(lines.data(), 2));
+	CHECK(bounded == 2 && lines[0].begin == 0 && lines[0].end > lines[0].begin,
+		"a long session message keeps its beginning and is bounded to the reserved lines");
+	CHECK(lines[1].elided, "the last reserved line asks for the ellipsis");
+	CHECK(std::string_view(timeout.substr(lines[0].begin, lines[0].end - lines[0].begin)) ==
+			"The server did not", "words stay whole and the first line is what fits");
+	for (int index = 0; index < bounded; ++index)
+		CHECK(kFont.measure(timeout.substr(lines[size_t(index)].begin,
+			lines[size_t(index)].end - lines[size_t(index)].begin), 1.f) <= lineWidth,
+			"a wrapped line never exceeds the band width");
+	const int single = wrapText(kFont, "Timed out", style::TextRole::Body, 1.f, lineWidth,
+		std::span<WrappedLine>(lines.data(), 2));
+	CHECK(single == 1 && !lines[0].elided, "a short headline stays on one line without an ellipsis");
+	const std::string longWord(40, 'A');
+	const int broken = wrapText(kFont, longWord, style::TextRole::Body, 1.f, lineWidth,
+		std::span<WrappedLine>(lines.data(), 2));
+	CHECK(broken == 2 && lines[0].end - lines[0].begin == 20,
+		"a word wider than the band breaks at the glyph budget instead of overflowing");
+
+	// F06: the creative block selection is explicit, bounded and independent of
+	// the optional hints.
+	char creativeBuffer[48];
+	CHECK(creativeLabel("Stone", creativeBuffer) == "Creative: Stone",
+		"the creative selection carries an explicit prefix");
+	CHECK(creativeLabel({}, creativeBuffer) == "Creative",
+		"a creative session without a resolved block still names the mode");
+	const auto longLabel = creativeLabel(std::string(60, 'X'), creativeBuffer);
+	CHECK(longLabel.size() == sizeof(creativeBuffer) - 1 && creativeBuffer[longLabel.size()] == '\0',
+		"a long block name is bounded by the caller's buffer");
+	HudView creative{};
+	creative.hotbar = second;
+	creative.creative = true;
+	creative.creativeBlock = "Stone";
+	creative.hints = false;
+	const auto creativeLayout = hudLayout(cases[0].scene, cases[0].safe, theme(), 1.f);
+	CHECK(resolveHud(creativeLayout, creative).selection,
+		"the creative selection is painted with the hints disabled");
+	DrawList creativeDraws;
+	creativeDraws.reset(size(cases[0].scene), 16);
+	paintHud(Surface(creativeDraws, kFont, theme(), creativeLayout.scale, creativeLayout.view),
+		creativeLayout, creative);
+	HudView plain = creative;
+	plain.creative = false;
+	DrawList plainDraws;
+	plainDraws.reset(size(cases[0].scene), 16);
+	paintHud(Surface(plainDraws, kFont, theme(), creativeLayout.scale, creativeLayout.view),
+		creativeLayout, plain);
+	CHECK(creativeDraws.quads().size() > plainDraws.quads().size(),
+		"the explicit prefix paints its own glyphs on the selection band");
+
+	const auto layout = hudLayout(cases[1].scene, cases[1].safe, theme(), 1.f);
+	DrawList reticle;
+	reticle.reset(size(cases[1].scene), 16);
+	HudView aimOnly{};
+	aimOnly.aim = true;
+	paintHud(Surface(reticle, kFont, theme(), layout.scale, layout.view), layout, aimOnly);
+	CHECK(reticle.quads().size() == 4, "a single outlined reticle costs four quads");
+	for (const auto &quad : reticle.quads())
+		CHECK((glm::vec2(quad.rect) + glm::vec2(quad.rect.z, quad.rect.w)) * 0.5f == glm::vec2(1280, 540),
+			"an asymmetric dock does not recenter the aim");
+}
+
+// Issue #303 F07: the session table maps transport health onto HUD copy, the
+// bar and the reticle, so a degraded session cannot accidentally keep a stale
+// inventory or an aim cursor over blocked gameplay.
+void hudSessionRows()
+{
+	using enum HudSessionState;
+	auto session = hudSession(Connected, true, "Connected", {});
+	CHECK(session.status.empty() && session.showHotbar && session.allowAim,
+		"connected and ready shows the normal HUD without a headline");
+
+	session = hudSession(Degraded, true, "Degraded network",
+		"Player snapshots or input acknowledgments are delayed.");
+	CHECK(session.showHotbar && session.allowAim && session.kind == style::Status::Warning &&
+			session.status == "Degraded network" && !session.activity.empty(),
+		"degraded and ready keeps the normal HUD and adds a network warning");
+
+	session = hudSession(Degraded, false, "Degraded network",
+		"Player snapshots or input acknowledgments are delayed.");
+	CHECK(!session.showHotbar && !session.allowAim && session.kind == style::Status::Pending &&
+			session.status == "Synchronizing session" &&
+			session.recovery == "The hotbar returns when the session is ready.",
+		"degraded and not ready replaces the HUD with synchronization feedback");
+
+	session = hudSession(Connected, false, "Connected", {});
+	CHECK(!session.showHotbar && !session.allowAim && session.kind == style::Status::Pending &&
+			session.status == "Synchronizing session" &&
+			session.recovery == "The hotbar returns when the session is ready.",
+		"readiness outranks the connected label: synchronization, no bar, no reticle");
+
+	session = hudSession(Pending, false, "Resyncing", "Rejoining to refresh the world replica.");
+	CHECK(!session.showHotbar && !session.allowAim && session.kind == style::Status::Pending &&
+			session.status == "Resyncing" &&
+			session.activity == "Rejoining to refresh the world replica.",
+		"resyncing shows pending feedback and no inventory");
+
+	struct EndState { std::string_view label, detail; };
+	const std::array endStates{
+		EndState{"Timed out",
+			"The server did not respond in time. Check the endpoint or try Reconnect."},
+		EndState{"Rejected", "Protocol version mismatch. Use matching client and server builds."},
+		EndState{"Rejected", "Server is full"},
+		EndState{"Disconnected", "The server shut down. Reconnect when it is running again."},
+	};
+	for (const auto &end : endStates)
+	{
+		session = hudSession(Blocked, false, end.label, end.detail);
+		// The steps depend on the presentation state only the host knows, so the
+		// row flags the block and the host fills `recovery` (F03/F12).
+		CHECK(session.kind == style::Status::Error && session.status == end.label &&
+				session.activity == end.detail && session.blocked && session.recovery.empty() &&
+				!session.showHotbar && !session.allowAim,
+			"a blocked session keeps its actionable detail and flags recovery: " << end.label);
+	}
+	session = hudSession(Blocked, false, "Disconnected", {});
+	CHECK(session.activity == "The session ended." && session.blocked,
+		"a blocked session without transport detail still explains itself");
+
+	// F05: the optional showcase strip yields to real session copy only.
+	HudView quiet{};
+	CHECK(!hudHasSessionFeedback(quiet), "the showcase strip keeps the band while the HUD is quiet");
+	quiet.status = "Synchronizing session";
+	CHECK(hudHasSessionFeedback(quiet), "a status headline suppresses the demonstration strip");
+	quiet.status = {};
+	quiet.recovery = recoveryInstruction(false, false);
+	CHECK(hudHasSessionFeedback(quiet), "a recovery line alone also suppresses the strip");
+
+	// F03: the blocked copy plus its reconnect steps fit the bounded feedback
+	// block at every supported scale and in both workspace states, without a
+	// drop and without leaving the gameplay rectangle.
+	for (const float scale : {1.f, 1.5f, 2.f})
+	{
+		for (const bool workspaceVisible : {true, false})
+		{
+			const auto layout =
+				hudLayout({{0.f, 0.f, 960.f, 540.f}}, {{0.f, 0.f, 960.f, 540.f}}, theme(), scale);
+			const auto timedOut = hudSession(Blocked, false, "Timed out",
+				"The server did not respond in time. Check the endpoint or try Reconnect.");
+			HudView view{};
+			view.status = timedOut.status;
+			view.activity = timedOut.activity;
+			view.recovery = recoveryInstruction(workspaceVisible, true);
+			view.statusKind = timedOut.kind;
+			DrawList draws;
+			draws.reset({960.f, 540.f}, 16);
+			paintHud(Surface(draws, kFont, theme(), layout.scale, layout.view), layout, view);
+			CHECK(draws.dropped() == 0 && !draws.quads().empty(),
+				"the timeout copy paints at " << scale * 100.f << "% scale");
+			for (const auto &quad : draws.quads())
+				CHECK(inside({quad.rect}, layout.view),
+					"session feedback never leaves the gameplay rectangle at " << scale * 100.f << "%");
+			const auto resolved = resolveHud(layout, view);
+			CHECK(resolved.status && resolved.activity && resolved.recovery && !resolved.reticle,
+				"a blocked session shows all three feedback bands and no reticle");
+		}
+	}
+}
+
+// Issue #303 F03/F12: the reconnect steps follow the actual presentation state
+// instead of a fixed menu path, and only name controls that exist.
+void recoveryInstructions()
+{
+	const auto hiddenCaptured = recoveryInstruction(false, true);
+	const auto hiddenFree = recoveryInstruction(false, false);
+	const auto visibleCaptured = recoveryInstruction(true, true);
+	const auto visibleFree = recoveryInstruction(true, false);
+	CHECK(hiddenCaptured == "Ctrl+Shift+D, C, then Multiplayer > Reconnect." &&
+			hiddenFree == "Ctrl+Shift+D, then Multiplayer > Reconnect." &&
+			visibleCaptured == "C to free the mouse, then Multiplayer > Reconnect." &&
+			visibleFree == "Multiplayer > Reconnect.",
+		"each workspace/capture state names exactly the steps it still needs");
+	CHECK(hiddenCaptured != hiddenFree && hiddenCaptured != visibleCaptured &&
+			visibleCaptured != visibleFree && hiddenFree != visibleFree,
+		"the instruction follows the state instead of being a fixed literal");
+	for (const auto text : {hiddenCaptured, hiddenFree, visibleCaptured, visibleFree})
+	{
+		const auto menu = text.find("Multiplayer > Reconnect");
+		const auto chord = text.find("Ctrl+Shift+D");
+		const auto mouse = text.find("free the mouse");
+		CHECK(menu != std::string_view::npos && text.size() <= 52,
+			"the recovery line stays one short sentence: " << text);
+		CHECK((chord == std::string_view::npos || chord < menu) &&
+				(mouse == std::string_view::npos || mouse < menu) &&
+				text.find("Esc") == std::string_view::npos,
+			"the steps are ordered and never point at a menu that does not exist: " << text);
+	}
+}
+
 void gallery()
 {
 	CHECK(gallerySections().size() >= 8, "the gallery documents every component class");
@@ -824,6 +1152,9 @@ int main()
 	painting();
 	slotPaintingAndFallbacks();
 	hudMock();
+	liveHud();
+	hudSessionRows();
+	recoveryInstructions();
 	gallery();
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI components (" << testmain::checks << " checks)" << std::endl;;

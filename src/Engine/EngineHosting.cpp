@@ -124,6 +124,7 @@ void Engine::requestExit()
 	if (m_playerUi && !m_uiSpike)
 		m_playerUi->resetScreens();
 	setInventoryOpen(false);
+	m_showDeveloperUi = true;
 	if (gameUi)
 		gameUi->showHostPanel();
 	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0)

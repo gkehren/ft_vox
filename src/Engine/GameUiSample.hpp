@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiFonts.hpp>
 #include <Engine/PlayerUiGallery.hpp>
@@ -13,10 +14,8 @@
 #include <string>
 #include <string_view>
 
-// Opt-in host for the native widget showcase, the player design-system gallery
-// and the standalone renderer proof. Issue #302 adds the gallery and HUD mock
-// screens and gives the player interface its own resolved scale, independent of
-// the ImGui/developer scale.
+// Host for the native player HUD and screen stack, including the design
+// gallery and standalone rendering proof.
 class GameUiSample
 {
 public:
@@ -47,7 +46,10 @@ public:
 	bool yieldTextInput(SDL_Window *window);
 	const gameui::ScreenStack &screens() const { return m_screens; }
 	void prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent, gameui::Clip view,
-				 const TextureManager &atlas, uint64_t atlasGeneration);
+				 const TextureManager &atlas, uint64_t atlasGeneration, const gameui::HudView *hud = nullptr);
+	void setPreviewStripVisible(bool visible) { m_previewStrip = visible; }
+	bool hudVisible() const { return m_hudVisible; }
+	void setHudVisible(bool visible) { m_hudVisible = visible; }
 	gameui::Renderer &renderer() { return m_renderer; }
 	const std::optional<gameui::RecordedStats> &lastRecordedStats() const { return m_lastRecordedStats; }
 	void publishRecordedStats(uint64_t frameNumber, uint32_t slot)
@@ -132,6 +134,7 @@ private:
 	glm::vec4 m_button{};
 	unsigned m_activations{};
 	bool m_standalone{}, m_buttonFocused{}, m_armed{};
+	bool m_previewStrip{true}, m_hudVisible{true};
 	gameui::ScreenStack m_screens;
 	gameui::WidgetSet m_widgets;
 	gameui::TextField m_field, m_secondaryField;

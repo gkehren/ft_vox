@@ -1,5 +1,7 @@
 #include <Engine/PlayerUiComponents.hpp>
 
+#include <array>
+#include <cmath>
 #include <cstdio>
 
 namespace gameui
@@ -334,6 +336,41 @@ void Surface::fittedLabel(Clip rect, std::string_view text, style::TextRole role
 	}
 }
 
+float Surface::wrappedLineHeight(style::TextRole role) const
+{
+	return (style::lineHeight(role) + m_theme.space.xxs) * m_scale;
+}
+
+int Surface::wrappedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
+						  int maxLines) const
+{
+	const float line = style::lineHeight(role) * m_scale;
+	const int capacity = std::min({maxLines, int(kMaxWrappedLines),
+		int(std::floor(size(rect).y / std::max(line, 0.001f)))});
+	if (text.empty() || capacity <= 0 || size(rect).x <= 0.f)
+		return 0;
+	std::array<WrappedLine, kMaxWrappedLines> lines{};
+	const auto span = std::span<WrappedLine>(lines.data(), size_t(capacity));
+	const int count = wrapText(m_font, text, role, m_scale * m_fontScale, size(rect).x, span);
+	const float roleScale = glyphScale(role);
+	const float pitch = wrappedLineHeight(role);
+	// Each line is clipped to its own band: the glyph painter never needs a
+	// second pass to keep a long word inside the block.
+	for (int index = 0; index < count; ++index)
+	{
+		const auto &wrapped = lines[size_t(index)];
+		const Clip band = {{rect.rect.x, rect.rect.y + float(index) * pitch, rect.rect.z,
+			std::min(rect.rect.w, rect.rect.y + float(index) * pitch + line)}};
+		const glm::vec2 origin{band.rect.x, centeredLineTop(band, role, m_scale)};
+		m_font.paint(m_out, origin, text.substr(wrapped.begin, wrapped.end - wrapped.begin), color,
+			roleScale, m_clip, band);
+		if (wrapped.elided)
+			m_font.paint(m_out, {origin.x + m_font.measure(text.substr(wrapped.begin,
+				wrapped.end - wrapped.begin), roleScale), origin.y}, "...", color, roleScale, m_clip, band);
+	}
+	return count;
+}
+
 void Surface::backdrop(Clip bounds, glm::vec4 color) const
 {
 	fill(bounds, color, 0.f);
@@ -631,14 +668,21 @@ void Surface::slotGrid(const SlotGrid &grid, std::span<const SlotView> entries, 
 		}
 }
 
-void Surface::crosshair(Clip viewport, glm::vec4 color) const
+void Surface::crosshair(Clip viewport, glm::vec4 color, std::optional<glm::vec4> outline) const
 {
 	const glm::vec2 center = glm::vec2(viewport.rect) + size(viewport) * 0.5f;
 	const float arm = px(m_theme.size.crosshair);
-	const float thickness = std::max(1.f, px(m_theme.size.borderWidth));
-	fill({{center.x - arm, center.y - thickness * 0.5f, center.x + arm, center.y + thickness * 0.5f}},
-		color, 0.f);
-	fill({{center.x - thickness * 0.5f, center.y - arm, center.x + thickness * 0.5f, center.y + arm}},
-		color, 0.f);
+	const float halfThickness = std::max(1.f, px(m_theme.size.borderWidth)) * 0.5f;
+	const auto paint = [&](float length, float width, glm::vec4 ink) {
+		const glm::vec2 horizontal{length, width}, vertical{width, length};
+		fill(rectangle(center - horizontal, 2.f * horizontal), ink, 0.f);
+		fill(rectangle(center - vertical, 2.f * vertical), ink, 0.f);
+	};
+	if (outline)
+	{
+		const float border = px(m_theme.size.borderWidth);
+		paint(arm + border, halfThickness + border, *outline);
+	}
+	paint(arm, halfThickness, color);
 }
 } // namespace gameui

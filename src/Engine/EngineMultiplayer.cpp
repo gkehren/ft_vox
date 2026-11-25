@@ -174,6 +174,11 @@ ui::MultiplayerStatus Engine::RemoteSession::connectionStatus(Clock::time_point 
 	return result;
 }
 
+const char *Engine::RemoteSession::actionStatus(Clock::time_point now) const
+{
+	return actionPending ? "Action pending" : now < feedbackUntil ? feedback : nullptr;
+}
+
 void Engine::RemoteSession::disconnect() noexcept
 {
 	try
@@ -600,8 +605,7 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 	frame.multiplayerEndpoint = remote.endpoint;
 	frame.multiplayerProfile = remote.namedProfile.empty() ?
 		std::string_view{"Startup profile"} : std::string_view{remote.namedProfile};
-	frame.multiplayerAction = remote.actionPending ? "Action pending" :
-		now < remote.feedbackUntil ? remote.feedback : nullptr;
+	frame.multiplayerAction = remote.actionStatus(now);
 	const auto status = remote.transport.status();
 	if (ui::hasLiveNetworkStats(frame.multiplayerStatus->state))
 	{

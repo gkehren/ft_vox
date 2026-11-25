@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace gameui
@@ -177,6 +178,84 @@ inline FittedText fitText(FontView font, std::string_view text, style::TextRole 
 		i = next;
 	}
 	return {bytes, bytes < text.size()};
+}
+
+// --- Bounded multiline -----------------------------------------------------
+
+/// One line of a wrapped run: the byte range inside the source text and whether
+/// the painter still has to append the ellipsis.
+struct WrappedLine
+{
+	size_t begin{};
+	size_t end{};
+	bool elided{};
+};
+
+/// Hard ceiling for a wrapped run, so a caller can size a fixed array. The HUD
+/// feedback block uses two body lines and the gallery one.
+inline constexpr size_t kMaxWrappedLines = 4;
+
+/// Greedy word wrap measured with the same glyph table as painting, bounded to
+/// `lines.size()` lines. Words are kept whole and broken only when a single word
+/// cannot fit the width; the last line is elided when text remains, so a long
+/// session message never spills out of its band and never loses its beginning.
+/// Returns the number of lines written (0 when nothing fits).
+inline int wrapText(FontView font, std::string_view text, style::TextRole role, float scale,
+					float maxWidth, std::span<WrappedLine> lines)
+{
+	if (lines.empty() || text.empty() || maxWidth <= 0.f)
+		return 0;
+	const float glyphs = style::typeScale(role) * (scale > 0.f ? scale : 1.f);
+	size_t start = 0;
+	while (start < text.size() && text[start] == ' ')
+		++start;
+	int count = 0;
+	while (start < text.size() && size_t(count) < lines.size())
+	{
+		const bool last = size_t(count + 1) == lines.size();
+		if (last)
+		{
+			// The last line elides through the one overflow rule.
+			const auto fitted = fitText(font, text.substr(start), role, scale, maxWidth);
+			if (fitted.bytes == 0)
+				break;
+			lines[size_t(count)] = {start, start + fitted.bytes, fitted.elided};
+			return count + 1;
+		}
+		// Longest word-boundary prefix that fits without an ellipsis.
+		size_t end = start;
+		for (size_t scan = start; scan < text.size();)
+		{
+			const size_t space = text.find(' ', scan);
+			const size_t wordEnd = space == std::string_view::npos ? text.size() : space;
+			if (font.measure(text.substr(start, wordEnd - start), glyphs) > maxWidth)
+				break;
+			end = wordEnd;
+			if (space == std::string_view::npos)
+				break;
+			scan = space + 1;
+		}
+		if (end == start)
+		{
+			// One word wider than the band: break it at the glyph budget. No
+			// ellipsis is reserved here — this line is not the last one.
+			while (end < text.size())
+			{
+				const size_t next = nextUtf8(text, end);
+				if (next <= end || font.measure(text.substr(start, next - start), glyphs) > maxWidth)
+					break;
+				end = next;
+			}
+			if (end == start)
+				break;
+		}
+		lines[size_t(count)] = {start, end, false};
+		start = end;
+		while (start < text.size() && text[start] == ' ')
+			++start;
+		++count;
+	}
+	return count;
 }
 
 // --- Icons -----------------------------------------------------------------

@@ -253,6 +253,9 @@ struct GameUIFrame
 	std::optional<gameui::RecordedStats> gameUiStats;
 	std::function<void(float)> setUiScale;
 	std::function<void()> requestExit;
+	/// Runtime developer-workspace visibility action (issue #303 F04): the menu
+	/// item and the Ctrl+Shift+D shortcut perform the same transition.
+	std::function<void()> toggleDeveloperWorkspace;
 
 	/// Active pack root (empty = bundled). Owned by Engine.
 	const std::string *resourcePackRoot{nullptr};
@@ -297,7 +300,20 @@ public:
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(GameUIFrame &frame);
+	/// Developer workspace hidden (issue #303 F01): keep the dockspace identity
+	/// alive with ImGuiDockNodeFlags_KeepAliveOnly — same node id, same split
+	/// tree, no rendering and no input — and paint only the legacy inventory. A
+	/// previously docked inventory floats while the workspace is hidden and is
+	/// re-docked when it returns, so the persisted layout is never destroyed.
+	void drawWithoutWorkspace(GameUIFrame &frame);
+	/// Hidden workspace with nothing on screen (issue #303 F09): submit the
+	/// maintenance dockspace only, without a frame or any snapshot work.
+	void maintainDockspace();
 	void resetInventoryInteraction() { m_drag = {}; }
+	/// Close developer-owned modal surfaces when the workspace is hidden
+	/// (issue #303 F04): a file browser must not survive as an invisible open
+	/// dialog that still owns developer input state.
+	void cancelDeveloperDialogs();
 
 	/// Keyboard shortcut handling, split by input-routing policy (issue #76):
 	/// - handleGlobalShortcut: intentional global non-text shortcuts
@@ -354,6 +370,9 @@ public:
 	/// Application shell (dockspace, menus, layout actions). Engine queues the
 	/// default developer layout here on first run.
 	ui::UiShell &shell() { return m_shell; }
+	bool showOverlayHints() const { return m_debug.panels.overlayHints; }
+	// Legacy inventory remains available without the workspace until #304.
+	void drawInventoryPanel(GameUIFrame &frame);
 
 	/// Open the primary panels used by the default developer layout so the
 	/// docked slots materialize on the first frame. Overview stays closed to
@@ -439,12 +458,9 @@ private:
 	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
-	void drawOverlayHints(GameUIFrame &frame);
 	/// Gameplay surfaces (issue #229, Epic #223 Phase F), implemented in
 	/// GameUIInventory.cpp: the always-on hotbar HUD and the E inventory
 	/// panel. Both are snapshot-only displays issuing command callbacks.
-	void drawHotbarHud(GameUIFrame &frame);
-	void drawInventoryPanel(GameUIFrame &frame);
 
 	void requestBiomeMapRefresh()
 	{
@@ -504,6 +520,11 @@ private:
 
 	/// Application shell (dockspace, main menu, status strip, layout).
 	ui::UiShell m_shell{};
+	/// True while the legacy inventory is drawn through its temporary
+	/// non-persistent identity because the developer workspace is hidden
+	/// (issue #303 F01). The canonical "Inventory" window and its imgui.ini
+	/// record are left untouched for the whole hidden period.
+	bool m_inventoryFloating{};
 
 	// Biome map
 	int m_mapSize{256};

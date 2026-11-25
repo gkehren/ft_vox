@@ -344,6 +344,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUiGallery.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiGallery.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerHud.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiPreferences.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiFonts.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp

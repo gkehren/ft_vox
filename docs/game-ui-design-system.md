@@ -188,7 +188,8 @@ indistinguishable by construction.
 | Button | `button(rect, label, ButtonVariant, State)` | `Primary`, `Secondary`, `Quiet`, `Danger` |
 | List row | `listRow(rect, title, trailing, State)` | selection marker, hover face, trailing value |
 | Form field | `formField(rect, label, value, Validation, State, message)` + `formFieldHeight` | sunk well, validation border + message; the height helper reserves the label band, the control well and the message line, and a squeezed rect drops the message instead of drawing it over the well border |
-| Status indicator | `statusIndicator(rect, Status, text)` | token-colored dot + label |
+| Status indicator | `statusIndicator(rect, Status, text)` | token-colored dot + label; the HUD paints it on the `hudScrim` plate, so it stays readable over bright and dark scenes |
+| Bounded multiline | `wrapText` (PlayerUiText) + `wrappedLabel(rect, text, role, color, maxLines)` + `wrappedLineHeight` | greedy word wrap measured with the painting metric, capped at the caller's line count, last line elided; the HUD feedback block reserves its lines up front, so session copy cannot spill out of its band (issue #303 F03) |
 | Progress / loading | `progress(rect, value, pending, phase)` | determinate fill, deterministic indeterminate band |
 | Notification / toast | `ToastQueue` + `toast(rect, Toast)` | bounded (4) newest-first queue, age-based expiry, sticky entries |
 | Tooltip | `tooltipLayout` + `tooltip` | prefers above-right, flips at edges, clamps inside the viewport |
@@ -221,8 +222,8 @@ focusable target; per-slot presses are #304).
 
 ## 5. Gallery and HUD mock
 
-Both screens are reachable from the pause menu (**Design system**, **HUD mock**)
-and are built from the same components and the same input owner:
+Open **Design system** from the game menu. Launch with `--game-ui` to also show the
+**HUD mock** entry. Both use the same components and input owner as the live HUD.
 
 - `Screen::Gallery` — sections: design tokens, typography roles, four button
   variants, list rows (painted states + a real `ListBox`), form field with
@@ -384,8 +385,8 @@ the normalized geometry is covered headlessly.
   renderer follow-up, not a design-system one.
 - One bitmap face means the display roles (`Heading`/`Title`) soften when scaled;
   a rasterized TTF face remains a future, separately reviewed dependency.
-- The gallery and HUD mock are previews: #303 replaces the mock HUD with the real
-  one, #304 wires slot interaction, #307 owns the settings screen that will reuse
-  the scale selector and the same preferences record.
+- The #303 live HUD uses the same slot components. #304 wires inventory slot
+  interaction, and #307 brings the scale selector and preferences to Settings.
+  [Live HUD controls and evidence](game-ui-migration.md#live-player-hud-303)
 - The pause-menu previews are additive; the existing solo/multiplayer/hosting
   and developer flows are unchanged.

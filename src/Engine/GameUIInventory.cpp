@@ -1,5 +1,4 @@
-// Gameplay inventory surfaces (issue #229, Epic #223 Phase F): the hotbar
-// HUD, the E inventory panel and the block-atlas item icons. DERIVED
+// Legacy E inventory panel (issue #229) and its block-atlas item icons. DERIVED
 // presentation only (epic #223 §5): every surface reads the bounded
 // sim::InventorySnapshot in GameUIFrame and issues explicit command
 // callbacks — no gameplay rule lives here. The drag cursor is UI-local
@@ -24,7 +23,7 @@ namespace
 {
 // One slot: dark backing, inset atlas icon, stack count, selection border.
 // `desc` may be null (icon unavailable) — the slot still renders its frame
-// and count, so the HUD never blocks on texture readiness.
+// and count, so the panel never blocks on texture readiness.
 void drawSlot(ImDrawList *dl, const inventoryui::SlotRect &r, const items::ItemStack &stack,
               VkDescriptorSet desc, bool selected, float scale, float rounding)
 {
@@ -112,37 +111,6 @@ VkDescriptorSet GameUI::itemIconDesc(GameUIFrame &frame, TextureType type)
 }
 
 // ---------------------------------------------------------------------------
-// Hotbar HUD: always visible in the gameplay view (read-only snapshot).
-// ---------------------------------------------------------------------------
-
-void GameUI::drawHotbarHud(GameUIFrame &frame)
-{
-    const float scale = frame.uiScale;
-    const float slotSize = ui::scaled(inventoryui::kHotbarSlotSize, scale);
-    const float spacing = ui::scaled(inventoryui::kHotbarSpacing, scale);
-    const float margin = ui::scaled(inventoryui::kHotbarBottomMargin, scale);
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    ImDrawList *dl = ImGui::GetForegroundDrawList();
-
-    for (int slot = 0; slot < items::kHotbarSize; ++slot)
-    {
-        const inventoryui::SlotRect r =
-            inventoryui::hotbarSlotRect(slot, display.x, display.y, slotSize, spacing, margin);
-        const items::ItemStack stack = frame.inventory.slots[static_cast<size_t>(slot)];
-        VkDescriptorSet desc = VK_NULL_HANDLE;
-        if (!stack.isEmpty())
-        {
-            const auto block = items::placeableBlockOf(stack.item);
-            if (block)
-                desc = itemIconDesc(frame, *block);
-        }
-        drawSlot(dl, r, stack, desc, slot == frame.inventory.selectedSlot, scale, 3.0f * scale);
-        if (ImGui::IsMouseHoveringRect(ImVec2(r.x, r.y), ImVec2(r.x + r.w, r.y + r.h)))
-            ImGui::SetTooltip("%s", itemLabel(stack).c_str());
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Inventory panel (E): 27 main + 9 hotbar grid. Click-to-move/swap and
 // right-click-to-split THROUGH COMMAND CALLBACKS ONLY; the drag cursor is
 // UI-local presentation, discarded on close (never duplicates items).
@@ -150,17 +118,43 @@ void GameUI::drawHotbarHud(GameUIFrame &frame)
 
 void GameUI::drawInventoryPanel(GameUIFrame &frame)
 {
-    if (!frame.inventoryPanelOpen)
+    if (!frame.inventoryPanelOpen || !*frame.inventoryPanelOpen)
+    {
+        m_drag = {};
         return;
+    }
     bool open = *frame.inventoryPanelOpen;
     const float scale = frame.uiScale;
     const float slotSize = ui::scaled(44.0f, scale);
     const float spacing = ui::scaled(4.0f, scale);
 
+    // Inventory identity across the workspace toggle (issue #303 F01). A window
+    // docked into a KeepAliveOnly dockspace is not displayed, so the panel has to
+    // float while the workspace is hidden — but a temporary float must not touch
+    // the canonical window: undocking "Inventory" would drop its node association
+    // and a hidden-workspace exit would persist the float. The hidden state
+    // therefore uses a separate identity (same visible title) that opts out of
+    // docking and of the settings file, leaving the canonical window and its
+    // imgui.ini record completely untouched.
+    const bool floating = m_shell.workspaceHidden();
+    if (floating != m_inventoryFloating)
+    {
+        // A different window starts here: the previous surface's drag cursor is
+        // transient state and must not follow the identity change.
+        m_drag = {};
+        m_inventoryFloating = floating;
+    }
+
     ImGui::SetNextWindowSize(ImVec2(inventoryui::panelWidth(slotSize, spacing) + ui::scaled(24.0f, scale),
                                     inventoryui::panelHeight(slotSize, spacing) + ui::scaled(96.0f, scale)),
                              ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Inventory", &open, ImGuiWindowFlags_AlwaysAutoResize))
+    constexpr ImGuiWindowFlags kFloatingInventory =
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
+    const bool visible = floating
+        ? ImGui::Begin("Inventory###inventory-floating", &open,
+                       ImGuiWindowFlags_AlwaysAutoResize | kFloatingInventory)
+        : ImGui::Begin("Inventory", &open, ImGuiWindowFlags_AlwaysAutoResize);
+    if (visible)
     {
         ImGui::TextDisabled("Left-click: move/swap · Right-click: split half · Esc/close: cancel drag");
         ImGui::TextDisabled("A half-drop onto a nearly-full slot moves only what fits; the rest stays.");
@@ -267,5 +261,8 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
     ImGui::End();
     *frame.inventoryPanelOpen = open;
     if (!open)
+    {
         m_drag = {}; // closing mid-drag discards the cursor: no duplication
+        m_inventoryFloating = false;
+    }
 }

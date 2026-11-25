@@ -124,6 +124,13 @@ struct InputContext
 			return InputOwner::PlayerUi;
 		if (kind != InputKind::Pointer && devKeyboard)
 			return InputOwner::DeveloperUi;
+		// The host can open Pause while joining or disconnected, and C must stay
+		// reachable: the HUD's recovery line asks the player to release the
+		// captured mouse before Multiplayer > Reconnect (issue #303 F03). Both
+		// exceptions sit after every modal, inventory, developer and benchmark
+		// guard above, and neither unlocks movement or gameplay commands.
+		if (transition && !inventory && kind == InputKind::Key && (back || captureShortcut))
+			return InputOwner::Gameplay;
 		if (inventory || transition || kind == InputKind::Text || (captureFailed && !back && !captureShortcut))
 			return InputOwner::Blocked;
 		return InputOwner::Gameplay;

@@ -7,7 +7,7 @@ namespace
 enum ScreenControl : ControlId
 {
 	Resume = 1, Showcase, Quit, Return, Confirm, Name, Option, Amount, Choices,
-	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock
+	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock, ToggleHud
 };
 constexpr std::array<std::string_view, 8> kBiomes{
 	"Grassland", "Forest", "Desert", "Tundra", "Swamp", "Savanna", "Taiga", "Ocean"};
@@ -103,7 +103,7 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
-	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 292.f : 164.f);
+	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 300.f : 164.f);
 	const float width = screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
@@ -158,7 +158,9 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		// Design-system previews (issue #302) stay after the game actions until
 		// #303-#308 move them into the real screens.
 		add(Gallery, Button{}, 36.f, "Design system");
-		add(HudMock, Button{}, 36.f, "HUD mock");
+		if (m_previewStrip)
+			add(HudMock, Button{}, 36.f, "HUD mock");
+		add(ToggleHud, Button{}, 36.f, m_hudVisible ? "Hide HUD" : "Show HUD");
 	}
 	auto focus = m_screens.focus();
 	m_widgets.focus(focus, focus, entered || rebuilt || moved);
@@ -220,6 +222,7 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 		case Showcase: m_screens.push(Screen::Showcase); invalidateLayout(); break;
 		case Gallery: m_screens.push(Screen::Gallery); invalidateLayout(); break;
 		case HudMock: m_screens.push(Screen::HudMock); invalidateLayout(); break;
+		case ToggleHud: m_hudVisible = !m_hudVisible; break;
 		case Quit: m_screens.push(Screen::ConfirmExit); invalidateLayout(); break;
 		case Confirm: return InputResult::Exit;
 		default: break;

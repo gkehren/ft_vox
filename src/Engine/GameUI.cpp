@@ -135,9 +135,7 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 	{
 	case SDLK_F1:
 		// Issue #184: F1 owns the Status Overlay density — cycling through
-		// Off / Minimal / Detailed replaces the old catch-all HUD toggle.
-		// The overlay is gameplay HUD, not a layout tile: it does not leave
-		// hidden mode.
+		// Off / Minimal / Detailed for the developer diagnostics overlay.
 		m_debug.panels.statusOverlay =
 			playerui::nextStatusOverlayDensity(m_debug.panels.statusOverlay);
 		return true;
@@ -260,7 +258,7 @@ void GameUI::draw(GameUIFrame &frame)
 		[this]() { leaveLayoutTilesHidden(); },
 		m_layoutTilesHidden};
 
-	m_shell.beginFrame();
+	m_shell.beginFrame(ui::Workspace::Visible);
 	m_shell.drawMainMenuBar(frame, toggles);
 
 	// The GameUI-owned windows below have no internal visibility guard; every
@@ -293,50 +291,30 @@ void GameUI::draw(GameUIFrame &frame)
 		frame.benchmark->report().valid)
 		debugui::drawBenchmarkReport(m_debug, frame);
 
-	if (m_debug.panels.overlayHints && frame.mouseCaptured && *frame.mouseCaptured)
-		drawOverlayHints(frame);
-
-	// Gameplay surfaces (issue #229): the hotbar HUD is always visible in
-	// the gameplay view (benchmarks keep the stock UI closed); the inventory
-	// panel follows the host-owned E flag. Closing the panel discards the
-	// UI-local drag cursor — authoritative state is untouched.
-	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
-	if (frame.multiplayerStatus)
-	{
-		const auto display = ImGui::GetIO().DisplaySize;
-		ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, ImGui::GetFrameHeight() + 8.f),
-			ImGuiCond_Always, ImVec2(0.5f, 0.f));
-		ImGui::SetNextWindowBgAlpha(0.65f);
-		if (ImGui::Begin("##MultiplayerStatus", nullptr, ImGuiWindowFlags_NoDecoration |
-			ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
-			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize))
-		{
-			ImGuiLayer::markCurrentWindowPassThrough();
-			const auto &status = *frame.multiplayerStatus;
-			ImGui::TextUnformatted(status.detail ? status.detail : status.label);
-			if (frame.multiplayerAction)
-				ImGui::TextUnformatted(frame.multiplayerAction);
-		}
-		ImGui::End();
-		if (frame.mouseCaptured && *frame.mouseCaptured)
-		{
-			auto *draw = ImGui::GetForegroundDrawList();
-			const ImVec2 center(display.x * 0.5f, display.y * 0.5f);
-			draw->AddCircleFilled(center, 3.f, IM_COL32(0, 0, 0, 192));
-			draw->AddCircleFilled(center, 1.5f, IM_COL32(255, 255, 255, 224));
-		}
-	}
-	if (!benchmarkActive)
-	{
-		drawHotbarHud(frame);
-		if (frame.inventoryPanelOpen && *frame.inventoryPanelOpen)
-			drawInventoryPanel(frame);
-		else
-			m_drag = {};
-	}
+	if (!frame.benchmark || !frame.benchmark->isActive())
+		drawInventoryPanel(frame);
 
 	// File dialog can outlive the Graphics panel; always process while open.
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
+}
+
+void GameUI::drawWithoutWorkspace(GameUIFrame &frame)
+{
+	// Hidden developer workspace (issue #303 F01). The dockspace is submitted in
+	// its KeepAliveOnly maintenance mode, so the persisted dock node tree and
+	// every window association survive; no chrome, no panel and no pointer input
+	// is produced. The legacy inventory stays available until #304 and floats
+	// over gameplay (see drawInventoryPanel), so E / Escape keep working.
+	m_shell.beginFrame(ui::Workspace::Hidden);
+	drawInventoryPanel(frame);
+}
+
+void GameUI::maintainDockspace()
+{
+	// Hidden workspace with no inventory on screen (issue #303 F09): the frame
+	// carries nothing but the dockspace maintenance submission, so Engine can skip
+	// building a GameUIFrame entirely.
+	m_shell.beginFrame(ui::Workspace::Hidden);
 }
 
 void GameUI::drawStatusOverlay(GameUIFrame &frame)
@@ -920,7 +898,7 @@ void GameUI::drawHelp(GameUIFrame &frame)
 				for (const ui::ShortcutRef &ref : ui::kShortcuts)
 					if (!ref.global)
 						helpRow(ref.key, ref.action);
-				helpRow("Esc", "Quit");
+				helpRow("Esc", "Game menu / back");
 				ImGui::EndTable();
 			}
 
@@ -970,34 +948,6 @@ void GameUI::drawHelp(GameUIFrame &frame)
 		ImGui::EndTabBar();
 	}
 
-	ImGui::End();
-}
-
-void GameUI::drawOverlayHints(GameUIFrame &frame)
-{
-	const ImGuiIO &io = ImGui::GetIO();
-	const float scale = ui::effectiveScale(frame.uiScale);
-	// Sit ABOVE the hotbar HUD (issue #229 review): the bar's top edge is
-	// kHotbarTopOffset from the bottom; add a small gap so the hint line never
-	// overlaps the slots.
-	const float hintsBottom = ui::scaled(inventoryui::kHotbarTopOffset + 8.f, scale);
-	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - hintsBottom),
-							ImGuiCond_Always, ImVec2(0.5f, 1.f));
-	ImGui::SetNextWindowBgAlpha(0.35f);
-	ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-							 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-							 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
-							 ImGuiWindowFlags_NoDocking;
-	if (ImGui::Begin("##hints", nullptr, flags))
-	{
-		if (frame.multiplayerStatus)
-			ImGui::TextUnformatted("C free mouse · E inventory · LMB/RMB break/place · Q drop");
-		else
-		{
-			const char *block = frame.selectedTexture ? textureName(*frame.selectedTexture) : "?";
-			ImGui::Text("C free mouse · F1–F9/F11/F12 panels · T block (%s) · LMB/RMB edit · B borders", block);
-		}
-	}
 	ImGui::End();
 }
 

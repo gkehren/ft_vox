@@ -62,10 +62,11 @@ add_test(NAME GameUiStyle COMMAND test_game_ui_style)
 
 add_executable(test_game_ui_components test_game_ui_components.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerHud.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiGallery.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp)
 target_include_directories(test_game_ui_components PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_game_ui_components PRIVATE glm)
+target_link_libraries(test_game_ui_components PRIVATE ft_vox_core)
 add_test(NAME GameUiComponents COMMAND test_game_ui_components)
 
 # ---------------------------------------------------------------------------
@@ -1621,7 +1622,7 @@ foreach(_cpu_test IN ITEMS
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
     test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_server_supervisor test_server_roles
-    test_game_ui_draw_list test_game_ui_interaction bench_gameplay_items)
+    test_game_ui_draw_list test_game_ui_interaction test_game_ui_components bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR
             "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "

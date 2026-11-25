@@ -18,18 +18,32 @@
 
 namespace ui
 {
-void UiShell::beginFrame()
+void UiShell::beginFrame(Workspace workspace)
 {
+	m_workspace = workspace;
 	// Persistent root dockspace. The passthru central node keeps the game
 	// view visible and clickable; it survives resize / swapchain recreation
 	// because it is recreated from the main viewport every frame. The user's
 	// docking state persists through the normal imgui.ini settings.
-	const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(
-		0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+	//
+	// Hidden workspace (issue #303 F01): the SAME identity is still submitted,
+	// with ImGuiDockNodeFlags_KeepAliveOnly. Removing the node instead — or
+	// skipping the submission — would drop the split tree and every docked
+	// window's association, so bringing the workspace back would rebuild a
+	// default layout. KeepAliveOnly keeps the node alive while rendering nothing
+	// and claiming no pointer input; docked windows simply stay hidden until the
+	// workspace returns.
+	ImGuiDockNodeFlags flags = ImGuiDockNodeFlags_PassthruCentralNode;
+	if (keepDockSpaceAliveOnly(workspace))
+		flags |= ImGuiDockNodeFlags_KeepAliveOnly;
+	const ImGuiID dockspaceId =
+		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), flags);
 	m_dockspaceId = dockspaceId;
 
 	// Dock-builder operations must run while the dockspace node exists, so
-	// menu actions apply next frame; startup queuing applies on the first.
+	// menu actions apply next frame; startup queuing applies on the first —
+	// including a launch with --no-dev-ui, where the queued default developer
+	// layout has to be ready before the workspace is ever shown.
 	if (m_resetLayoutQueued)
 	{
 		m_resetLayoutQueued = false;
@@ -44,6 +58,14 @@ void UiShell::beginFrame()
 
 ui::UiRect UiShell::gameViewRect() const
 {
+	// A hidden workspace has no docked panels at all, and the dock node is not
+	// updated in this frame: the game view is the whole work area.
+	if (keepDockSpaceAliveOnly(m_workspace))
+	{
+		const ImGuiViewport *viewport = ImGui::GetMainViewport();
+		return {viewport->WorkPos, viewport->WorkSize};
+	}
+
 	// The central passthru node is exactly the region not claimed by docked
 	// panels, so gameplay overlays anchored there always sit over the 3D
 	// render. Requires imgui_internal (dock builder API); fall back to the
@@ -137,7 +159,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			*toggles.helpTabRequest = HelpTabRequest::About;
 		}
 		ImGui::Separator();
-		if (ImGui::MenuItem("Exit", "Esc"))
+		if (ImGui::MenuItem("Exit"))
 		{
 			if (frame.requestExit)
 				frame.requestExit();
@@ -271,6 +293,14 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		if (frame.showChunkBorders &&
 			ImGui::MenuItem("Chunk borders", shortcutKeyName(SDLK_B), *frame.showChunkBorders))
 			*frame.showChunkBorders = !*frame.showChunkBorders;
+		ImGui::Separator();
+		// Whole-workspace visibility (issue #303 F04). H keeps toggling the
+		// layout tiles; this hides the menu bar and every docked panel too, and
+		// the dockspace identity survives so the docking layout comes back.
+		if (frame.toggleDeveloperWorkspace &&
+			ImGui::MenuItem("Hide developer workspace",
+				shortcutKeyName(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT)))
+			frame.toggleDeveloperWorkspace();
 		ImGui::EndMenu();
 	}
 

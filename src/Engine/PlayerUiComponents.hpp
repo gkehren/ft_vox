@@ -258,7 +258,7 @@ public:
 	void slotGrid(const SlotGrid &grid, std::span<const SlotView> slots, int focused = -1) const;
 
 	// HUD
-	void crosshair(Clip viewport, glm::vec4 color) const;
+	void crosshair(Clip viewport, glm::vec4 color, std::optional<glm::vec4> outline = {}) const;
 
 	// Primitives (exposed so screens can compose without re-deriving tokens)
 	void fill(Clip rect, glm::vec4 color, float radius) const;
@@ -272,6 +272,16 @@ public:
 	/// Label fitted into `rect` (ellipsis when needed).
 	void fittedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
 					 float alignX) const;
+	/// Bounded multiline label (issue #303 F03): greedy word wrap measured with
+	/// the same glyph table as painting, capped at `maxLines` lines of the role's
+	/// own leading inside `rect`, with the last line elided when text remains.
+	/// Paints nothing that does not fit and returns the number of lines painted,
+	/// so session feedback never spills out of its band.
+	int wrappedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
+					 int maxLines) const;
+	/// One line advance for a wrapped run of `role` (measured in the same
+	/// logical units as `wrappedLabel`), so callers can size the band.
+	float wrappedLineHeight(style::TextRole role) const;
 
 private:
 	/// Painted width of a fitted label including the ellipsis it needs.

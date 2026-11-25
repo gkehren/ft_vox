@@ -454,12 +454,17 @@ bool ImGuiLayer::hasModal() const
 	return m_initialized && ImGui::GetTopMostPopupModal() != nullptr;
 }
 
+bool ImGuiLayer::hasOpenPopup() const
+{
+	return m_initialized && !ImGui::GetCurrentContext()->OpenPopupStack.empty();
+}
+
 bool ImGuiLayer::ownsActiveInput() const
 {
 	if (!m_initialized)
 		return false;
 	const auto &g = *ImGui::GetCurrentContext();
-	return (!m_yieldThroughEvent && g.ActiveId != 0) || !g.OpenPopupStack.empty();
+	return (!m_yieldThroughEvent && g.ActiveId != 0) || hasOpenPopup();
 }
 
 bool ImGuiLayer::pendingKeyboard() const
