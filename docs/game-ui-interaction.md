@@ -6,19 +6,19 @@ Phase C (#301) adds the screen stack, event ownership and reusable widget behavi
 ft_vox --seed 42 --game-ui --quality low
 ```
 
-The default launch keeps the current interface during migration. In the opt-in mode, the existing inventory still uses the same ImGui presentation, inventory snapshots and Engine commands. The native stack manages its input and lifetime. The ordinary HUD is passive. The opt-in renderer strip has one scale control when the cursor is free.
+The player HUD is passive and Inventory is a native screen in both standard and `--no-dev-ui` launches. The opt-in renderer strip has one scale control when the cursor is free.
 
 ## Navigation
 
 | Surface | Input and session behavior |
 | --- | --- |
 | HUD | Gameplay owns available controls. Escape opens the game menu. Solo P opens the same menu. |
-| Inventory | E opens it and releases the cursor. E or Escape closes it when a developer text field or dialog has no claim. Local controls are suppressed. Solo simulation and the server continue. |
+| Inventory | E opens it and releases the cursor. E, Escape or Close restores the previous capture state. The screen owns gameplay input while solo simulation and the server continue. [Inventory controls](game-ui-migration.md#native-player-inventory-304) |
 | Game menu | Resume, Escape or solo P returns to the HUD and restores cursor capture. Solo simulation uses the existing host suspension policy. In a connected world, Engine sends neutral controls and continues receiving state and presenting the remote world. |
 | Widget showcase | Tab and Shift+Tab traverse available controls. Enter and Space activate buttons and toggles. Arrows adjust the slider or select a list row. Wheel scrolls the visible list or the panel. Back restores focus to the opener. Changes are local to the demonstration. |
 | Exit confirmation | Escape or Cancel dismisses the confirmation and restores focus. The full-window modal temporarily hides Developer UI and vetoes view shortcuts. Confirm uses the existing exit and save path. A hosted shutdown returns to the Host panel for progress and recovery. |
 
-Since #303, Escape opens the game menu in normal play. `--game-ui` enables the optional widget strip. Function keys still run once per press, with F6 controlling player HUD hints and F1 cycling developer diagnostics. Ctrl+Shift+D shows or hides the complete developer workspace while keeping its dockspace and layout alive, so gameplay and the developer surfaces swap without a restart; the legacy inventory keeps floating in either state. The F1 Developer UI toggle is tracked in #308. Session changes clear stale focus, gestures and fields before attaching the new world. The screen stack also represents Main Menu and Loading for the future lifecycle screens. [Live HUD and controls](game-ui-migration.md#live-player-hud-303)
+Escape opens the game menu in normal play. `--game-ui` enables the optional widget strip. Function keys still run once per press, with F6 controlling player HUD hints and F1 cycling developer diagnostics. Ctrl+Shift+D shows or hides the complete developer workspace while keeping its dockspace and layout alive. An open inventory fits the new game view and cancels its held stack. The F1 Developer UI toggle is tracked in #308. Session changes clear stale focus, gestures and fields before attaching the new world. The screen stack also represents Main Menu and Loading for the future lifecycle screens. [Live HUD and controls](game-ui-migration.md#live-player-hud-303)
 
 ## Input and geometry
 

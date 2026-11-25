@@ -35,8 +35,8 @@ struct Engine::RemoteSession
 	const net::wire::PlayerState *localPlayer() const;
 	bool ready() const;
 	bool canReconnect() const;
-	void submit(net::wire::Action action);
-	void submitSlots(net::wire::ActionKind operation, int slot, int other = 0);
+	bool submit(net::wire::Action action);
+	bool submitSlots(net::wire::ActionKind operation, int slot, int other = 0);
 	ui::MultiplayerStatus connectionStatus(Clock::time_point now) const;
 	const char *actionStatus(Clock::time_point now) const;
 	void disconnect() noexcept;
@@ -70,6 +70,8 @@ struct Engine::RemoteSession
 	Clock::time_point jumpQueuedAt{};
 	bool joinRequested{}, leaveRequested{}, seedMismatch{};
 	bool actionPending{};
+	bool actionRejected{};
+	std::optional<inventoryui::Action> pendingInventoryAction;
 	const char *lastConnectionStatus{};
 	const char *feedback{};
 	Clock::time_point feedbackUntil{};

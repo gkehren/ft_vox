@@ -2,6 +2,46 @@
 
 Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Phase A adds an isolated preview. A normal launch still follows the existing solo, Join and Host paths and the existing ImGui controls.
 
+## Native player inventory (#304)
+
+Press **E** in a solo or remote world to open a three-by-nine inventory above the nine-slot hotbar. The panel fits the available game view and follows the saved player UI scale. It uses the same slot tokens and generation-tagged atlas icons as the HUD. A missing icon leaves a placeholder and the item count. Tooltips fit inside the game view, including when developer docks are visible.
+
+| Input | Behavior |
+| --- | --- |
+| Click a stack, then click a destination | Move the whole stack into an empty slot, merge with a matching item, or swap different items. |
+| Right-click a stack, then click a destination | Move the larger half into an empty or matching slot. Only the amount that fits moves. |
+| Re-click the source, right-click while holding, or click a gap or outside the panel | Cancel the held stack. |
+| Arrows, Tab, Shift+Tab | Move focus through the grid and buttons. |
+| Enter or Space, with Shift for half | Use the focused slot or button. |
+| 1–9 or wheel, Q, Drop selected stack | Select a hotbar slot, drop one item, or drop the whole selected stack. |
+| E, Escape, or Close | Close inventory and restore the previous capture state. |
+
+The native screen owns focus and the held stack. The `InventoryUi.hpp` planner stores a typed source slot and whole/half mode. The displayed stack is computed from the current snapshot. A newer private revision or a changed solo snapshot invalidates the gesture, as do focus loss, closing, a workspace toggle and a world or session reset. Joining, resyncing and disconnected states hide the previous inventory and disable its commands. Reconnect uses the existing Multiplayer menu.
+
+One completed gesture emits one Engine intent. The solo adapter returns the simulation result immediately. The remote adapter disables commands while the request is pending, marks the affected slots and keeps showing confirmed counts. The server's reliable channel sends the required inventory revision ahead of the action result. The screen can then show rejection or a partial transfer using that result. Item IDs, saves and wire messages use the existing formats. The old ImGui inventory and its per-layer icon descriptors are retired. Developer inspection, hosting and the dockspace continue through the existing Developer UI.
+
+### Inventory verification
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti (621.24), Vulkan 1.4.357, SDL 3.4.18, Low quality, seed 42. The native proof submits real SDL mouse and keyboard events and renders through the game swapchain. The screenshot layer captured the presented frames in a separate run from validation.
+
+| Capture | What it shows |
+| --- | --- |
+| [1920×1080 at 100%](images/game-ui-inventory/normal-16x9.webp) | Full inventory, selected Stone stack and tooltip. |
+| [2560×1080 at 100%](images/game-ui-inventory/held-21x9.webp) | Half-stack cursor, source remainder and focused slot. |
+| [960×540 at 200% UI scale and 2× font density](images/game-ui-inventory/compact-2x.webp) | Responsive grid and current atlas after resource-pack reload. The proof sets the face density directly. |
+
+Run the proof from the game's Release directory with `FT_VOX_VALIDATION=1`.
+
+```powershell
+../tests/Release/test_engine_reload.exe --player-inventory-proof
+```
+
+The proof passed 22 checks, including whole and half transfer, merge, swap, full-stack rejection, both drop controls, repeated keys, pointer release over a different target, outside cancellation, focus loss, workspace toggle, atlas reload and world reset. All 21 WSI validation messages matched the known RTSS swapchain diagnostics. The Windows CPU-only build passed all 53 CTests, including inventory policy, Items, GameplayLoop, VoxelActions, EntityReplication and WorldCheckpoint. EntityReplication also delays a private inventory update ahead of its action result and replays an older inventory packet.
+
+The [native Join and hosted closure scripts](multiplayer-client-smoke.md) passed with validation enabled. The Join smoke covered a disabled inventory during synchronization and disconnect, then restored the same private state on reconnect. Two concurrent graphical clients exercised pickup, a pending split, duplicate input during the pending interval, a rejected drop, independent hotbars and checkpoint restart. The guest's inventory stayed private while both clients saw the same terrain edit. The HUD and widget showcase proofs and the existing visual-regression scenes also passed.
+
+The input runs used scripted SDL events on physical hardware. They exercised the font-density path with a 2× override. Reverting the migration restores the ImGui panel against the same saved inventories and wire protocol.
+
 ## Live player HUD (#303)
 
 Normal solo and remote launches now use the native Game UI hotbar. It draws the nine shared slots from the solo simulation snapshot or the connected client's confirmed private inventory. The selected stack name and quantity follow that snapshot. Pending remote actions mark the confirmed slot and show feedback until the server responds. The HUD reads the current atlas generation each frame, so reloads and session changes rebuild the icons from the current data.
@@ -30,7 +70,7 @@ Every piece of HUD copy sits on one contrast plate built from the `hudScrim` tok
 
 `Ctrl+Shift+D` (Developer ▸ **Hide developer workspace**) shows and hides the complete developer workspace at runtime. `H` keeps toggling the layout tiles, and the existing developer panel shortcuts still bring the workspace back. Hiding is not "close every panel": the dockspace is still submitted, with `ImGuiDockNodeFlags_KeepAliveOnly` and the same dockspace identity (`UiShell::beginFrame(Workspace)`), so the dock node tree, the split sizes and `imgui.ini` associations survive. Hidden surfaces neither paint nor claim pointer input; gameplay keeps the cursor and the keyboard.
 
-A legacy inventory that was docked keeps working in that mode. A window docked into a `KeepAliveOnly` node is not displayed, so while the workspace is hidden `GameUI::drawInventoryPanel` draws the same content through a **separate** window identity (`Inventory###inventory-floating`, visible title `Inventory`) flagged `NoDocking | NoSavedSettings`. The canonical `Inventory` window is never submitted while the workspace is hidden, so `dock node`, dock order and its `imgui.ini` record are untouched for the whole hidden period: opening or closing the floating inventory, exiting with the workspace hidden and resetting the developer layout can neither lose nor overwrite a persisted association. Switching between the two identities discards the transient drag cursor, and the queued reset/default layout still runs while the workspace is hidden, so a first launch with `--no-dev-ui` still materializes the default developer layout before it is ever shown.
+Since #304 the native inventory follows the same available game view as the hotbar. The legacy docking figures below document the #303 behavior before this migration.
 
 ### Multiplayer recovery (#303 F03)
 

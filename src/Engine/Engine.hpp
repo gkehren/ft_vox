@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <chrono>
 #include <limits>
 #include <thread>
 
@@ -20,6 +21,7 @@
 #include <Renderer/WorldRenderer.hpp>
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
+#include <Engine/InventoryUi.hpp>
 #include <Engine/PlayerUiPreferences.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
@@ -35,6 +37,8 @@
 #include <Entities/MobSystem.hpp>
 #include <Network/WireProtocol.hpp>
 #include <utils.hpp>
+
+namespace gameui { struct InventoryView; }
 
 namespace net::udp { struct Address; }
 class GameUiSample;
@@ -149,10 +153,8 @@ public:
 	/// Monotonically increasing world generation / reload version counter.
 	uint64_t worldGenerationId() const;
 
-	/// Inventory-panel UI flag (issue #227): toggled by E, consumed by the
-	/// panel itself in #229. Presentation-local host state — the authoritative
-	/// inventory lives in the simulation.
-	bool inventoryPanelOpen() const { return m_inventoryPanelOpen; }
+	/// Whether the native inventory currently owns the player screen.
+	bool inventoryPanelOpen() const;
 
 	/// Result of applying a pack (atlas is still usable when pack is invalid — bundled used).
 	struct ResourcePackApplyResult
@@ -256,18 +258,18 @@ private:
 					 std::optional<uint64_t> gpuTag = std::nullopt);
 	bool setMouseCaptured(bool captured);
 	void setInventoryOpen(bool open);
+	gameui::InventoryView playerInventoryView() const;
+	void submitInventoryAction(inventoryui::Action action);
 	void syncUiInput();
 	void cancelDeveloperInput();
 	void cancelGameUiPointer();
 	void clearGameplayInput();
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
-	/// ImGui is allowed to build a frame (no native screen, no spike, no
-	/// inspection/benchmark view). The workspace being hidden does not disable
-	/// it: the dockspace is maintained with KeepAliveOnly (issue #303 F01).
+	/// ImGui can build a frame outside exclusive player modals and proof views.
+	/// A hidden workspace still submits its KeepAliveOnly dockspace.
 	bool developerUiPresent() const;
-	/// Developer surfaces may own pointer/keyboard input: present AND either the
-	/// workspace or the legacy inventory is on screen.
+	/// The visible workspace may own pointer and keyboard input.
 	bool developerUiAvailable() const;
 	gameui::HudView playerHudView() const;
 	gameui::InputContext inputContext() const;
@@ -472,8 +474,8 @@ private:
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;
-	/// E toggles this (issue #227); the inventory panel renders it in #229.
-	bool m_inventoryPanelOpen{false};
+	std::optional<items::ItemResult> m_inventoryResult;
+	std::chrono::steady_clock::time_point m_inventoryResultUntil{};
 
 	Benchmark m_benchmark{};
 	bool m_exitAfterBenchmark{false};

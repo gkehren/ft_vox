@@ -1,4 +1,5 @@
 #include <Engine/PlayerHud.hpp>
+#include <Engine/PlayerInventory.hpp>
 #include <Items/ItemRegistry.hpp>
 
 #include <algorithm>
@@ -17,24 +18,15 @@ HudHotbar makeHudHotbar(std::span<const items::ItemStack> stacks, int selected,
 	view.available = true;
 	for (int i = 0; i < items::kHotbarSize; ++i)
 	{
-		const auto stack = stacks[size_t(i)];
 		auto &slot = view.slots[size_t(i)];
-		const auto *item = items::definition(stack.item);
-		const bool occupied = item && stack.count > 0 && stack.count <= item->maxStack;
-		if (occupied)
-		{
-			slot.count = stack.count;
-			slot.label = item->name;
-			if (item->placeableBlock)
-				slot.icon = AtlasIcon{atlasGeneration, uint32_t(*item->placeableBlock)};
-		}
+		slot = makeItemSlot(stacks[size_t(i)], atlasGeneration);
 		if (i == selected)
 		{
 			slot.state |= style::State::Selected;
 			if (pending)
 				slot.state |= style::State::Pending;
-			view.selectedName = occupied ? slot.label : "Empty slot";
-			view.canPlace = occupied && item->placeableBlock.has_value();
+			view.selectedName = slot.empty() ? "Empty slot" : slot.label;
+			view.canPlace = slot.icon.has_value();
 		}
 	}
 	return view;

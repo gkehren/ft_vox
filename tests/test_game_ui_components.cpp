@@ -5,6 +5,7 @@
 // viewport, tokens reaching the draw list, fallback behavior for missing
 // glyphs/icons, and the bounded draw budget.
 #include <Engine/PlayerHud.hpp>
+#include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiGallery.hpp>
 #include <Engine/PlayerUiStyle.hpp>
@@ -24,6 +25,85 @@ namespace
 const style::Theme &theme()
 {
 	return style::baseline();
+}
+
+void inventoryScreen()
+{
+	using namespace inventoryui;
+	for (const auto bounds : {Clip{{0, 0, 1920, 1080}}, Clip{{0, 0, 2560, 1080}},
+							 Clip{{200, 40, 700, 460}}, Clip{{0, 0, 960, 540}}})
+	{
+		const auto layout = inventoryLayout(bounds, theme(), 2.f);
+		CHECK(layout.scale > 0.f && layout.panel.intersect(bounds) == layout.panel,
+			"inventory panel fits 16:9, ultrawide, docked and compact high-scale views");
+		CHECK(layout.status.intersect(layout.panel) == layout.status &&
+			layout.main.bounds.rect.w < layout.hotbar.bounds.rect.y &&
+			layout.hotbar.bounds.rect.w < layout.drop.rect.y,
+			"main grid, hotbar, and actions have separate rows");
+		bool allSlotsHit = true;
+		for (int i = 0; i < kSlotCount; ++i)
+		{
+			const SlotId id{i};
+			const auto rect = layout.slot(id);
+			allSlotsHit &= layout.hitSlot(glm::vec2(rect.rect) + size(rect) * 0.5f) == id;
+		}
+		CHECK(allSlotsHit, "all 36 painted cells hit their original authority slot");
+		const auto first = layout.slot({9});
+		CHECK(!layout.hitSlot({first.rect.z + layout.main.gap * 0.5f, first.rect.y}).valid(),
+			"the gutter hits no slot");
+	}
+	const auto noAtlas = makeItemSlot(items::makeStack(items::ItemId::Stone, 4), std::nullopt);
+	CHECK(noAtlas.count == 4 && noAtlas.label == "Stone" && !noAtlas.icon,
+		"missing atlas keeps the item count and tooltip data");
+	CHECK(makeItemSlot(items::makeStack(items::ItemId::Stone, 4), 9).icon->generation == 9,
+		"item presentation uses the current atlas generation");
+
+	InventoryView view;
+	view.availability = InventoryAvailability::Ready;
+	view.snapshot = Snapshot{};
+	view.snapshot->revision = 1;
+	view.snapshot->slots[0] = items::makeStack(items::ItemId::Stone, 5);
+	Interaction input;
+	const auto observe = [&] { input.observe(view.snapshot ? &*view.snapshot : nullptr, view.epoch, view.enabled()); };
+	observe();
+	CHECK(input.activate({0}, true).command == Command::None && input.drag().active(),
+		"pickup is a presentation change only");
+	observe();
+	CHECK(input.drag().active(), "repainting the same inventory keeps the drag");
+	CHECK(input.activate({9}, false).command == Command::Split && !input.drag().active(),
+		"one drop consumes the gesture and produces one half-stack command");
+	view.actionPending = true;
+	observe();
+	CHECK(input.activate({0}, false).command == Command::None && !input.drag().active() &&
+		view.snapshot->slots[0].count == 5 && view.snapshot->slots[9].isEmpty(),
+		"a delayed inventory packet leaves the confirmed counts and blocks a second submission");
+	view.actionPending = false; // rejection with the same confirmed snapshot
+	observe();
+	CHECK(input.activate({9}, false).command == Command::None && !input.drag().active(),
+		"rejection does not restore the old held stack or replay the action");
+	input.activate({0}, false);
+	view.snapshot->revision++;
+	observe();
+	CHECK(!input.drag().active() && input.activate({9}, false).command == Command::None,
+		"a newer private revision invalidates a stale source even when its count is unchanged");
+	input.activate({0}, false);
+	view.availability = InventoryAvailability::Disconnected;
+	view.snapshot.reset();
+	observe();
+	CHECK(!input.drag().active() && input.activate({0}, false).command == Command::None,
+		"disconnect discards the drag and disables the previous inventory");
+	view.availability = InventoryAvailability::Ready;
+	view.epoch++;
+	view.snapshot = Snapshot{};
+	view.snapshot->slots[0] = items::makeStack(items::ItemId::Stone, 5);
+	observe();
+	input.activate({0}, false);
+	view.epoch++;
+	observe();
+	CHECK(!input.drag().active(), "world and session epochs clear the drag even with equal snapshots");
+	input.activate({0}, false);
+	input.cancel();
+	CHECK(!input.drag().active(), "closing the screen or losing focus cancels without an intent");
 }
 
 /// Synthetic face: printable ASCII, 6 px advance, one atlas UV rectangle. The
@@ -1141,6 +1221,7 @@ void gallery()
 int main()
 {
 	slotGeometry();
+	inventoryScreen();
 	tooltips();
 	notifications();
 	notificationLifetime();

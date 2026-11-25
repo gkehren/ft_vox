@@ -76,7 +76,6 @@ void GameUI::shutdown()
 	if (m_vk && m_vk->getDevice() != VK_NULL_HANDLE)
 	{
 		m_vk->waitIdle();
-		invalidateItemIcons();
 		if (m_mapDesc != VK_NULL_HANDLE)
 		{
 			ImGui_ImplVulkan_RemoveTexture(m_mapDesc);
@@ -117,9 +116,6 @@ void GameUI::onImGuiVulkanBackendRecreate()
 	// The old descriptor belonged to the backend pool destroyed during reinit.
 	// The sampled image and sampler are application-owned and remain valid.
 	m_mapDesc = VK_NULL_HANDLE;
-	// Item icon descriptors (issue #229) lived in the same destroyed pool;
-	// the application-owned layer views stay valid and re-register lazily.
-	m_iconDescs.fill(VK_NULL_HANDLE);
 	if (m_mapSampler != VK_NULL_HANDLE && m_mapImage.image != VK_NULL_HANDLE)
 		m_mapDesc = ImGui_ImplVulkan_AddTexture(
 			m_mapSampler, m_mapImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -291,29 +287,12 @@ void GameUI::draw(GameUIFrame &frame)
 		frame.benchmark->report().valid)
 		debugui::drawBenchmarkReport(m_debug, frame);
 
-	if (!frame.benchmark || !frame.benchmark->isActive())
-		drawInventoryPanel(frame);
-
 	// File dialog can outlive the Graphics panel; always process while open.
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
 }
 
-void GameUI::drawWithoutWorkspace(GameUIFrame &frame)
-{
-	// Hidden developer workspace (issue #303 F01). The dockspace is submitted in
-	// its KeepAliveOnly maintenance mode, so the persisted dock node tree and
-	// every window association survive; no chrome, no panel and no pointer input
-	// is produced. The legacy inventory stays available until #304 and floats
-	// over gameplay (see drawInventoryPanel), so E / Escape keep working.
-	m_shell.beginFrame(ui::Workspace::Hidden);
-	drawInventoryPanel(frame);
-}
-
 void GameUI::maintainDockspace()
 {
-	// Hidden workspace with no inventory on screen (issue #303 F09): the frame
-	// carries nothing but the dockspace maintenance submission, so Engine can skip
-	// building a GameUIFrame entirely.
 	m_shell.beginFrame(ui::Workspace::Hidden);
 }
 

@@ -218,7 +218,8 @@ struct EngineJoinProbe
 		if (!engine.frameCtx->beginFrame(*engine.swapchain, image))
 			throw std::runtime_error("native smoke could not acquire a swapchain image");
 		const auto frameIndex = engine.frameCtx->frameIndex();
-		engine.updateRemoteCamera();
+		if (engine.m_remote->projection)
+			engine.updateRemoteCamera();
 		engine.tickStreaming(1.0 / 60.0);
 		engine.updateRemoteEntities();
 		engine.updateHighlight();
@@ -358,6 +359,64 @@ struct EngineJoinProbe
 		return hit.block;
 	}
 
+	void moveMinedStackInInventory()
+	{
+		const auto workspace = engine.developerWorkspaceVisible();
+		engine.setDeveloperWorkspaceVisible(false);
+		focus();
+		tap(SDLK_E);
+		presentClosureFrame();
+		const auto before = witness().slots;
+		const auto occupied = std::ranges::find_if(before, [](const auto &stack) { return !stack.isEmpty(); });
+		if (!engine.inventoryPanelOpen() || occupied == before.end() || !before[9].isEmpty())
+			throw std::runtime_error("inventory proof requires the mined stack and an empty main slot");
+		const int source = int(occupied - before.begin());
+		int width = 0, height = 0;
+		SDL_GetWindowSize(engine.window, &width, &height);
+		const auto layout = gameui::inventoryLayout({{0, 0, float(width), float(height)}}, gameui::style::baseline(),
+			engine.m_playerUi->playerUiScale());
+		const auto click = [&](int slot, Uint8 button) {
+			const auto rect = layout.slot({slot});
+			const auto center = glm::vec2(rect.rect) + gameui::size(rect) * 0.5f;
+			for (const auto type : {SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP})
+			{
+				SDL_Event event{};
+				event.type = type;
+				event.button.windowID = SDL_GetWindowID(engine.window);
+				event.button.button = button;
+				event.button.x = center.x;
+				event.button.y = center.y;
+				SDL_PushEvent(&event);
+			}
+			engine.handleEvents();
+		};
+		click(source, SDL_BUTTON_RIGHT);
+		click(9, SDL_BUTTON_LEFT);
+		const auto pending = engine.playerInventoryView();
+		CHECK(pending.availability == gameui::InventoryAvailability::Ready &&
+			pending.actionPending && !pending.enabled() && pending.pendingSlots &&
+			pending.pendingSlots->affects({source}) && pending.pendingSlots->affects({9}) &&
+			pending.snapshot && pending.snapshot->slots == before,
+			"private remote split highlights pending slots and displays confirmed counts");
+		click(source, SDL_BUTTON_LEFT);
+		click(9, SDL_BUTTON_LEFT);
+		presentClosureFrame();
+		until([&] { return !engine.m_remote->actionPending; }, "native inventory split did not receive its result");
+		const auto confirmed = engine.playerInventoryView();
+		CHECK(confirmed.enabled() && confirmed.snapshot && confirmed.snapshot->slots[9] == *occupied &&
+			confirmed.snapshot->slots[size_t(source)].isEmpty() && confirmed.feedback == "Action accepted",
+			"one remote split moves the mined item after confirmation");
+		tap(SDLK_Q); // selection is the empty hotbar slot used in the closure witness
+		until([&] { return !engine.m_remote->actionPending; }, "empty drop did not receive its result");
+		const auto rejected = engine.playerInventoryView();
+		CHECK(rejected.feedbackKind == gameui::style::Status::Error && rejected.enabled() &&
+			rejected.snapshot && confirmed.snapshot && rejected.snapshot->slots == confirmed.snapshot->slots,
+			"rejected remote drop preserves the confirmed snapshot");
+		tap(SDLK_E);
+		CHECK(!engine.inventoryPanelOpen(), "remote inventory closes through the native shortcut");
+		engine.setDeveloperWorkspaceVisible(workspace);
+	}
+
 	void runHostedClosure(const fs::path &server, const fs::path &evidence, bool restoring)
 	{
 		const bool host = !server.empty();
@@ -436,6 +495,7 @@ struct EngineJoinProbe
 		if (host && !restoring)
 		{
 			const auto cell = mineNearSpawn();
+			moveMinedStackInInventory();
 			publish(edit, std::to_string(cell.x) + " " + std::to_string(cell.y) + " " + std::to_string(cell.z));
 			std::cout << "HOSTED edit=break pickup=1 cell=" << cell.x << ',' << cell.y << ',' << cell.z << std::endl;
 		}
@@ -447,6 +507,8 @@ struct EngineJoinProbe
 				throw std::runtime_error("invalid hosted edit witness");
 			until([&] { return materialAt(cell) == TextureType::AIR; }, "both clients must see the edited block after replication and restart");
 			CHECK(true, "client observes the shared world edit");
+			if (!host)
+				CHECK(witness().slots[9].isEmpty(), "guest never receives the owner's private inventory move");
 		}
 		checkWitness(evidence / "first" / actorFile, round / actorFile, restoring);
 
@@ -558,6 +620,7 @@ struct EngineJoinProbe
 		remote.hasCameraPose = false;
 		const bool gateObserved = !remote.ready();
 		const auto synchronizing = engine.playerHudView();
+		const auto synchronizingInventory = engine.playerInventoryView();
 		remote.hasCameraPose = true;
 		const auto restored = engine.playerHudView();
 		CHECK(ready && gateObserved, "the camera-pose gate is what readiness exposes");
@@ -565,6 +628,9 @@ struct EngineJoinProbe
 			synchronizing.statusKind == gameui::style::Status::Pending && !synchronizing.status.empty(),
 			"an unready session presents pending synchronization, no bar and no reticle ("
 				<< synchronizing.status << ')');
+		CHECK(!synchronizingInventory.enabled() && !synchronizingInventory.snapshot &&
+			synchronizingInventory.availability == gameui::InventoryAvailability::Resyncing,
+			"synchronizing inventory disables input and withholds the previous private stacks");
 		CHECK(restored.hotbar.available && restored.status.empty(),
 			"restoring readiness returns the confirmed inventory and drops the session copy (status=["
 				<< restored.status << "])");
@@ -631,6 +697,7 @@ struct EngineJoinProbe
 		engine.requestOpenWorld("solo");
 		engine.initializeNoiseGenerator(13);
 		engine.stepDerivedProjectionForTests(1.0 / 60.0);
+		engine.enableGameUi(false, false);
 		auto *const solo = engine.sim.get();
 		const auto soloFeet = solo->playerFeet();
 		engine.selectHotbarSlot(5);
@@ -705,6 +772,15 @@ struct EngineJoinProbe
 			blockedHud.recovery == gameui::recoveryInstruction(false, captured),
 			"the blocked HUD publishes the reconnect steps for the hidden workspace and the actual mouse state");
 		CHECK(captured, "the recovery scenario starts from a captured mouse");
+		tap(SDLK_E);
+		presentClosureFrame();
+		const auto disconnectedInventory = engine.playerInventoryView();
+		CHECK(engine.inventoryPanelOpen() && !disconnectedInventory.enabled() && !disconnectedInventory.snapshot &&
+			disconnectedInventory.availability == gameui::InventoryAvailability::Disconnected,
+			"disconnected inventory shows recovery and clears the old private snapshot");
+		tap(SDLK_Q);
+		CHECK(!engine.m_remote->actionPending, "disconnected inventory submits no action");
+		tap(SDLK_E);
 		tap(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT);
 		CHECK(engine.developerWorkspaceVisible(),
 			"Ctrl+Shift+D reaches the workspace while the session is blocked");

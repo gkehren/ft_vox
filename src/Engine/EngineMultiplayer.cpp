@@ -1,6 +1,7 @@
 #include "EngineMultiplayer.hpp"
 
 #include <Engine/ExclusiveFile.hpp>
+#include <Engine/GameUiSample.hpp>
 #include <Engine/Profiler.hpp>
 #include <Items/ItemRegistry.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -63,7 +64,7 @@ const char *actionFeedback(wire::ActionCode code)
 	case OutOfReach: return "Rejected: out of reach";
 	case TerrainUnavailable: return "Rejected: terrain unavailable";
 	case StaleRevision: return "Rejected: terrain changed, try again";
-	case InventoryRejected: return "Rejected: inventory operation";
+	case InventoryRejected: return "Inventory action rejected. Check the stack and available space.";
 	case Occupied: return "Rejected: space occupied";
 	case RateLimited: return "Rejected: too many actions";
 	case Forbidden: return "Rejected: action forbidden";
@@ -193,25 +194,27 @@ void Engine::RemoteSession::disconnect() noexcept
 	}
 }
 
-void Engine::RemoteSession::submit(wire::Action action)
+bool Engine::RemoteSession::submit(wire::Action action)
 {
 	if (actionPending)
-		return;
+		return false;
 	const auto now = Clock::now();
 	const bool synchronized = ready();
 	if (synchronized && transport.sendAction(action, now))
 	{
 		actionPending = true;
 		feedback = nullptr;
-		return;
+		return true;
 	}
 	feedback = synchronized ? "Could not send action, try again" : "Waiting for synchronized state";
+	actionRejected = true;
 	feedbackUntil = now + 3s;
+	return false;
 }
 
-void Engine::RemoteSession::submitSlots(wire::ActionKind operation, int slot, int other)
+bool Engine::RemoteSession::submitSlots(wire::ActionKind operation, int slot, int other)
 {
-	if (slot >= 0 && slot < items::kInventorySize && other >= 0 && other < items::kInventorySize)
+	return slot >= 0 && slot < items::kInventorySize && other >= 0 && other < items::kInventorySize &&
 		submit({.operation = operation, .slot = uint8_t(slot), .otherSlot = uint8_t(other)});
 }
 
@@ -266,6 +269,7 @@ void Engine::pollRemote()
 	}
 	if (next != remote.scope)
 	{
+		const bool keepInventoryOpen = inventoryPanelOpen() && !switching;
 		retireWorldProjection();
 		remote.projection.reset();
 		remote.scope = next;
@@ -284,6 +288,8 @@ void Engine::pollRemote()
 		remote.trafficRates.reset();
 		remote.jumpQueuedAt = {};
 		remote.actionPending = false;
+		remote.actionRejected = false;
+		remote.pendingInventoryAction.reset();
 		remote.feedback = nullptr;
 		if (next)
 		{
@@ -293,6 +299,8 @@ void Engine::pollRemote()
 			std::cout << "[multiplayer] Joined player=" << welcome->player.value
 				<< " seed=" << welcome->seed << " projection=" << m_remoteRenderEpoch << std::endl;
 		}
+		if (keepInventoryOpen)
+			setInventoryOpen(true);
 	}
 	if (next)
 	{
@@ -341,6 +349,9 @@ void Engine::pollRemote()
 	if (const auto result = transport.takeActionResult())
 	{
 		remote.actionPending = false;
+		remote.pendingInventoryAction.reset();
+		remote.actionRejected = result->code != wire::ActionCode::Accepted &&
+			result->code != wire::ActionCode::Partial;
 		remote.feedback = actionFeedback(result->code);
 		remote.feedbackUntil = now + 3s;
 	}
@@ -597,6 +608,143 @@ void Engine::dropSelectedItem()
 		sim->dropFromSlot(selectedHotbarSlot(), 1, glm::dvec3(camera.getFront()));
 }
 
+gameui::InventoryView Engine::playerInventoryView() const
+{
+	using gameui::InventoryAvailability;
+	using gameui::style::Status;
+	using inventoryui::SlotId;
+	gameui::InventoryView view;
+	view.epoch = worldGenerationId();
+	view.canDrop = !paused && !nativePause();
+	const auto now = Clock::now();
+	if (switchingSession())
+	{
+		view.feedback = "Switching session";
+		view.feedbackKind = Status::Pending;
+		return view;
+	}
+	if (m_remote)
+	{
+		const auto &remote = *m_remote;
+		const auto connection = remote.connectionStatus(now);
+		switch (connection.state)
+		{
+		using enum ui::MultiplayerState;
+		case Connected:
+		case Degraded:
+			view.availability = InventoryAvailability::Ready;
+			if (const auto inventory = remote.transport.inventory())
+				view.snapshot = inventoryui::Snapshot{inventory->slots, SlotId{inventory->selected}, inventory->revision};
+			view.actionPending = remote.actionPending;
+			view.pendingSlots = remote.pendingInventoryAction;
+			if (const auto *feedback = remote.actionStatus(now))
+				view.feedback = feedback;
+			view.feedbackKind = view.actionPending ? Status::Pending :
+				remote.actionRejected ? Status::Error : Status::Info;
+			if (view.actionPending)
+				view.recovery = "Waiting for the server to confirm.";
+			break;
+		case Connecting:
+		case SyncingTerrain:
+		case Resyncing:
+		case Leaving:
+			view.availability = connection.state == Connecting ? InventoryAvailability::Joining :
+				InventoryAvailability::Resyncing;
+			view.feedback = connection.label;
+			view.feedbackKind = Status::Pending;
+			break;
+		case Disconnected:
+		case TimedOut:
+		case Rejected:
+			view.availability = InventoryAvailability::Disconnected;
+			view.feedback = connection.label;
+			view.feedbackKind = Status::Error;
+			view.recovery = gameui::recoveryInstruction(m_showDeveloperUi, mouseCaptured);
+			break;
+		}
+		return view;
+	}
+	if (!sim)
+	{
+		view.feedback = "Waiting for world";
+		view.feedbackKind = Status::Pending;
+		return view;
+	}
+
+	sim::InventorySnapshot snapshot;
+	sim->inventorySnapshot(snapshot);
+	view.snapshot = inventoryui::Snapshot{snapshot.slots, SlotId{snapshot.selectedSlot}};
+	view.availability = InventoryAvailability::Ready;
+	if (m_inventoryResult && now < m_inventoryResultUntil)
+	{
+		view.feedbackKind = Status::Error;
+		using enum items::ItemResult;
+		switch (*m_inventoryResult)
+		{
+		case Ok: break;
+		case Partial:
+			view.feedbackKind = Status::Info;
+			view.feedback = "Only part of the stack fit.";
+			break;
+		case Full: view.feedback = "The destination is full. Choose another slot."; break;
+		case EmptyStack: view.feedback = "The source slot is empty. Choose a stack."; break;
+		case ItemMismatch: view.feedback = "These stacks cannot merge."; break;
+		case IdExhausted: view.feedback = "No more dropped items can be created in this world."; break;
+		default: view.feedback = "Inventory action unavailable. Try again."; break;
+		}
+	}
+	return view;
+}
+
+void Engine::submitInventoryAction(inventoryui::Action action)
+{
+	using enum inventoryui::Command;
+	using wire::ActionKind;
+	m_playerUi->cancelInventoryGesture();
+	const auto view = playerInventoryView();
+	if (!view.enabled() || !action.from.valid() ||
+		((action.command == DropOne || action.command == DropStack) && !view.canDrop))
+		return;
+
+	const int from = action.from.index, to = action.to.index;
+	if (m_remote)
+	{
+		ActionKind operation = ActionKind::Select;
+		switch (action.command)
+		{
+		case Move: operation = ActionKind::Move; break;
+		case Swap: operation = ActionKind::Swap; break;
+		case Split: operation = ActionKind::SplitHalf; break;
+		case Select: operation = ActionKind::Select; break;
+		case DropOne: operation = ActionKind::DropOne; break;
+		case DropStack: operation = ActionKind::DropStack; break;
+		case None: return;
+		}
+		if (m_remote->submitSlots(operation, from, action.to.valid() ? to : 0))
+			m_remote->pendingInventoryAction = action;
+		return;
+	}
+
+	items::ItemResult result = items::ItemResult::InvalidSlot;
+	switch (action.command)
+	{
+	case Move: result = sim->moveStack(from, to); break;
+	case Swap: result = sim->swapStacks(from, to); break;
+	case Split: result = sim->splitStack(from, to); break;
+	case Select: result = sim->selectHotbarSlot(from); break;
+	case DropOne:
+	case DropStack:
+	{
+		const uint16_t count = action.command == DropOne ? 1 : view.snapshot->slots[size_t(from)].count;
+		result = sim->dropFromSlot(from, count, glm::dvec3(camera.getFront()));
+		break;
+	}
+	case None: return;
+	}
+	m_inventoryResult = result;
+	m_inventoryResultUntil = Clock::now() + 3s;
+}
+
 void Engine::populateRemoteUi(GameUIFrame &frame)
 {
 	auto &remote = *m_remote;
@@ -633,16 +781,6 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 		frame.player.waitingForTerrain = (player->flags & wire::PlayerState::waitingForTerrain) != 0;
 		frame.player.speed = glm::length(glm::vec3(player->velocity[0], player->velocity[1], player->velocity[2]));
 	}
-	if (remote.projection)
-		if (const auto inventory = remote.transport.inventory())
-			frame.inventory = {inventory->slots, inventory->selected};
-	frame.inventoryInputEnabled = remote.ready() && !remote.actionPending;
-	frame.moveStack = [&remote](int from, int to) { remote.submitSlots(wire::ActionKind::Move, from, to); };
-	frame.swapStacks = [&remote](int from, int to) { remote.submitSlots(wire::ActionKind::Swap, from, to); };
-	frame.splitStack = [&remote](int from, int to) { remote.submitSlots(wire::ActionKind::SplitHalf, from, to); };
-	frame.dropFromSlot = [&remote](int slot, uint16_t, glm::dvec3) {
-		remote.submitSlots(wire::ActionKind::DropStack, slot);
-	};
 }
 
 int Engine::worldSeed() const

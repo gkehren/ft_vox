@@ -19,7 +19,6 @@
 #include <Engine/LayoutTiles.hpp>
 #include <Engine/UiShell.hpp>
 #include <Engine/GameUIBiomeMap.hpp>
-#include <Engine/InventoryUi.hpp>
 #include <Engine/MultiplayerUi.hpp>
 #include <Engine/MultiplayerJoin.hpp>
 #include <Hosting/ServerSupervisor.hpp>
@@ -205,25 +204,6 @@ struct GameUIFrame
 	std::function<void(std::string_view)> joinHostedServer;
 	std::function<std::string(uint64_t, localcontrol::Operation, sim::PlayerId, std::string_view)> administerHostedServer;
 
-	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
-	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
-	/// callbacks (the setPlayerFlight pattern). The UI issues commands; the
-	/// simulation is the only truth. Display names resolve through the item
-	/// registry on this side — the snapshot carries stable ItemIds only.
-	sim::InventorySnapshot inventory{};
-	bool inventoryInputEnabled{true};
-	std::function<void(int)> selectHotbarSlot;
-	std::function<void(int, int)> moveStack;
-	std::function<void(int, int)> swapStacks;
-	std::function<void(int, int)> splitStack;
-	std::function<void(int, uint16_t, glm::dvec3)> dropFromSlot;
-	/// Host-owned inventory-panel UI flag (E toggles it, issue #227); the
-	/// panel itself is drawn by GameUI. Presentation-local, never persisted.
-	bool *inventoryPanelOpen{nullptr};
-	/// Block-atlas (re)load counter: item icon descriptors revalidate against
-	/// it (a resource-pack apply recreates the atlas image).
-	uint64_t atlasVersion{0};
-
 	int seed{0};
 	uint64_t worldGenerationId{0};
 	/// World-save state (issue #180, Phase 5); see WorldSaveUiState above.
@@ -300,16 +280,8 @@ public:
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(GameUIFrame &frame);
-	/// Developer workspace hidden (issue #303 F01): keep the dockspace identity
-	/// alive with ImGuiDockNodeFlags_KeepAliveOnly — same node id, same split
-	/// tree, no rendering and no input — and paint only the legacy inventory. A
-	/// previously docked inventory floats while the workspace is hidden and is
-	/// re-docked when it returns, so the persisted layout is never destroyed.
-	void drawWithoutWorkspace(GameUIFrame &frame);
-	/// Hidden workspace with nothing on screen (issue #303 F09): submit the
-	/// maintenance dockspace only, without a frame or any snapshot work.
+	/// Keep the dock tree alive while the developer workspace is hidden.
 	void maintainDockspace();
-	void resetInventoryInteraction() { m_drag = {}; }
 	/// Close developer-owned modal surfaces when the workspace is hidden
 	/// (issue #303 F04): a file browser must not survive as an invisible open
 	/// dialog that still owns developer input state.
@@ -371,8 +343,6 @@ public:
 	/// default developer layout here on first run.
 	ui::UiShell &shell() { return m_shell; }
 	bool showOverlayHints() const { return m_debug.panels.overlayHints; }
-	// Legacy inventory remains available without the workspace until #304.
-	void drawInventoryPanel(GameUIFrame &frame);
 
 	/// Open the primary panels used by the default developer layout so the
 	/// docked slots materialize on the first frame. Overview stays closed to
@@ -413,12 +383,6 @@ public:
 	const BiomeMapUpload &pendingBiomeMapUpload() const { return m_mapPresentation.pending; }
 	void recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing);
 
-	/// Drop the per-atlas-layer item icon views/descriptors (issue #229).
-	/// Called eagerly by Engine::applyResourcePack right after the atlas is
-	/// rebuilt (device idle), so no orphaned view of the destroyed image
-	/// lingers; also called lazily on atlasVersion mismatch and at shutdown.
-	void invalidateItemIcons();
-
 private:
 	struct BiomeMapJob
 	{
@@ -458,10 +422,6 @@ private:
 	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
-	/// Gameplay surfaces (issue #229, Epic #223 Phase F), implemented in
-	/// GameUIInventory.cpp: the always-on hotbar HUD and the E inventory
-	/// panel. Both are snapshot-only displays issuing command callbacks.
-
 	void requestBiomeMapRefresh()
 	{
 		m_mapNeedsUpdate = true;
@@ -520,12 +480,6 @@ private:
 
 	/// Application shell (dockspace, main menu, status strip, layout).
 	ui::UiShell m_shell{};
-	/// True while the legacy inventory is drawn through its temporary
-	/// non-persistent identity because the developer workspace is hidden
-	/// (issue #303 F01). The canonical "Inventory" window and its imgui.ini
-	/// record are left untouched for the whole hidden period.
-	bool m_inventoryFloating{};
-
 	// Biome map
 	int m_mapSize{256};
 	float m_mapZoom{0.5f};
@@ -580,14 +534,4 @@ private:
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};
 
-	/// Inventory presentation state (issue #229). The drag cursor is
-	/// UI-LOCAL: a view of the source slot, discarded when the panel closes
-	/// (authoritative moves happen only through command callbacks). Item
-	/// icons are per-atlas-layer ImGui descriptors over the block atlas,
-	/// lazily created and invalidated on atlas reload (m_iconAtlasVersion).
-	inventoryui::DragState m_drag{};
-	uint64_t m_iconAtlasVersion{0};
-	std::array<VkDescriptorSet, size_t(COUNT)> m_iconDescs{};
-	std::array<VkImageView, size_t(COUNT)> m_iconViews{};
-	VkDescriptorSet itemIconDesc(GameUIFrame &frame, TextureType type);
 };

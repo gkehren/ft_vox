@@ -3,7 +3,7 @@
 // Developer workspace visibility policy (issue #303 F01/F04).
 //
 // The developer workspace is the ImGui chrome plus every docked developer/game
-// panel. Gameplay (scene, native HUD, legacy inventory) lives outside it, so the
+// panel. Gameplay (scene, native HUD and inventory) lives outside it, so the
 // workspace can be shown and hidden at runtime without restarting the
 // application or losing the persisted layout.
 //
@@ -52,17 +52,15 @@ inline constexpr bool developerUiPresent(bool imguiReady, bool nativeScreenSuppr
 	return imguiReady && !nativeScreenSuppressed;
 }
 
-/// ImGui may own pointer and keyboard input. With the workspace hidden only the
-/// legacy inventory is an interactive developer surface (issue #303 F01).
+/// Only the visible workspace owns developer pointer and keyboard input.
 inline constexpr bool developerUiAvailable(bool imguiReady, bool nativeScreenSuppressed,
-										   Workspace workspace, bool inventoryOpen)
+										   Workspace workspace)
 {
-	return developerUiPresent(imguiReady, nativeScreenSuppressed) &&
-		(visible(workspace) || inventoryOpen);
+	return developerUiPresent(imguiReady, nativeScreenSuppressed) && visible(workspace);
 }
 
 /// Hiding the workspace must end every developer interaction it owned: focused
-/// fields, in-flight pointer presses and the inventory drag cursor.
+/// fields and in-flight pointer presses.
 inline constexpr bool endsDeveloperInput(Workspace before, Workspace after)
 {
 	return visible(before) && !visible(after);

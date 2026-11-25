@@ -36,8 +36,6 @@ void Engine::cancelDeveloperInput()
 	m_inputRouter.cancelDeveloper();
 	if (imgui)
 		imgui->cancelInput();
-	if (gameUi)
-		gameUi->resetInventoryInteraction();
 }
 
 void Engine::cancelGameUiPointer()
@@ -77,13 +75,9 @@ bool Engine::developerUiPresent() const
 
 bool Engine::developerUiAvailable() const
 {
-	// Input ownership rule (issue #303 F01/F04): while the workspace is hidden
-	// only the legacy inventory is an interactive developer surface; every other
-	// pointer or keyboard event belongs to gameplay or the native Game UI.
 	const bool nativeSuppressed = m_inspectionView || m_uiSpike || suppressDeveloperUi();
 	return ui::developerUiAvailable(imgui != nullptr, nativeSuppressed,
-		m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
-		m_inventoryPanelOpen);
+		m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden);
 }
 
 gameui::InputContext Engine::inputContext() const
@@ -95,7 +89,7 @@ gameui::InputContext Engine::inputContext() const
 		.locked = m_benchmark.locksInput(),
 		.nativeScreen = m_playerUi && !m_uiSpike && m_playerUi->screens().nativeScreen(),
 		.modal = suppressDeveloperUi(),
-		.inventory = m_inventoryPanelOpen,
+		.inventory = inventoryPanelOpen(),
 		.paused = paused || nativePause(),
 		.devKeyboard = pendingDevFocus || (devAvailable &&
 			(mouseCaptured ? imgui->ownsActiveInput() : imgui->wantCaptureKeyboard())),
@@ -116,10 +110,15 @@ ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 
 void Engine::setInventoryOpen(bool open)
 {
-	m_inventoryPanelOpen = open;
-	if (!open && gameUi)
-		gameUi->resetInventoryInteraction();
+	if (m_playerUi)
+		m_playerUi->setInventoryOpen(open);
+	m_inventoryResult.reset();
 	syncUiInput();
+}
+
+bool Engine::inventoryPanelOpen() const
+{
+	return m_playerUi && m_playerUi->screens().top() == gameui::Screen::Inventory;
 }
 
 void Engine::setDeveloperWorkspaceVisible(bool visible)
@@ -137,13 +136,16 @@ void Engine::setDeveloperWorkspaceVisible(bool visible)
 	if (ui::endsDeveloperInput(m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
 			visible ? ui::Workspace::Visible : ui::Workspace::Hidden))
 	{
-		// Developer-owned input dies with the workspace: no focused text field, no
-		// in-flight pointer press, no open resource-pack browser and no inventory
-		// drag cursor left behind (F04). The inventory itself stays open and
-		// floats, so closing it is still possible with the workspace hidden (F01).
+		// Release developer input and close its dialogs before hiding the workspace.
 		cancelDeveloperInput();
 		if (gameUi)
 			gameUi->cancelDeveloperDialogs();
+	}
+	if (inventoryPanelOpen())
+	{
+		cancelGameUiPointer();
+		m_playerUi->cancelInventoryGesture();
+		m_playerUi->invalidateLayout();
 	}
 	m_showDeveloperUi = visible;
 	syncUiInput();
@@ -156,7 +158,6 @@ void Engine::syncUiInput()
 	applyPlayerUiScaleRequests();
 	if (m_playerUi)
 	{
-		m_inventoryPanelOpen = m_playerUi->syncInventory(m_inventoryPanelOpen);
 		const auto revision = m_playerUi->screens().revision();
 		if (m_uiScreenRevision != revision)
 		{
@@ -165,7 +166,7 @@ void Engine::syncUiInput()
 			clearGameplayInput();
 		}
 	}
-	const bool wantsCursor = m_inventoryPanelOpen || (m_playerUi && m_playerUi->screens().blocksGameplay());
+	const bool wantsCursor = m_playerUi && m_playerUi->screens().blocksGameplay();
 	if (wantsCursor && !m_captureBeforeScreen)
 	{
 		m_captureBeforeScreen = mouseCaptured;
@@ -221,6 +222,12 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			m_playerUi->handleEvent(window, event, false);
 		switch (event.type)
 		{
+		case SDL_EVENT_WINDOW_FOCUS_LOST:
+		case SDL_EVENT_WINDOW_HIDDEN:
+		case SDL_EVENT_WINDOW_MINIMIZED:
+			if (m_playerUi)
+				m_playerUi->cancelInventoryGesture();
+			break;
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -253,7 +260,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const bool back = key == SDLK_ESCAPE || (key == SDLK_P && !m_remote && m_playerUi &&
 			m_playerUi->screens().top() == gameui::Screen::Pause);
 		const bool global = classifyKeyRoute(static_cast<int>(key), event.key.mod) == KeyRoute::GlobalShortcut;
-		const bool closeInventory = key == SDLK_E && policy.inventory;
+		const bool inventoryShortcut = key == SDLK_E;
 		// C is the cursor-release shortcut, and the HUD's multiplayer recovery line
 		// depends on it: the policy keeps it with gameplay during a session
 		// transition so the captured mouse can be freed before Multiplayer >
@@ -261,7 +268,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const bool captureShortcut = key == SDLK_C;
 		if (back && m_playerUi && !policy.devText && developerUiAvailable())
 			policy.devKeyboard = imgui->ownsActiveInput();
-		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory, captureShortcut);
+		const auto candidate = policy.choose(InputKind::Key, global, back, inventoryShortcut, captureShortcut);
 		auto scan = event.key.scancode;
 		if (scan == SDL_SCANCODE_UNKNOWN)
 			scan = SDL_GetScancodeFromKey(key, nullptr);
@@ -270,7 +277,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		// even when the physical modifier is held for gameplay.
 		if (imgui && !m_inspectionView && policy.interactive && !policy.modal && owner != DeveloperUi)
 			imgui->observeModifiers(event.key.mod);
-		if (owner == PlayerUi && down && !event.key.repeat && (back || closeInventory))
+		if (owner == PlayerUi && down && !event.key.repeat && (back || (inventoryShortcut && policy.inventory)))
 		{
 			if (policy.inventory && !policy.modal)
 				setInventoryOpen(false);
@@ -313,6 +320,8 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			owner = m_inputRouter.motionOwner(candidate);
 		else
 			owner = m_inputRouter.button(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, candidate);
+		if (policy.inventory && policy.devOccludes && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+			m_playerUi->cancelInventoryGesture();
 		// Position feeds ImGui hover bookkeeping. Only Dev-owned button and
 		// wheel edges reach its controls, even when ownership changes mid-press.
 		if (imgui && policy.interactive && !policy.modal && !mouseCaptured &&
@@ -345,12 +354,22 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 	}
 	if (owner == PlayerUi && m_playerUi)
 	{
-		deliver(m_playerUi->handleScreenEvent(event));
+		if (policy.inventory)
+		{
+			m_playerUi->setInventoryView(playerInventoryView());
+			const auto action = m_playerUi->handleInventoryEvent(event);
+			if (action.command != inventoryui::Command::None)
+				submitInventoryAction(action);
+		}
+		else
+			deliver(m_playerUi->handleScreenEvent(event));
 		syncUiInput();
 	}
 	else if (owner == DeveloperUi && imgui && !policy.modal)
 	{
 		const bool press = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+		if (policy.inventory && (press || policy.devDialog || policy.devText))
+			m_playerUi->cancelInventoryGesture();
 		const bool takingTextInput = press && m_playerUi && m_playerUi->yieldTextInput(window);
 		if (takingTextInput)
 			m_inputRouter.cancelKeyboard(PlayerUi);
