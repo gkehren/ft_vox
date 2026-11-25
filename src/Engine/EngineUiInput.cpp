@@ -254,9 +254,14 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			m_playerUi->screens().top() == gameui::Screen::Pause);
 		const bool global = classifyKeyRoute(static_cast<int>(key), event.key.mod) == KeyRoute::GlobalShortcut;
 		const bool closeInventory = key == SDLK_E && policy.inventory;
+		// C is the cursor-release shortcut, and the HUD's multiplayer recovery line
+		// depends on it: the policy keeps it with gameplay during a session
+		// transition so the captured mouse can be freed before Multiplayer >
+		// Reconnect (issue #303 F03). It changes only the host's cursor capture.
+		const bool captureShortcut = key == SDLK_C;
 		if (back && m_playerUi && !policy.devText && developerUiAvailable())
 			policy.devKeyboard = imgui->ownsActiveInput();
-		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory, key == SDLK_C);
+		const auto candidate = policy.choose(InputKind::Key, global, back, closeInventory, captureShortcut);
 		auto scan = event.key.scancode;
 		if (scan == SDL_SCANCODE_UNKNOWN)
 			scan = SDL_GetScancodeFromKey(key, nullptr);

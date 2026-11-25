@@ -137,6 +137,61 @@ void workspaceVisibility()
 		"hiding the workspace cancels the press and swallows its orphan release");
 }
 
+// Issue #303 F03/F12: the HUD's multiplayer recovery line tells the player to
+// release the captured mouse with C before Multiplayer > Reconnect, so C (and
+// Escape) must survive a session transition while every other gameplay command
+// stays blocked.
+void transitionRecovery()
+{
+	using enum InputOwner;
+	const InputContext blocked{.transition = true};
+	CHECK(blocked.choose(Key, false, false, false, true) == Gameplay,
+		"C reaches the host during a session transition so the captured mouse can be freed");
+	CHECK(blocked.choose(Key, false, true) == Gameplay,
+		"Escape keeps opening the player menu during a session transition");
+	CHECK(blocked.choose(Key) == Blocked && blocked.choose(Pointer) == Blocked &&
+			blocked.choose(Text) == Blocked && !blocked.allowsMovement(),
+		"movement, gameplay keys, pointer and text stay blocked during a session transition");
+	CHECK(blocked.choose(Key, false, false, true) == Blocked,
+		"the inventory close key does not reach gameplay without an open inventory");
+
+	// The exception sits after every other ownership rule, so a benchmark lock, a
+	// native screen, a modal, a developer field and the inventory all keep their
+	// own policy for the same key.
+	const InputContext benchmark{.locked = true, .transition = true};
+	CHECK(benchmark.choose(Key, false, true) == Blocked &&
+			benchmark.choose(Key, false, false, false, true) == Blocked,
+		"a locked benchmark keeps both shortcuts out of gameplay");
+	const InputContext native{.nativeScreen = true, .transition = true};
+	CHECK(native.choose(Key, false, true) == PlayerUi &&
+			native.choose(Key, false, false, false, true) == PlayerUi,
+		"a native screen keeps the shortcuts under its own input policy");
+	const InputContext modal{.modal = true, .transition = true};
+	CHECK(modal.choose(Key, false, false, false, true) == PlayerUi,
+		"a modal keeps the cursor shortcut under the native policy");
+	const InputContext devText{.devKeyboard = true, .devText = true, .transition = true};
+	CHECK(devText.choose(Key, false, false, false, true) == DeveloperUi,
+		"a developer text field keeps C as typed text");
+	const InputContext devKeyboard{.devKeyboard = true, .transition = true};
+	CHECK(devKeyboard.choose(Key, false, false, false, true) == DeveloperUi &&
+			devKeyboard.choose(Key, false, true) == DeveloperUi,
+		"developer keyboard ownership outranks both transition exceptions");
+	const InputContext dialog{.devDialog = true, .transition = true};
+	CHECK(dialog.choose(Key, false, false, false, true) == DeveloperUi,
+		"an open developer dialog outranks the transition exception");
+	const InputContext inventory{.inventory = true, .transition = true};
+	CHECK(inventory.choose(Key, false, false, false, true) == Blocked &&
+			inventory.choose(Key, false, false, true) == PlayerUi,
+		"an open inventory keeps its own policy for C and for its close key");
+
+	// Outside a transition the shortcut is unchanged, including the capture retry
+	// the failure flag already allowed.
+	const InputContext hud;
+	CHECK(hud.choose(Key, false, false, false, true) == Gameplay &&
+			InputContext{.captureFailed = true}.choose(Key, false, false, false, true) == Gameplay,
+		"C stays a gameplay shortcut in normal play and after a failed capture");
+}
+
 void screens()
 {	ScreenStack stack;
 	CHECK(stack.top() == Screen::Hud && !stack.back() && !stack.blocksGameplay(), "HUD is passive root");
@@ -563,6 +618,7 @@ int main()
 	routing();
 	pointerGestures();
 	workspaceVisibility();
+	transitionRecovery();
 	screens();
 	layoutAndWidgets();
 	reusableBindings();

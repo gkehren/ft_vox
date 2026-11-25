@@ -565,8 +565,14 @@ struct EngineJoinProbe
 			synchronizing.statusKind == gameui::style::Status::Pending && !synchronizing.status.empty(),
 			"an unready session presents pending synchronization, no bar and no reticle ("
 				<< synchronizing.status << ')');
-		CHECK(restored.hotbar.available && restored.aim && restored.status.empty(),
-			"restoring readiness returns the confirmed inventory and the reticle");
+		CHECK(restored.hotbar.available && restored.status.empty(),
+			"restoring readiness returns the confirmed inventory and drops the session copy (status=["
+				<< restored.status << "])");
+		// The reticle additionally needs the host's cursor capture and window
+		// focus, which the window manager owns: assert the invariant the engine is
+		// responsible for here.
+		CHECK(!restored.captured || restored.aim,
+			"a ready session with a captured cursor aims at the world again");
 	}
 
 	void checkRetiredProjection()
@@ -585,6 +591,39 @@ struct EngineJoinProbe
 		CHECK(hud.statusKind == gameui::style::Status::Pending ||
 			hud.recovery == gameui::recoveryInstruction(engine.m_showDeveloperUi, engine.mouseCaptured),
 			"an ended session publishes the reconnect steps reachable from this workspace/capture state");
+	}
+
+	/// One real SDL key event through the live router (issue #303 F12): the
+	/// recovery scenario must reach the shortcut by input, not by calling the
+	/// engine setter or the reconnect callback directly.
+	void key(SDL_Keycode code, bool down, SDL_Keymod mods = SDL_KMOD_NONE, bool repeat = false)
+	{
+		SDL_Event event{};
+		event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+		event.key.windowID = SDL_GetWindowID(engine.window);
+		event.key.key = code;
+		event.key.scancode = SDL_GetScancodeFromKey(code, nullptr);
+		event.key.repeat = repeat;
+		event.key.mod = mods;
+		SDL_PushEvent(&event);
+		engine.handleEvents();
+	}
+
+	void tap(SDL_Keycode code, SDL_Keymod mods = SDL_KMOD_NONE)
+	{
+		key(code, true, mods);
+		key(code, false, mods);
+	}
+
+	/// Real focus event: gameplay shortcuts sit behind the host's focus gate, so
+	/// the scenario starts from the same state an interactive player has.
+	void focus()
+	{
+		SDL_Event event{};
+		event.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+		event.window.windowID = SDL_GetWindowID(engine.window);
+		SDL_PushEvent(&event);
+		engine.handleEvents();
 	}
 
 	void run(const char *first, const char *second)
@@ -647,18 +686,41 @@ struct EngineJoinProbe
 		pump();
 		checkRetiredProjection();
 		until([&] { return static_cast<bool>(frame().joinServer); }, "Disconnect did not complete");
-		// Reconnect workflow (issue #303 F03/F12): the row the player reads names
-		// the steps that are reachable from here, and doing them actually restores
-		// the session — verified end to end, not as a non-empty string.
+		// Recovery through the real input path (issue #303 F03/F12). The blocked row
+		// the player just read asks for the workspace chord and the mouse release;
+		// both arrive here as SDL events and must reach their owner while the
+		// session is blocked. The reconnect itself then invokes the same
+		// GameUIFrame::joinServer callback the Developer > Multiplayer menu item
+		// calls (UiShell::drawMainMenuBar), because driving the ImGui menu bar by
+		// synthetic pointer positions is not reproducible here. What the input path
+		// owns — the chord, the cursor release and the state the row describes — is
+		// therefore validated end to end, and the callback is the documented seam.
+		focus();
+		engine.setDeveloperWorkspaceVisible(false);
+		engine.setInventoryOpen(false);
+		engine.setMouseCaptured(true);
+		const bool captured = engine.mouseCaptured;
 		const auto blockedHud = engine.playerHudView();
 		CHECK(blockedHud.statusKind == gameui::style::Status::Error && !blockedHud.hotbar.available &&
-			blockedHud.recovery == gameui::recoveryInstruction(engine.m_showDeveloperUi, engine.mouseCaptured),
-			"the blocked HUD publishes the reconnect steps for the current workspace and mouse state");
+			blockedHud.recovery == gameui::recoveryInstruction(false, captured),
+			"the blocked HUD publishes the reconnect steps for the hidden workspace and the actual mouse state");
+		CHECK(captured, "the recovery scenario starts from a captured mouse");
+		tap(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT);
+		CHECK(engine.developerWorkspaceVisible(),
+			"Ctrl+Shift+D reaches the workspace while the session is blocked");
+		tap(SDLK_C);
+		CHECK(!engine.mouseCaptured, "C releases the captured mouse while the session is blocked");
+		const auto reachableHud = engine.playerHudView();
+		CHECK(reachableHud.recovery == gameui::recoveryInstruction(true, false),
+			"the recovery line follows the state the player just reached");
+		CHECK(static_cast<bool>(frame().joinServer),
+			"the Multiplayer Reconnect action is reachable after the recovery steps");
 		frame().joinServer();
 		pump();
 		until([&] { return engine.m_remote->ready(); }, "Reconnect did not restore the session");
-		CHECK(engine.m_remote->welcome->player == aliceId && engine.selectedHotbarSlot() == 4,
-			"Reconnect uses the same endpoint and profile");
+		CHECK(engine.m_remote->welcome->player == aliceId && engine.selectedHotbarSlot() == 4 &&
+			engine.m_remote->transport.inventory()->slots == aliceInventory,
+			"recovery restores the same actor, selected slot and authoritative inventory");
 		const auto reconnectedHud = engine.playerHudView();
 		CHECK(reconnectedHud.hotbar.available && reconnectedHud.recovery.empty() &&
 			reconnectedHud.status.empty(),
