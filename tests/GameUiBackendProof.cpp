@@ -1186,6 +1186,57 @@ struct GameUiBackendProbe
 		const auto errorsBefore = context.validationErrorCount();
 		const auto rtssBefore = context.rtssValidationErrorCount();
 		sample.setPreviewStripVisible(false);
+		// F01/F04: the launch state is a hidden workspace (--no-dev-ui), and the
+		// whole workspace can be shown, hidden and restored at runtime. The
+		// dockspace identity must survive every transition, so the central game
+		// view keeps its exact rectangle (that rectangle IS the persisted split
+		// tree: side/bottom docks included).
+		engine.setDeveloperWorkspaceVisible(false);
+		frames(2);
+		CHECK(!engine.developerUiAvailable() && !engine.developerWorkspaceVisible(),
+			"the proof starts without the developer workspace");
+		engine.setDeveloperWorkspaceVisible(true);
+		frames(3);
+		const auto dockedView = engine.gameUi->shell().gameViewRect();
+		CHECK(engine.developerUiAvailable() && dockedView.size.x > 0.f && dockedView.size.y > 0.f,
+			"showing the workspace restores the developer chrome and its input ownership");
+		for (int round = 0; round < 3; ++round)
+		{
+			engine.setDeveloperWorkspaceVisible(false);
+			present();
+			CHECK(!engine.developerUiAvailable(),
+				"hiding the workspace removes the chrome and its input ownership");
+			engine.setDeveloperWorkspaceVisible(true);
+			frames(2);
+			const auto restored = engine.gameUi->shell().gameViewRect();
+			CHECK(engine.developerUiAvailable() &&
+					std::abs(restored.pos.x - dockedView.pos.x) < 0.5f &&
+					std::abs(restored.pos.y - dockedView.pos.y) < 0.5f &&
+					std::abs(restored.size.x - dockedView.size.x) < 0.5f &&
+					std::abs(restored.size.y - dockedView.size.y) < 0.5f,
+				"the persisted docking layout is restored after every toggle");
+		}
+		// The legacy inventory keeps working in both layouts: docked/floating in
+		// the workspace, and floating over gameplay while it is hidden.
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable(),
+			"the inventory opens inside the developer workspace");
+		tap(SDLK_E);
+		present();
+		CHECK(!engine.inventoryPanelOpen(),
+			"the inventory closes again without touching the workspace layout");
+		engine.setDeveloperWorkspaceVisible(false);
+		present();
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() &&
+				!engine.developerWorkspaceVisible(),
+			"a hidden workspace still opens the legacy inventory as a floating window");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && engine.mouseCaptured,
+			"Escape closes the floating inventory and returns to the HUD");
 		engine.setShowDeveloperUi(false);
 		engine.sim->grantItems(items::ItemId::Stone, 12);
 		engine.sim->grantItems(items::ItemId::Dirt, 4);
@@ -1226,6 +1277,51 @@ struct GameUiBackendProbe
 		present();
 		CHECK(!engine.inventoryPanelOpen() && hasStoneIcon() && engine.mouseCaptured,
 			"closing inventory restores the HUD and capture");
+
+		// F06: the creative block selection is explicit and stays on screen when
+		// the optional hints (F6) are off — same band, more copy.
+		const auto hudSelectionGlyphs = [&] {
+			const auto scene = sample.m_draws.bounds();
+			const auto area = engine.gameUi->shell().gameViewRect();
+			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
+			const gameui::Clip safe{{area.pos.x - origin.x, area.pos.y - origin.y,
+				area.pos.x - origin.x + area.size.x, area.pos.y - origin.y + area.size.y}};
+			const auto layout = gameui::hudLayout(scene, safe, gameui::style::baseline(),
+				sample.playerUiScale());
+			size_t glyphs = 0;
+			for (const auto &quad : sample.m_draws.quads())
+			{
+				const glm::vec2 centre{(quad.rect.x + quad.rect.z) * 0.5f,
+					(quad.rect.y + quad.rect.w) * 0.5f};
+				glyphs += quad.layer == -2 && gameui::hit(layout.selection, centre);
+			}
+			return glyphs;
+		};
+		tap(SDLK_V);
+		present();
+		CHECK(engine.playerHudView().creative && !engine.playerHudView().creativeBlock.empty(),
+			"debug flight exposes the creative block selection");
+		if (engine.gameUi->showOverlayHints())
+		{
+			tap(SDLK_F6);
+			present();
+		}
+		const auto creativeView = engine.playerHudView();
+		CHECK(!creativeView.hints && creativeView.creative,
+			"the creative label does not depend on the optional F6 hints");
+		const auto creativeGlyphs = hudSelectionGlyphs();
+		tap(SDLK_V);
+		present();
+		CHECK(!engine.playerHudView().creative, "leaving creative restores the normal selection");
+		const auto plainGlyphs = hudSelectionGlyphs();
+		CHECK(plainGlyphs > 0 && creativeGlyphs > plainGlyphs,
+			"the creative prefix adds copy to the selection band (creative=" << creativeGlyphs
+				<< ", inventory=" << plainGlyphs << ')');
+		if (!engine.gameUi->showOverlayHints())
+		{
+			tap(SDLK_F6);
+			present();
+		}
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(engine.nativePause() && !hasStoneIcon(), "pause supersedes the gameplay HUD");

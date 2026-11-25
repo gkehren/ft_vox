@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine/PlayerUi.hpp>
+#include <Engine/UiWorkspace.hpp>
 #include <imgui/imgui.h>
 
 #include <functional>
@@ -99,8 +100,12 @@ class UiShell
 {
 public:
 	/// Create the root dockspace and run queued layout operations. Call once
-	/// per frame before any window is submitted.
-	void beginFrame();
+	/// per frame before any window is submitted. The hidden state submits the
+	/// SAME dockspace identity with ImGuiDockNodeFlags_KeepAliveOnly, so the
+	/// node tree (and imgui.ini docking) survives without rendering or input
+	/// (issue #303 F01).
+	void beginFrame(Workspace workspace = Workspace::Visible);
+	bool workspaceHidden() const { return keepDockSpaceAliveOnly(m_workspace); }
 
 	/// Main menu bar: ft_vox / World / View / Developer / Help + right-side
 	/// status strip with graceful degradation at narrow widths.
@@ -127,6 +132,10 @@ private:
 	/// Live dockspace id (recreated from the main viewport every frame;
 	/// reset/default layouts rebuild the same node id).
 	ImGuiID m_dockspaceId{0};
+
+	/// Current workspace state: pixels are only submitted when visible, but the
+	/// dockspace is submitted in both states.
+	Workspace m_workspace{Workspace::Visible};
 
 	bool m_defaultLayoutQueued{false};
 	bool m_resetLayoutQueued{false};

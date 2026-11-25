@@ -15,6 +15,7 @@
 #include <Engine/UiScale.hpp>
 #include <Engine/UiShortcuts.hpp>
 #include <Engine/UiStatus.hpp>
+#include <Engine/UiWorkspace.hpp>
 
 #include <cmath>
 #include <iostream>
@@ -128,9 +129,10 @@ static void checkStatusStrip()
 
 static void checkShortcutMetadata()
 {
-	// Every entry: non-empty display strings, unique key, and the `global`
-	// flag must agree with the InputRouting classification policy.
-	int seen[64];
+	// Every entry: non-empty display strings, a unique (key, modifiers) binding,
+	// and the `global` flag must agree with the InputRouting classification.
+	struct Binding { int keycode; SDL_Keymod mods; };
+	Binding seen[64];
 	int seenCount = 0;
 	int globalCount = 0;
 	for (const ui::ShortcutRef &s : ui::kShortcuts)
@@ -139,13 +141,13 @@ static void checkShortcutMetadata()
 		CHECK(s.action && s.action[0], "shortcut has action label");
 		bool duplicate = false;
 		for (int i = 0; i < seenCount; ++i)
-			if (seen[i] == s.keycode)
+			if (seen[i].keycode == s.keycode && seen[i].mods == s.mods)
 				duplicate = true;
-		CHECK(!duplicate, "shortcut keys are unique");
+		CHECK(!duplicate, "shortcut bindings are unique");
 		if (seenCount < 64)
-			seen[seenCount++] = s.keycode;
+			seen[seenCount++] = {s.keycode, s.mods};
 
-		const KeyRoute route = classifyKeyRoute(s.keycode);
+		const KeyRoute route = classifyKeyRoute(s.keycode, s.mods);
 		if (s.global)
 		{
 			++globalCount;
@@ -157,8 +159,9 @@ static void checkShortcutMetadata()
 		}
 	}
 
-	// The documented global set is exactly F1-F12 (F10 = VSync).
-	CHECK(globalCount == 12, "F1-F12 documented");
+	// The documented global set is F1-F12 (F10 = VSync) plus the one workspace
+	// visibility chord (issue #303 F04).
+	CHECK(globalCount == 13, "F1-F12 and the workspace chord documented");
 	for (int key : {SDLK_F1, SDLK_F2, SDLK_F3, SDLK_F4, SDLK_F5, SDLK_F6, SDLK_F7, SDLK_F8,
 					SDLK_F9, SDLK_F10, SDLK_F11, SDLK_F12,
 					SDLK_P, SDLK_C, SDLK_B, SDLK_T, SDLK_V, SDLK_X, SDLK_H,
@@ -170,8 +173,44 @@ static void checkShortcutMetadata()
 		(void)ref;
 	}
 
+	// Workspace visibility: a chord, so plain D keeps typing into text fields.
+	const auto workspaceMods = SDL_KMOD_CTRL | SDL_KMOD_SHIFT;
+	CHECK(classifyKeyRoute(SDLK_D, workspaceMods) == KeyRoute::GlobalShortcut && isWorkspaceToggle(SDLK_D, workspaceMods),
+		"Ctrl+Shift+D is a global shortcut that can hide a focused workspace");
+	CHECK(classifyKeyRoute(SDLK_D) == KeyRoute::NotGameUIShortcut &&
+			classifyKeyRoute(SDLK_D, SDL_KMOD_CTRL) == KeyRoute::NotGameUIShortcut &&
+			classifyKeyRoute(SDLK_D, SDL_KMOD_SHIFT) == KeyRoute::NotGameUIShortcut,
+		"plain D and a single modifier stay ordinary text keys");
+	const ui::ShortcutRef *workspace = ui::findShortcut(SDLK_D, workspaceMods);
+	CHECK(workspace && workspace->global && std::string(workspace->key) == "Ctrl+Shift+D" &&
+			ui::findShortcut(SDLK_D) == nullptr,
+		"the workspace toggle is documented with its chord and keeps H for layout tiles");
+	CHECK(std::string(ui::shortcutKeyName(SDLK_H)) == "H" &&
+			ui::findShortcut(SDLK_H) != nullptr,
+		"H remains the layout-tile toggle");
+
 	// Escape is special-cased by the policy and must never be table metadata.
 	CHECK(ui::findShortcut(SDLK_ESCAPE) == nullptr, "escape not listed as a shortcut");
+}
+
+static void checkWorkspace()
+{
+	using enum ui::Workspace;
+	// F01/F04: the developer workspace can be shown and hidden at runtime, and
+	// the dockspace identity is kept in both states.
+	CHECK(ui::toggled(Visible) == Hidden && ui::toggled(Hidden) == Visible,
+		"workspace visibility is reversible");
+	CHECK(ui::keepDockSpaceAliveOnly(Hidden) && !ui::keepDockSpaceAliveOnly(Visible),
+		"the hidden workspace keeps the dockspace alive instead of removing it");
+	CHECK(ui::developerUiAvailable(true, false, Visible, false) &&
+			ui::developerUiAvailable(true, false, Hidden, true),
+		"a visible workspace and a hidden workspace with the legacy inventory both take input");
+	CHECK(!ui::developerUiAvailable(true, false, Hidden, false) &&
+			!ui::developerUiAvailable(true, true, Visible, true) &&
+			!ui::developerUiAvailable(false, false, Visible, false),
+		"hidden-without-inventory, native screens and an unavailable ImGui own no developer input");
+	CHECK(ui::endsDeveloperInput(Visible, Hidden) && !ui::endsDeveloperInput(Hidden, Visible),
+		"only hiding the workspace cancels developer-owned input");
 }
 
 static void checkPlayerUi()
@@ -533,6 +572,7 @@ int main()
 	checkStatusRegion();
 	checkStatusStrip();
 	checkShortcutMetadata();
+	checkWorkspace();
 	checkPlayerUi();
 	checkLayoutTiles();
 	checkLayoutTileMenuPaths();

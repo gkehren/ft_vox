@@ -9,6 +9,10 @@
 // - F1-F12 (panel toggles, F10 = VSync) are intentional GLOBAL shortcuts:
 //   they are function keys no text field can produce, so they keep working
 //   even while ImGui captures the keyboard.
+// - Ctrl+Shift+D shows/hides the complete developer workspace (issue #303
+//   F04). It is global for the same reason: hiding the workspace has to be
+//   reachable while a developer text field owns the keyboard. The plain D key
+//   stays a normal text key.
 // - Gameplay keys (P = pause, C = mouse capture, B = chunk borders,
 //   T = creative block cycle, 1-9 = hotbar selection, Q = drop item,
 //   E = inventory panel) act on game state and MUST be suppressed while
@@ -30,8 +34,18 @@ enum class KeyRoute
 	NotGameUIShortcut  // not handled by GameUI shortcut routing
 };
 
-inline KeyRoute classifyKeyRoute(int sdlKeycode)
+/// Ctrl+Shift+D: the one chord that shows and hides the developer workspace.
+/// Plain D is untouched, so text fields keep typing normally.
+inline bool isWorkspaceToggle(int sdlKeycode, SDL_Keymod mods)
 {
+	const bool chord = (mods & SDL_KMOD_CTRL) != 0 && (mods & SDL_KMOD_SHIFT) != 0;
+	return chord && sdlKeycode == SDLK_D;
+}
+
+inline KeyRoute classifyKeyRoute(int sdlKeycode, SDL_Keymod mods = SDL_KMOD_NONE)
+{
+	if (isWorkspaceToggle(sdlKeycode, mods))
+		return KeyRoute::GlobalShortcut;
 	switch (sdlKeycode)
 	{
 	case SDLK_F1:

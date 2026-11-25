@@ -2,6 +2,7 @@
 #include <Engine/EngineMultiplayer.hpp>
 #include <Engine/GameUiSample.hpp>
 #include <Engine/InputRouting.hpp>
+#include <Engine/UiWorkspace.hpp>
 
 #include <iostream>
 #include <string>
@@ -66,10 +67,23 @@ bool Engine::suppressDeveloperUi() const
 	return m_playerUi && !m_uiSpike && m_playerUi->screens().suppressDeveloper();
 }
 
+bool Engine::developerUiPresent() const
+{
+	// Inspection view, --ui-spike proof and the native player screens remove the
+	// developer layer entirely; hiding the workspace does not (issue #303 F01).
+	const bool nativeSuppressed = m_inspectionView || m_uiSpike || suppressDeveloperUi();
+	return ui::developerUiPresent(imgui != nullptr, nativeSuppressed);
+}
+
 bool Engine::developerUiAvailable() const
 {
-	return imgui && !m_inspectionView && !m_uiSpike && !suppressDeveloperUi() &&
-		(m_showDeveloperUi || m_inventoryPanelOpen);
+	// Input ownership rule (issue #303 F01/F04): while the workspace is hidden
+	// only the legacy inventory is an interactive developer surface; every other
+	// pointer or keyboard event belongs to gameplay or the native Game UI.
+	const bool nativeSuppressed = m_inspectionView || m_uiSpike || suppressDeveloperUi();
+	return ui::developerUiAvailable(imgui != nullptr, nativeSuppressed,
+		m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
+		m_inventoryPanelOpen);
 }
 
 gameui::InputContext Engine::inputContext() const
@@ -105,6 +119,25 @@ void Engine::setInventoryOpen(bool open)
 	m_inventoryPanelOpen = open;
 	if (!open && gameUi)
 		gameUi->resetInventoryInteraction();
+	syncUiInput();
+}
+
+void Engine::setDeveloperWorkspaceVisible(bool visible)
+{
+	if (m_showDeveloperUi == visible)
+		return;
+	if (ui::endsDeveloperInput(m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
+			visible ? ui::Workspace::Visible : ui::Workspace::Hidden))
+	{
+		// Developer-owned input dies with the workspace: no focused text field, no
+		// in-flight pointer press, no open resource-pack browser and no inventory
+		// drag cursor left behind (F04). The inventory itself stays open and
+		// floats, so closing it is still possible with the workspace hidden (F01).
+		cancelDeveloperInput();
+		if (gameUi)
+			gameUi->cancelDeveloperDialogs();
+	}
+	m_showDeveloperUi = visible;
 	syncUiInput();
 }
 
@@ -211,7 +244,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		const auto key = event.key.key;
 		const bool back = key == SDLK_ESCAPE || (key == SDLK_P && !m_remote && m_playerUi &&
 			m_playerUi->screens().top() == gameui::Screen::Pause);
-		const bool global = classifyKeyRoute(static_cast<int>(key)) == KeyRoute::GlobalShortcut;
+		const bool global = classifyKeyRoute(static_cast<int>(key), event.key.mod) == KeyRoute::GlobalShortcut;
 		const bool closeInventory = key == SDLK_E && policy.inventory;
 		if (back && m_playerUi && !policy.devText && developerUiAvailable())
 			policy.devKeyboard = imgui->ownsActiveInput();

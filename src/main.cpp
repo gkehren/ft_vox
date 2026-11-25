@@ -38,7 +38,7 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --ui-spike                  Run the standalone Game UI prototype over a solo scene\n"
 			  << "  --game-ui                   Show the Game UI sample alongside the existing interface\n"
-			  << "  --no-dev-ui                 Start without the developer workspace (F5 opens it)\n"
+			  << "  --no-dev-ui                 Start without the developer workspace (F5 / Ctrl+Shift+D opens it)\n"
 			  << "  --no-hud                    Start with the player HUD hidden\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"

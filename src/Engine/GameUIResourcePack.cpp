@@ -10,6 +10,19 @@
 namespace
 {
 	constexpr const char *kResourcePackDlgKey = "ChooseResourcePackZip";
+}
+
+void GameUI::cancelDeveloperDialogs()
+{
+	// The browser is a developer-owned modal surface: hiding the workspace must
+	// not leave it open but invisible, still holding developer input state
+	// (issue #303 F04).
+	if (ImGuiFileDialog::Instance()->IsOpened())
+		ImGuiFileDialog::Instance()->Close();
+}
+
+namespace
+{
 
 	void tryApply(GameUIFrame &frame, ResourcePackUiState &state, const char *path)
 	{

@@ -258,7 +258,7 @@ void GameUI::draw(GameUIFrame &frame)
 		[this]() { leaveLayoutTilesHidden(); },
 		m_layoutTilesHidden};
 
-	m_shell.beginFrame();
+	m_shell.beginFrame(ui::Workspace::Visible);
 	m_shell.drawMainMenuBar(frame, toggles);
 
 	// The GameUI-owned windows below have no internal visibility guard; every
@@ -296,6 +296,17 @@ void GameUI::draw(GameUIFrame &frame)
 
 	// File dialog can outlive the Graphics panel; always process while open.
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
+}
+
+void GameUI::drawWithoutWorkspace(GameUIFrame &frame)
+{
+	// Hidden developer workspace (issue #303 F01). The dockspace is submitted in
+	// its KeepAliveOnly maintenance mode, so the persisted dock node tree and
+	// every window association survive; no chrome, no panel and no pointer input
+	// is produced. The legacy inventory stays available until #304 and floats
+	// over gameplay (see drawInventoryPanel), so E / Escape keep working.
+	m_shell.beginFrame(ui::Workspace::Hidden);
+	drawInventoryPanel(frame);
 }
 
 void GameUI::drawStatusOverlay(GameUIFrame &frame)

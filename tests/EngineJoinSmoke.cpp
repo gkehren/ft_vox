@@ -536,11 +536,28 @@ struct EngineJoinProbe
 	{
 		frame().connectServer({endpoint, profile, seed});
 		pump();
+		// Readiness transition (issue #303 F07): until the session is confirmed the
+		// HUD shows pending synchronization and neither a bar nor a reticle, so no
+		// stale or invented inventory is ever presented. One check per join keeps
+		// the assertion count independent of how many frames the join takes.
+		bool sampled = false, pendingOk = true;
 		until([&] {
-			return !engine.switchingSession() && engine.m_remote &&
-				engine.m_remote->endpoint == endpoint && engine.m_remote->namedProfile == profile &&
-				engine.m_remote->ready();
+			const bool joined = !engine.switchingSession() && engine.m_remote &&
+				engine.m_remote->endpoint == endpoint && engine.m_remote->namedProfile == profile;
+			const bool ready = joined && engine.m_remote->ready();
+			if (joined && !ready && !sampled)
+			{
+				const auto hud = engine.playerHudView();
+				pendingOk = !hud.hotbar.available && !hud.aim && !hud.status.empty();
+				sampled = true;
+			}
+			return ready;
 		}, "remote projection did not become ready");
+		CHECK(pendingOk,
+			"an unready remote session presents synchronization instead of an inventory");
+		const auto readyHud = engine.playerHudView();
+		CHECK(readyHud.hotbar.available && readyHud.status.empty(),
+			"the ready session presents the confirmed inventory and drops the session copy");
 	}
 
 	void checkRetiredProjection()
@@ -556,6 +573,8 @@ struct EngineJoinProbe
 		const auto hud = engine.playerHudView();
 		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
 			"leaving or switching replaces the old HUD with session feedback");
+		CHECK(!hud.recovery.empty() || hud.statusKind == gameui::style::Status::Pending,
+			"a session that ended keeps an actionable recovery line on the HUD");
 	}
 
 	void run(const char *first, const char *second)

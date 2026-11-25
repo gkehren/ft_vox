@@ -128,11 +128,31 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
     const float slotSize = ui::scaled(44.0f, scale);
     const float spacing = ui::scaled(4.0f, scale);
 
+    // Docking across the workspace toggle (issue #303 F01). A window docked into
+    // a KeepAliveOnly dockspace is not displayed, so the inventory has to float
+    // while the workspace is hidden; the node it belonged to is remembered and
+    // re-applied ONCE when the workspace returns, after which the player keeps
+    // free docking. Nothing about the hidden state is written to imgui.ini.
+    const bool workspaceHidden = m_shell.workspaceHidden();
+    if (workspaceHidden)
+    {
+        if (m_inventoryDockId == 0)
+            m_inventoryDockId = m_inventoryLastDockId;
+        ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
+    }
+    else if (m_inventoryDockId != 0)
+    {
+        ImGui::SetNextWindowDockID(m_inventoryDockId, ImGuiCond_Always);
+        m_inventoryDockId = 0;
+    }
+
     ImGui::SetNextWindowSize(ImVec2(inventoryui::panelWidth(slotSize, spacing) + ui::scaled(24.0f, scale),
                                     inventoryui::panelHeight(slotSize, spacing) + ui::scaled(96.0f, scale)),
                              ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Inventory", &open, ImGuiWindowFlags_AlwaysAutoResize))
     {
+        if (!workspaceHidden)
+            m_inventoryLastDockId = ImGui::GetWindowDockID();
         ImGui::TextDisabled("Left-click: move/swap · Right-click: split half · Esc/close: cancel drag");
         ImGui::TextDisabled("A half-drop onto a nearly-full slot moves only what fits; the rest stays.");
         ImGui::Separator();

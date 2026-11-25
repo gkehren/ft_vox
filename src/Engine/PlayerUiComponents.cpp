@@ -1,5 +1,7 @@
 #include <Engine/PlayerUiComponents.hpp>
 
+#include <array>
+#include <cmath>
 #include <cstdio>
 
 namespace gameui
@@ -332,6 +334,41 @@ void Surface::fittedLabel(Clip rect, std::string_view text, style::TextRole role
 		m_font.paint(m_out, {x + advance, centeredLineTop(rect, role, m_scale)}, "...", color, roleScale,
 			m_clip, rect);
 	}
+}
+
+float Surface::wrappedLineHeight(style::TextRole role) const
+{
+	return (style::lineHeight(role) + m_theme.space.xxs) * m_scale;
+}
+
+int Surface::wrappedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
+						  int maxLines) const
+{
+	const float line = style::lineHeight(role) * m_scale;
+	const int capacity = std::min({maxLines, int(kMaxWrappedLines),
+		int(std::floor(size(rect).y / std::max(line, 0.001f)))});
+	if (text.empty() || capacity <= 0 || size(rect).x <= 0.f)
+		return 0;
+	std::array<WrappedLine, kMaxWrappedLines> lines{};
+	const auto span = std::span<WrappedLine>(lines.data(), size_t(capacity));
+	const int count = wrapText(m_font, text, role, m_scale * m_fontScale, size(rect).x, span);
+	const float roleScale = glyphScale(role);
+	const float pitch = wrappedLineHeight(role);
+	// Each line is clipped to its own band: the glyph painter never needs a
+	// second pass to keep a long word inside the block.
+	for (int index = 0; index < count; ++index)
+	{
+		const auto &wrapped = lines[size_t(index)];
+		const Clip band = {{rect.rect.x, rect.rect.y + float(index) * pitch, rect.rect.z,
+			std::min(rect.rect.w, rect.rect.y + float(index) * pitch + line)}};
+		const glm::vec2 origin{band.rect.x, centeredLineTop(band, role, m_scale)};
+		m_font.paint(m_out, origin, text.substr(wrapped.begin, wrapped.end - wrapped.begin), color,
+			roleScale, m_clip, band);
+		if (wrapped.elided)
+			m_font.paint(m_out, {origin.x + m_font.measure(text.substr(wrapped.begin,
+				wrapped.end - wrapped.begin), roleScale), origin.y}, "...", color, roleScale, m_clip, band);
+	}
+	return count;
 }
 
 void Surface::backdrop(Clip bounds, glm::vec4 color) const

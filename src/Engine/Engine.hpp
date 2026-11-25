@@ -52,7 +52,14 @@ public:
 	void run();
 	void enableGameUi(bool standalone = false, bool previewStrip = true);
 	void enableUiSpike() { enableGameUi(true); }
+	/// Start-with / restore the developer workspace (`--no-dev-ui`). Runtime
+	/// changes go through setDeveloperWorkspaceVisible so developer-owned input
+	/// is cancelled and the dockspace identity survives (issue #303 F01/F04).
 	void setShowDeveloperUi(bool visible) { m_showDeveloperUi = visible; }
+	/// Show or hide the complete developer workspace at runtime without losing
+	/// the persisted docking layout or restarting the application.
+	void setDeveloperWorkspaceVisible(bool visible);
+	bool developerWorkspaceVisible() const { return m_showDeveloperUi; }
 	void setShowPlayerHud(bool visible) { m_showPlayerHud = visible; }
 	void initializeNoiseGenerator(int seed);
 	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
@@ -251,6 +258,12 @@ private:
 	void clearGameplayInput();
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
+	/// ImGui is allowed to build a frame (no native screen, no spike, no
+	/// inspection/benchmark view). The workspace being hidden does not disable
+	/// it: the dockspace is maintained with KeepAliveOnly (issue #303 F01).
+	bool developerUiPresent() const;
+	/// Developer surfaces may own pointer/keyboard input: present AND either the
+	/// workspace or the legacy inventory is on screen.
 	bool developerUiAvailable() const;
 	gameui::HudView playerHudView() const;
 	gameui::InputContext inputContext() const;

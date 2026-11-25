@@ -1,5 +1,6 @@
 #include <Engine/PlayerUiText.hpp>
 #include <Engine/PlayerUiWidgets.hpp>
+#include <Engine/UiWorkspace.hpp>
 
 #include <cmath>
 
@@ -79,9 +80,65 @@ void routing()
 		"focus regain reconciles an omitted release and quarantines held input");
 }
 
-void screens()
+// Workspace visibility and input ownership (issue #303 F01/F04).
+void workspaceVisibility()
 {
-	ScreenStack stack;
+	using enum ui::Workspace;
+	CHECK(ui::toggled(Visible) == Hidden && ui::toggled(Hidden) == Visible,
+		"the workspace toggle is reversible without restarting the application");
+	CHECK(ui::keepDockSpaceAliveOnly(Hidden) && !ui::keepDockSpaceAliveOnly(Visible),
+		"only the hidden workspace uses the dockspace maintenance path: the identity never changes");
+
+	// Hidden workspace, inventory closed: no developer surface owns input, so
+	// gameplay keeps the pointer, the keyboard and movement.
+	const bool hidden = ui::developerUiAvailable(true, false, Hidden, false);
+	CHECK(!hidden, "a hidden workspace without the inventory is not an input surface");
+	const InputContext gameplay{.devKeyboard = hidden, .devPointer = hidden};
+	CHECK(gameplay.choose(Key) == Gameplay && gameplay.choose(Pointer) == Gameplay &&
+		gameplay.allowsMovement(), "hidden workspace leaves gameplay fully in charge");
+
+	// Hidden workspace, inventory open: the legacy inventory stays interactive
+	// (its Escape path belongs to the player screen, not to gameplay).
+	const bool withInventory = ui::developerUiAvailable(true, false, Hidden, true);
+	CHECK(withInventory, "the legacy inventory remains a developer surface while hidden");
+	const InputContext inventory{.inventory = true, .devKeyboard = withInventory,
+		.devPointer = withInventory};
+	CHECK(inventory.choose(Key, false, true) == PlayerUi &&
+		inventory.choose(Key) == DeveloperUi && !inventory.allowsMovement(),
+		"a docked-then-hidden inventory keeps Escape and its widgets");
+
+	// Visible workspace: developer widgets own input; explicit globals bypass the
+	// text field and still reach the host (the panel shortcuts restore it).
+	const bool shown = ui::developerUiAvailable(true, false, Visible, false);
+	CHECK(shown && ui::developerUiAvailable(true, false, Visible, true),
+		"a visible workspace owns developer input with or without the inventory");
+	const InputContext developer{.devKeyboard = shown, .devPointer = shown};
+	CHECK(developer.choose(Key) == DeveloperUi && developer.choose(Key, true) == Global &&
+		!developer.allowsMovement(),
+		"the workspace owns keys, while explicit globals still reach the host");
+
+	// A native player screen (pause menu, loading, exit confirmation) outranks
+	// visibility: it removes the developer layer entirely.
+	CHECK(!ui::developerUiAvailable(true, true, Visible, true),
+		"a native player screen removes developer input even with the workspace visible");
+	CHECK(ui::developerUiPresent(true, false) && !ui::developerUiPresent(true, true),
+		"hiding the workspace keeps the ImGui frame, a native screen does not");
+
+	// Hiding ends developer-owned input: a held developer key is quarantined and
+	// still has to be released, so nothing leaks back into the hidden state.
+	CHECK(ui::endsDeveloperInput(Visible, Hidden) && !ui::endsDeveloperInput(Hidden, Visible) &&
+		!ui::endsDeveloperInput(Visible, Visible),
+		"only hiding the workspace ends developer input");
+	InputRouter router;
+	CHECK(router.key(7, true, false, DeveloperUi) == DeveloperUi, "a developer key is held");
+	router.cancelDeveloper();
+	CHECK(router.key(7, true, true, DeveloperUi) == Blocked &&
+		router.key(7, false, false, DeveloperUi) == Blocked,
+		"hiding the workspace cancels the press and swallows its orphan release");
+}
+
+void screens()
+{	ScreenStack stack;
 	CHECK(stack.top() == Screen::Hud && !stack.back() && !stack.blocksGameplay(), "HUD is passive root");
 	CHECK(stack.push(Screen::Inventory) && !stack.pausesWorld(false) && stack.back(),
 		"inventory is dismissible and does not pause solo");
@@ -505,6 +562,7 @@ int main()
 {
 	routing();
 	pointerGestures();
+	workspaceVisibility();
 	screens();
 	layoutAndWidgets();
 	reusableBindings();

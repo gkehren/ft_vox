@@ -982,7 +982,16 @@ void Engine::handleEvents()
 			if (event.key.repeat)
 				break;
 			const SDL_Keycode key = event.key.key;
-			const KeyRoute keyRoute = classifyKeyRoute(static_cast<int>(key));
+			// Workspace visibility (issue #303 F04). GLOBAL by policy, so it also
+			// fires while a developer text field owns the keyboard; the whole
+			// workspace goes away, the legacy inventory keeps floating and the
+			// dockspace identity survives (F01).
+			if (isWorkspaceToggle(static_cast<int>(key), event.key.mod))
+			{
+				setDeveloperWorkspaceVisible(!m_showDeveloperUi);
+				break;
+			}
+			const KeyRoute keyRoute = classifyKeyRoute(static_cast<int>(key), event.key.mod);
 
 			// Input routing policy (issue #76): F-key panel/VSync shortcuts
 			// are intentional globals (non-text keys); gameplay keys must
@@ -994,7 +1003,7 @@ void Engine::handleEvents()
 				// An explicit tool shortcut also brings back the workspace
 				// when the game was launched without the developer shell.
 				if (key != SDLK_F6 && key != SDLK_F10 && !m_benchmark.isActive())
-					m_showDeveloperUi = true;
+					setDeveloperWorkspaceVisible(true);
 				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), shortcutFrame))
 					break;
 			}
@@ -1570,7 +1579,12 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	if (!gameUi || !developerUiAvailable())
+	// The developer workspace can be hidden at runtime, but ImGui still runs:
+	// the legacy inventory may be open, and the dockspace is submitted with
+	// KeepAliveOnly so the persisted docking layout survives the hidden frames
+	// (issue #303 F01). Only a native player screen or an inspection/benchmark
+	// view removes the developer layer entirely.
+	if (!gameUi || !developerUiPresent())
 		return;
 
 	const bool prevCapture = mouseCaptured;
@@ -1749,6 +1763,9 @@ void Engine::drawUi()
 		f.setUiScale = [this](float scale) { imgui->requestUiScale(scale); };
 	}
 	f.requestExit = [this]() { requestExit(); };
+	// Runtime workspace visibility (issue #303 F04): the same action the
+	// Ctrl+Shift+D shortcut performs, reachable from the Developer menu.
+	f.toggleDeveloperWorkspace = [this]() { setDeveloperWorkspaceVisible(!m_showDeveloperUi); };
 	f.resourcePackRoot = &m_resourcePackRoot;
 	f.applyResourcePack = [this](const std::string &path) -> GameUIFrame::ResourcePackUiResult {
 		const ResourcePackApplyResult r = applyResourcePack(path);
@@ -1776,7 +1793,7 @@ void Engine::drawUi()
 	if (m_showDeveloperUi)
 		gameUi->draw(f);
 	else
-		gameUi->drawInventoryPanel(f);
+		gameUi->drawWithoutWorkspace(f);
 
 	if (presentedPause != prevPause)
 	{
@@ -1888,11 +1905,12 @@ gameui::HudView Engine::playerHudView() const
 	using gameui::style::Status;
 	gameui::HudView view;
 	view.captured = mouseCaptured && windowFocused && !m_captureFailed;
-	view.hints = gameUi->showOverlayHints();
+	view.hints = gameUi ? gameUi->showOverlayHints() : true;
 	if (switchingSession())
 	{
 		view.status = "Switching worlds";
 		view.statusKind = Status::Pending;
+		view.activity = "The previous session is closing and the next one is loading.";
 		return view;
 	}
 
@@ -1901,35 +1919,37 @@ gameui::HudView Engine::playerHudView() const
 	{
 		const auto now = RemoteSession::Clock::now();
 		const auto connection = m_remote->connectionStatus(now);
+		// Transport status -> HUD session row (issue #303 F07): the copy, the bar
+		// and the reticle are one decision, unit-tested in
+		// tests/test_game_ui_components (hudSession).
 		using enum ui::MultiplayerState;
+		gameui::HudSessionState hudState = gameui::HudSessionState::Pending;
 		switch (connection.state)
 		{
-		case Connected: break;
-		case Degraded:
-			view.status = connection.label;
-			view.statusKind = Status::Warning;
-			break;
+		case Connected: hudState = gameui::HudSessionState::Connected; break;
+		case Degraded: hudState = gameui::HudSessionState::Degraded; break;
 		case Connecting:
 		case SyncingTerrain:
 		case Resyncing:
-		case Leaving:
-			view.status = connection.label;
-			view.statusKind = Status::Pending;
-			break;
+		case Leaving: hudState = gameui::HudSessionState::Pending; break;
 		case Disconnected:
 		case TimedOut:
-		case Rejected:
-			view.status = connection.label;
-			view.statusKind = Status::Error;
-			view.activity = connection.detail ? connection.detail : "Open Multiplayer to reconnect";
-			break;
+		case Rejected: hudState = gameui::HudSessionState::Blocked; break;
 		}
-		if ((connection.state == Connected || connection.state == Degraded) && m_remote->ready())
+		const bool synchronized = m_remote->ready();
+		const auto session = gameui::hudSession(hudState, synchronized, connection.label,
+			connection.detail ? connection.detail : std::string_view{});
+		view.status = session.status;
+		view.statusKind = session.kind;
+		view.activity = session.activity;
+		view.recovery = session.recovery;
+		if (session.showHotbar && synchronized)
 		{
 			if (const auto snapshot = m_remote->transport.inventory())
 				view.hotbar = gameui::makeHudHotbar(snapshot->slots, snapshot->selected, m_atlasVersion,
 					m_remote->actionPending);
-			canAim = view.hotbar.available;
+			canAim = view.hotbar.available && session.allowAim;
+			// Pending action feedback survives a degraded-but-playable session.
 			if (const char *action = m_remote->actionStatus(now))
 				view.activity = action;
 		}
@@ -1945,6 +1965,8 @@ gameui::HudView Engine::playerHudView() const
 		{
 			view.status = "Waiting for terrain";
 			view.statusKind = Status::Pending;
+			view.activity = "The surrounding chunks are still being generated.";
+			view.recovery = "The hotbar returns as soon as the world is ready.";
 		}
 		view.creative = player.flight;
 		if (view.creative && size_t(player.selectedBlock) < textureTypeString.size())

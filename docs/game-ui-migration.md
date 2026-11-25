@@ -4,9 +4,43 @@ Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. 
 
 ## Live player HUD (#303)
 
-Normal solo and remote launches now use the native Game UI hotbar. It draws the nine shared slots from the solo simulation snapshot or the connected client's confirmed private inventory. The selected stack name and quantity follow that snapshot. Pending remote actions mark the confirmed slot and show feedback until the server responds. Joining, leaving, resync and disconnect replace the hotbar with session status until a synchronized snapshot is available. The HUD reads the current atlas generation each frame, so reloads and session changes rebuild the icons from the current data.
+Normal solo and remote launches now use the native Game UI hotbar. It draws the nine shared slots from the solo simulation snapshot or the connected client's confirmed private inventory. The selected stack name and quantity follow that snapshot. Pending remote actions mark the confirmed slot and show feedback until the server responds. The HUD reads the current atlas generation each frame, so reloads and session changes rebuild the icons from the current data.
 
-The world camera still projects across the full window. The reticle marks that projection's center in perspective play with captured input. With developer docks open, the HUD anchors its hotbar and status inside the central dock's unobstructed rectangle. The reticle keeps the world aim point and disappears if that point is covered by a dock or the space is too tight. A compact dock can shrink the HUD below the chosen player scale to fit all nine slots and omit the optional hint line to leave room for the reticle. The developer layer draws over Game UI. Pause, inventory, and open developer popups or dialogs suppress the gameplay HUD.
+### Reticle priority (#303 F02)
+
+The world camera projects across the full window, and the reticle is the exact centre of that projection — never the centre of the docked area, so an asymmetric developer dock cannot move the aim point. Geometry and content are separate: `hudLayout` computes every band, then `resolveHud` decides what is painted. An empty band reserves nothing, so an unoccupied status or activity band can never hide the reticle, and an occupied one yields to it. The mandatory hotbar (and a dock covering the aim point) is the only thing allowed to suppress the reticle. Gameplay that does not permit aiming removes it as well: free cursor, pause, inventory, a blocked session, or a non-perspective camera.
+
+The policy is unit-tested headlessly (`tests/test_game_ui_components.cpp`, `liveHud`) at 100%, 150% and 200% over five layouts, including the asymmetric 2560×1080 case where the aim point stays at 1280,540.
+
+### Session feedback (#303 F03/F07)
+
+Every piece of HUD copy sits on one contrast plate built from the `hudScrim` token, so status text stays readable over midday sky and dark caves. Copy has three bounded parts: a one-line headline, a detail wrapped to at most two body lines (`wrapText` → `Surface::wrappedLabel`, elided at the end) and a separate recovery instruction. The detail shrinks to one line before the recovery line is dropped, and the block never reaches the hint band or the hotbar. Detailed packet and motion telemetry stays in the developer workspace; the HUD only carries what a player can act on.
+
+`hudSession` is the one session policy (`src/Engine/PlayerHud.cpp`), mapped by Engine from the transport status and readiness:
+
+| Session state | HUD behavior |
+| --- | --- |
+| Connected and ready | Normal HUD: hotbar, selection, reticle, hints. |
+| Degraded and ready | Normal HUD plus one warning headline/detail line. Pending action feedback is preserved. |
+| Degraded (or connected) and not ready | Synchronization headline, detail and recovery line; no hotbar, no reticle. |
+| Resyncing / joining / connecting / leaving | Pending headline; no inventory at all, so nothing stale is shown. |
+| Disconnected, rejected, timed out | Error headline, the transport detail and a recovery instruction (`Reconnect: Esc, Multiplayer, Reconnect.`), without the developer workspace. |
+
+### Workspace visibility (#303 F01/F04)
+
+`Ctrl+Shift+D` (Developer ▸ **Hide developer workspace**) shows and hides the complete developer workspace at runtime. `H` keeps toggling the layout tiles, and the existing developer panel shortcuts still bring the workspace back. Hiding is not "close every panel": the dockspace is still submitted, with `ImGuiDockNodeFlags_KeepAliveOnly` and the same dockspace identity (`UiShell::beginFrame(Workspace)`), so the dock node tree, the split sizes and `imgui.ini` associations survive. Hidden surfaces neither paint nor claim pointer input; gameplay keeps the cursor and the keyboard.
+
+A legacy inventory that was docked keeps working in that mode: while the workspace is hidden, `GameUI::drawInventoryPanel` forces the panel to float (a window docked into a KeepAliveOnly node is not displayed) and remembers its dock node. The node is re-applied once when the workspace returns, after which the player keeps free docking. The queued reset/default layout still runs while the workspace is hidden, so a first launch with `--no-dev-ui` still materializes the default developer layout before it is ever shown.
+
+### Creative selection (#303 F06)
+
+Debug flight names its block selection explicitly (`Creative: Stone`) on the selection band. The prefix is independent of the optional F6 hints, and leaving flight restores the authoritative inventory label. The label is bounded and elided by the same text metric as every other HUD string.
+
+### Showcase coexistence (#303 F05)
+
+The opt-in `--game-ui` showcase strip is a demonstration widget and now yields to session copy: while the HUD has a status headline, detail or recovery line, the strip is not painted and its controls receive no pointer input (`hitsStrip` is empty for the frame). Connection errors and pending actions therefore never share the band above the HUD with a demo widget. The standalone `--ui-spike` proof is unchanged.
+
+### Controls
 
 | Control | Behavior |
 | --- | --- |
@@ -16,6 +50,7 @@ The world camera still projects across the full window. The reticle marks that p
 | `C` / `F6` | Release or capture the mouse. Toggle the optional HUD hints with F6. |
 | Game menu → Hide HUD / Show HUD | Change HUD visibility for the current run. Start hidden with `--no-hud`. |
 | `--no-dev-ui` / `F5` | Start with a full-window HUD and open the developer workspace on demand. Other developer panel shortcuts can also open it. The existing `E` inventory works in either layout. |
+| `Ctrl+Shift+D` | Show or hide the complete developer workspace without losing the docking layout. `H` stays the layout-tile toggle. |
 | `F1` | Cycle the developer diagnostics overlay through Off, Minimal and Detailed. It starts Off. |
 
 `--view`, command-line streaming benchmarks, and active in-game benchmarks exclude the player UI from composition. The existing offscreen scene goldens continue to render with UI excluded. `--game-ui` still opens the opt-in widget strip and HUD mock for design-system work. The default developer workspace and Join/Host workflows remain available. The legacy ImGui inventory panel and its command callbacks are the handoff to #304. This slice retires the ImGui hotbar, hint window and always-on multiplayer banner and dot.
@@ -40,6 +75,27 @@ Run the opt-in hardware proof from the game's output directory to exercise live 
 
 ### Verification and frame cost
 
+#### Correction pass (F01–F07), executed
+
+Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, Vulkan 1.3.290 loader with standard validation layers, SDL 3.4.18, seed 42, Low quality. Every row below was executed on that machine, not inferred from the original slice:
+
+| Check | Result |
+| --- | --- |
+| `ctest --test-dir build-cpu302 -C Release` (`FT_VOX_GRAPHICS=OFF`) | 53/53 passed, including `CoreIncludeGuard`, `GpuWorkflowTrustGuard`, `HeadlessDeps`, `HeadlessRunner`, `HeadlessMultiplayer` and all nine `multiplayer` tests |
+| `ctest --test-dir build-g302 -C Release` (graphical) | 75/75 passed: `VisualRegression` (committed goldens, offscreen), `PostResizeFormats`, `EngineReload` (32 checks, real Vulkan lifecycle), `UiShell`, `GameUiComponents` (4977 checks), `GameUiInteraction`, `InputRouting`, `GameUiStyle`, `GameUiDrawList` |
+| `test_engine_reload.exe --player-hud-proof` | 31 checks passed. Adds: launch with a hidden workspace; three show/hide cycles whose central dock rectangle is identical before and after (the persisted layout survives); the legacy inventory opening and closing inside the workspace and floating while it is hidden; 960×540 at 200% with a live hotbar; creative flight with F6 hints off, where the creative prefix adds copy to the same selection band; atlas replacement and world epoch reset. Validation: 14 errors, all matching the known RTSS set (`errors == known`) |
+| `tests/test_multiplayer_join_native.py` (two loopback servers, graphical client) | 39 checks passed (30 before this pass, plus one readiness and one recovery check per join). Adds the readiness transition on a real transport: an unready remote session presents synchronization with no hotbar and no reticle, the ready session presents the confirmed inventory and drops the session copy, and a session that ended keeps a recovery line |
+| `test_engine_reload.exe --game-ui-showcase-proof` | 40 checks passed: the opt-in showcase strip still draws, focuses and activates |
+| `test_engine_reload.exe --ui-spike-smoke` | 10 checks passed: the standalone `--ui-spike` behavior is unchanged |
+
+The focused headless suites that carry the new policies ran in both builds: `GameUiComponents` (content-aware reticle collisions at 100/150/200% over five layouts, bounded multiline wrap, the `hudSession` table, the creative label, the strip-yield rule), `GameUiInteraction` (workspace visibility transitions and input ownership), `UiShell` (shortcut metadata with the `Ctrl+Shift+D` chord, workspace policy) and `InputRouting`.
+
+#### Not executed in this correction pass
+
+Linux (GCC/Clang), macOS/MoltenVK, UNORM swapchain output and physical cross-monitor DPI transitions were not run. The per-frame screenshot capture of multiplayer feedback over bright terrain and sky was not produced physically: the copy, the `hudScrim` plate contrast and the showcase-strip yield rule are covered by the headless checks, and the transport transitions by the native join smoke. The proof's docked-inventory case floats the panel (the player had no docked inventory in the fresh scripted session); the one-shot re-dock path is covered by the workspace policy checks and exercised by the show/hide cycles that must preserve the layout.
+
+#### Original slice, executed before this pass
+
 - Windows Release passed all 53 graphics-off CTests, including the headless dependency and core include guards and all nine tests labeled `multiplayer`. The graphical build passed `UiShell` and `VisualRegression` with the committed goldens.
 - The live HUD and native showcase proofs passed on the RTX 4070 Ti. The live HUD proof's seven validation messages matched the known swapchain/image-view diagnostics in the test interval. [Vulkan validation guide](vulkan-validation.md)
 - The native Join smoke passed 30 checks, including confirmed selection while an action is pending, endpoint/profile switch, disconnect and reconnect. The native hosted closure ran two graphical clients through mining, pickup, separate hotbars, server stop and checkpoint restart. The HUD's selection and counts matched each client's private inventory before and after restart. The CPU multiplayer restart test covered remote place and drop.
@@ -52,7 +108,7 @@ Run the opt-in hardware proof from the game's output directory to exercise live 
 | HUD B | 0.571 / 1.338 | 0.608 / 0.621 | 0.0047 / 0.0080 | 0.0031 / 0.0041 |
 | Baseline B | 0.576 / 1.354 | 0.607 / 0.624 | — | — |
 
-The measured HUD used one draw, 936 vertices, four preallocated descriptor sets, 212,992 bytes of instance buffers and 32,768 bytes of font coverage. This sRGB path required zero composition-image bytes. Physical HUD runs used Windows. Linux, macOS/MoltenVK and physical cross-monitor DPI transitions remain unverified for #303.
+The measured HUD used one draw, 936 vertices, four preallocated descriptor sets, 212,992 bytes of instance buffers and 32,768 bytes of font coverage. This sRGB path required zero composition-image bytes. Physical HUD runs used Windows. Linux, macOS/MoltenVK and physical cross-monitor DPI transitions remain unverified for #303. The correction pass did not change the draw path: one instanced HUD draw, the same preallocated descriptor sets, no intermediate composition image and no per-frame descriptor allocation.
 
 ## Surface inventory
 
@@ -82,6 +138,7 @@ Phase A leaves every legacy binding in normal launch. The following destinations
 | F1 | Becomes global Dev UI toggle in #308. Status density remains available from View → Status overlay. |
 | F2/F3/F4, F7/F8/F9, F11/F12 | Keep Graphics, Streaming, World, Performance, Overview, Chunk Inspector, Memory and Render Debug within Dev UI. Their shortcuts apply with Dev UI enabled. |
 | F5/F6 | F5 opens Controls. F6 toggles gameplay hints. Keep them discoverable from Game UI and in the Dev UI menu where appropriate. |
+| `Ctrl+Shift+D` | Shows/hides the complete developer workspace at runtime (issue #303 F04). Global, so it works while a developer text field owns the keyboard; the dockspace stays alive, `H` keeps the layout-tile toggle. |
 | F10 | Retain intentional global VSync toggle using the same deferred setting action. Modal ownership can veto disruptive view changes. |
 
 ## Frame hooks and staged rollout

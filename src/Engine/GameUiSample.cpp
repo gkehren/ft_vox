@@ -293,7 +293,19 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 		else
 			paintScreen(pointer);
 	}
-	else if (layout.scale > 0.f && (m_standalone || (m_previewStrip && m_screens.top() == gameui::Screen::Hud)))
+	// The optional showcase strip yields to session feedback (issue #303 F05):
+	// connection errors and pending actions own the band above the HUD, and a
+	// strip that is not painted must not accept pointer input either — `m_button`
+	// stays empty for the frame, so hitsStrip() and the click path are inert.
+	const bool sessionFeedback = hud && gameui::hudHasSessionFeedback(*hud);
+	const bool showStrip = layout.scale > 0.f && (m_standalone ||
+		(m_previewStrip && !sessionFeedback && m_screens.top() == gameui::Screen::Hud));
+	if (!showStrip && !m_standalone)
+	{
+		m_armed = false;
+		m_buttonFocused = false;
+	}
+	if (showStrip)
 	{
 		m_button = layout.button();
 		if (priorButton != m_button)
@@ -358,7 +370,7 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 		{
 			const gameui::Surface paint(m_draws, font(), gameui::style::baseline(), hudGeometry.scale,
 				hudGeometry.view, m_atlasLayers, m_fontScale);
-			gameui::paintHud(paint, hudGeometry, scene, *hud);
+			gameui::paintHud(paint, hudGeometry, *hud);
 		}
 	}
 	m_renderer.prepare(slot, extent, m_draws, atlas, atlasGeneration);

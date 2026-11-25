@@ -188,7 +188,8 @@ indistinguishable by construction.
 | Button | `button(rect, label, ButtonVariant, State)` | `Primary`, `Secondary`, `Quiet`, `Danger` |
 | List row | `listRow(rect, title, trailing, State)` | selection marker, hover face, trailing value |
 | Form field | `formField(rect, label, value, Validation, State, message)` + `formFieldHeight` | sunk well, validation border + message; the height helper reserves the label band, the control well and the message line, and a squeezed rect drops the message instead of drawing it over the well border |
-| Status indicator | `statusIndicator(rect, Status, text)` | token-colored dot + label |
+| Status indicator | `statusIndicator(rect, Status, text)` | token-colored dot + label; the HUD paints it on the `hudScrim` plate, so it stays readable over bright and dark scenes |
+| Bounded multiline | `wrapText` (PlayerUiText) + `wrappedLabel(rect, text, role, color, maxLines)` + `wrappedLineHeight` | greedy word wrap measured with the painting metric, capped at the caller's line count, last line elided; the HUD feedback block reserves its lines up front, so session copy cannot spill out of its band (issue #303 F03) |
 | Progress / loading | `progress(rect, value, pending, phase)` | determinate fill, deterministic indeterminate band |
 | Notification / toast | `ToastQueue` + `toast(rect, Toast)` | bounded (4) newest-first queue, age-based expiry, sticky entries |
 | Tooltip | `tooltipLayout` + `tooltip` | prefers above-right, flips at edges, clamps inside the viewport |
