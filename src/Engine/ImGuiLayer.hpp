@@ -22,6 +22,9 @@ public:
 	bool onSwapchainRecreate(VkSwapchain &swapchain);
 
 	void processEvent(const SDL_Event &event);
+	void observePointer(float x, float y);
+	void observeModifiers(SDL_Keymod mods);
+	void releaseInput();
 	void beginFrame();
 	void endFrame(); // ImGui::Render()
 
@@ -30,6 +33,10 @@ public:
 
 	bool wantCaptureKeyboard() const;
 	bool wantCaptureMouse() const;
+	bool editingText() const;
+	bool hasModal() const;
+	bool ownsActiveInput() const;
+	int inputFrame() const;
 	// Checks the latest drawn ImGui windows at the SDL event's coordinates.
 	bool blocksGameUiPointer(float x, float y) const;
 

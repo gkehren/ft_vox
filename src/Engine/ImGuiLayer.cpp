@@ -239,6 +239,38 @@ void ImGuiLayer::processEvent(const SDL_Event &event)
 		ImGui_ImplSDL3_ProcessEvent(&event);
 }
 
+void ImGuiLayer::observePointer(float x, float y)
+{
+	if (!m_initialized)
+		return;
+	const auto &origin = ImGui::GetMainViewport()->Pos;
+	ImGui::GetIO().AddMousePosEvent(origin.x + x, origin.y + y);
+}
+
+void ImGuiLayer::observeModifiers(SDL_Keymod mods)
+{
+	if (!m_initialized)
+		return;
+	auto &io = ImGui::GetIO();
+	io.AddKeyEvent(ImGuiMod_Ctrl, (mods & SDL_KMOD_CTRL) != 0);
+	io.AddKeyEvent(ImGuiMod_Shift, (mods & SDL_KMOD_SHIFT) != 0);
+	io.AddKeyEvent(ImGuiMod_Alt, (mods & SDL_KMOD_ALT) != 0);
+	io.AddKeyEvent(ImGuiMod_Super, (mods & SDL_KMOD_GUI) != 0);
+}
+
+void ImGuiLayer::releaseInput()
+{
+	if (!m_initialized)
+		return;
+	auto &io = ImGui::GetIO();
+	io.ClearEventsQueue();
+	io.ClearInputKeys();
+	io.ClearInputMouse();
+	ImGui::ClearActiveID();
+	ImGui::GetCurrentContext()->MovingWindow = nullptr;
+	ImGui::ClearDragDrop();
+}
+
 void ImGuiLayer::beginFrame()
 {
 	if (!m_initialized)
@@ -306,6 +338,32 @@ bool ImGuiLayer::wantCaptureKeyboard() const
 bool ImGuiLayer::wantCaptureMouse() const
 {
 	return m_initialized && ImGui::GetIO().WantCaptureMouse;
+}
+
+bool ImGuiLayer::editingText() const
+{
+	if (!m_initialized)
+		return false;
+	const auto &g = *ImGui::GetCurrentContext();
+	return g.ActiveId != 0 && g.InputTextState.ID == g.ActiveId;
+}
+
+bool ImGuiLayer::hasModal() const
+{
+	return m_initialized && ImGui::GetTopMostPopupModal() != nullptr;
+}
+
+bool ImGuiLayer::ownsActiveInput() const
+{
+	if (!m_initialized)
+		return false;
+	const auto &g = *ImGui::GetCurrentContext();
+	return g.ActiveId != 0 || !g.OpenPopupStack.empty();
+}
+
+int ImGuiLayer::inputFrame() const
+{
+	return m_initialized ? ImGui::GetFrameCount() : -1;
 }
 
 bool ImGuiLayer::blocksGameUiPointer(float x, float y) const

@@ -6,6 +6,8 @@ Phase B (#300) integrates the native renderer selected in the [Game UI ADR](adr/
 
 Run `ft_vox --seed 42 --game-ui --quality low` from the graphical build output. The translucent Game UI strip anchors to the main scene area. Press C to release the cursor and click the scale button to cycle 100%, 125%, 150% and 175%. The icon is a clipped grass-block side from the current resource pack. The existing Graphics panel can load a new pack and the next Game UI frame resolves the replacement atlas. The Developer UI and legacy gameplay controls remain available. Normal launch uses the existing interface. `--ui-spike` opens the standalone preview over a transient scene.
 
+Escape opens the native game menu and widget showcase in the opt-in mode. [Game UI interaction](game-ui-interaction.md)
+
 ## Rendering and lifetime
 
 - `gameui::DrawList` submits panels, glyph masks and generation-tagged atlas icons in logical window coordinates. Intersected clips become framebuffer scissors. Consecutive batches share a scissor and descriptors, preserving paint order. Submission is bounded to 2,048 quads and 31 batches, reserving the 32nd draw for UNORM encoding. The strip fits in three draws.

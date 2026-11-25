@@ -20,6 +20,7 @@
 #include <Renderer/WorldRenderer.hpp>
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
+#include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
 #include <Core/ThreadPool.hpp>
 #include <Engine/EngineDefs.hpp>
@@ -233,7 +234,14 @@ private:
 	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget,
 					 std::optional<uint64_t> gpuTag = std::nullopt);
 	void setMouseCaptured(bool captured);
-	bool gameUiCanClickAt(float x, float y) const;
+	void setInventoryOpen(bool open);
+	void syncUiInput();
+	void clearGameplayInput();
+	bool nativePause() const;
+	bool suppressDeveloperUi() const;
+	gameui::InputContext inputContext() const;
+	bool developerPointerAt(float x, float y) const;
+	bool routeUiEvent(const SDL_Event &event);
 	/// FPS / world-state window title, once per second of frame clock.
 	void updateWindowTitle(double currentFrame);
 	void placeCameraOnSurface();
@@ -265,7 +273,10 @@ private:
 	///     suspended by inspection itself — they keep advancing unless the
 	///     window is unfocused, a benchmark is active, or the mobs toggle is
 	///     off (m_inspectionView is not part of simulationSuspended()).
-	bool simulationSuspended() const { return paused || !windowFocused || m_benchmark.isActive() || m_uiSpike; }
+	bool simulationSuspended() const
+	{
+		return paused || nativePause() || !windowFocused || m_benchmark.isActive() || m_uiSpike;
+	}
 
 	/// World-generation epoch barrier (issue #209, Epic #204 Phase E).
 	/// Called on EVERY authoritative world transition (initialize / reload),
@@ -363,6 +374,11 @@ private:
 	std::unique_ptr<ImGuiLayer> imgui;
 	std::unique_ptr<GameUI> gameUi;
 	std::unique_ptr<GameUiSample> m_playerUi;
+	gameui::InputRouter m_inputRouter;
+	std::optional<bool> m_captureBeforeScreen;
+	uint64_t m_uiScreenRevision{};
+	int m_pendingDeveloperPressFrame{-2};
+	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{};
 	bool m_uiSpike{false};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;

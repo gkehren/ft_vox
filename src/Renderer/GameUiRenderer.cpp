@@ -294,18 +294,15 @@ void Renderer::prepare(uint32_t index, VkExtent2D extent, const DrawList &list,
 		list.atlasGeneration() != currentGeneration || !atlas.isValid())
 		return;
 
-	const glm::vec2 pixelsPerLogical = glm::vec2(extent.width, extent.height) / list.size();
+	const glm::vec2 pixels{extent.width, extent.height};
+	const auto pixelsPerLogical = framebufferScale(list.size(), pixels);
 	for (const auto &batch : list.batches())
 	{
-		// Round inward, so a clip never exposes a neighboring pixel.
-		const auto clip = batch.clip.rect * glm::vec4(pixelsPerLogical, pixelsPerLogical);
-		const auto edge = [](float value, uint32_t limit) {
-			return static_cast<int32_t>(std::clamp(value, 0.f, static_cast<float>(limit)));
-		};
-		const int32_t left = edge(std::ceil(clip.x), extent.width);
-		const int32_t top = edge(std::ceil(clip.y), extent.height);
-		const int32_t right = edge(std::floor(clip.z), extent.width);
-		const int32_t bottom = edge(std::floor(clip.w), extent.height);
+		const auto clip = pixelClip(batch.clip, pixelsPerLogical, pixels).rect;
+		const auto left = static_cast<int32_t>(clip.x);
+		const auto top = static_cast<int32_t>(clip.y);
+		const auto right = static_cast<int32_t>(clip.z);
+		const auto bottom = static_cast<int32_t>(clip.w);
 		if (left < right && top < bottom)
 		{
 			const VkRect2D scissor{{left, top}, {uint32_t(right - left), uint32_t(bottom - top)}};

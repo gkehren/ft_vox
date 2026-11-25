@@ -36,6 +36,8 @@ Phase A leaves every legacy binding in normal launch. The following destinations
 
 Today Engine handles SDL events and safe-point operations, builds the mixed `GameUIFrame`, starts and ends the ImGui frame, and hands the postprocessing overlay callback to `WorldRenderer`. The renderer loads the post color in its overlay pass. Biome-map uploads publish after the overlay. `VkFrameContext` owns acquire, submit and present. World/image validation uses the offscreen path. #300 keeps that ownership and validates both composition paths, translucent elements and independent Game UI and Dev UI profiling as specified in the [backend ADR](adr/game-ui-backend.md#production-composition-contract-for-300). #301 consolidates input routing and gives the player layer its own state and action interface.
 
+The Phase C showcase, screen policy and reproducible input checks are documented in [Game UI interaction](game-ui-interaction.md).
+
 1. **#299** proposes the decision and proves a standalone overlay with text, one atlas sample, scissor, focus and resize.
 2. **#300–#302** deliver the renderer, then stack/focus and layout, then tokens and widgets. The first reusable set is a label, button, toggle, text field, list/scroll viewport, modal, tooltip and inventory slot using rows, columns and fixed grids. It includes a keyboard focus ring and enough contrast for the baseline theme.
 3. **#303–#305** migrate HUD, inventory and navigation in order. Keep the corresponding legacy entry point until solo and remote behavior for that slice is verified. Keep gameplay actions, results and save/leave semantics on the shared Engine path at every stage.

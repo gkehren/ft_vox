@@ -1,7 +1,6 @@
 #pragma once
 
-#include <glm/vec2.hpp>
-#include <glm/vec4.hpp>
+#include <Renderer/GameUiGeometry.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,27 +9,13 @@
 
 namespace gameui
 {
-// Logical window coordinates. Colors are authored in sRGB with linear alpha.
-struct Clip
-{
-	glm::vec4 rect{};
-	bool operator==(const Clip &) const = default;
-
-	Clip intersect(Clip other) const
-	{
-		return {{std::max(rect.x, other.rect.x), std::max(rect.y, other.rect.y),
-			std::min(rect.z, other.rect.z), std::min(rect.w, other.rect.w)}};
-	}
-
-	bool empty() const { return !(rect.x < rect.z && rect.y < rect.w); }
-};
-
 struct AtlasIcon
 {
 	uint64_t generation{};
 	uint32_t layer{};
 };
 
+// Colors are authored in sRGB with linear alpha.
 struct Quad
 {
 	glm::vec4 rect;

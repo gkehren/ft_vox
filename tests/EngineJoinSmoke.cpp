@@ -1,4 +1,5 @@
 #include <Engine/EngineMultiplayer.hpp>
+#include <Engine/GameUiSample.hpp>
 #include <Hosting/RoleCredentials.hpp>
 #include <Items/ItemRegistry.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -161,6 +162,32 @@ struct EngineJoinProbe
 		command(Operation::Ban);
 		CHECK(engine.m_hostSnapshot.administration->players.back().banned, "the panel ban changes server admission");
 
+		engine.enableGameUi();
+		SDL_Event focus{};
+		focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+		focus.window.windowID = SDL_GetWindowID(engine.window);
+		if (!SDL_PushEvent(&focus))
+			throw std::runtime_error(SDL_GetError());
+		SDL_Event escape{};
+		escape.type = SDL_EVENT_KEY_DOWN;
+		escape.key.windowID = SDL_GetWindowID(engine.window);
+		escape.key.key = SDLK_ESCAPE;
+		escape.key.scancode = SDL_SCANCODE_ESCAPE;
+		if (!SDL_PushEvent(&escape))
+			throw std::runtime_error(SDL_GetError());
+		escape.type = SDL_EVENT_KEY_UP;
+		if (!SDL_PushEvent(&escape))
+			throw std::runtime_error(SDL_GetError());
+		engine.handleEvents();
+		CHECK(engine.m_playerUi->screens().top() == gameui::Screen::Pause && !engine.nativePause() &&
+			!engine.m_movementAllowed && !engine.mouseCaptured, "connected menu blocks local control without solo suspension");
+		const auto openAt = engine.m_remote->players.tick;
+		until([&] {
+			engine.processInput(1.0 / 120.0);
+			return engine.m_remote->players.tick > openAt;
+		}, "connected simulation stopped advancing while the menu was open");
+		CHECK(engine.m_remote->ready(), "server snapshots continue under the native menu");
+
 		engine.running = true;
 		SDL_Event close{};
 		close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
@@ -169,6 +196,8 @@ struct EngineJoinProbe
 			throw std::runtime_error(SDL_GetError());
 		engine.handleEvents();
 		CHECK(engine.running && engine.m_exitAfterHostedStop, "game exit waits for its hosted server");
+		CHECK(engine.m_playerUi->screens().top() == gameui::Screen::Hud && !engine.suppressDeveloperUi(),
+			"host shutdown restores Developer UI for stop progress and recovery");
 		until([&] { return !engine.running || engine.m_hostSnapshot.state == hosting::State::Failed; },
 			"game did not reach a terminal hosted shutdown");
 		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped && !engine.m_hostSnapshot.status &&

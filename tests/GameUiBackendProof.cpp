@@ -79,6 +79,7 @@ struct GameUiBackendProbe
 		engine.initializeNoiseGenerator(42);
 		engine.stepDerivedProjectionForTests(1.0 / 60.0);
 		engine.enableGameUi();
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
 	}
 
 	visual::RgbaImage capture(Readback &target, gameui::Renderer *ui,
@@ -246,6 +247,196 @@ struct GameUiBackendProbe
 		checked(SDL_PushEvent(&event), "queue Game UI sample click");
 	}
 
+	void key(SDL_Keycode code, Uint32 type, bool repeat = false, SDL_Keymod mods = SDL_KMOD_NONE)
+	{
+		SDL_Event event{};
+		event.type = type;
+		event.key.windowID = SDL_GetWindowID(engine.window);
+		event.key.key = code;
+		event.key.scancode = SDL_GetScancodeFromKey(code, nullptr);
+		event.key.repeat = repeat;
+		event.key.mod = mods;
+		checked(SDL_PushEvent(&event), "queue Game UI keyboard event");
+	}
+
+	void tap(SDL_Keycode code, SDL_Keymod mods = SDL_KMOD_NONE)
+	{
+		key(code, SDL_EVENT_KEY_DOWN, false, mods);
+		key(code, SDL_EVENT_KEY_UP, false, mods);
+	}
+
+	void windowEvent(Uint32 type)
+	{
+		SDL_Event event{};
+		event.type = type;
+		event.window.windowID = SDL_GetWindowID(engine.window);
+		checked(SDL_PushEvent(&event), "queue Game UI window event");
+	}
+
+	void showcaseProof()
+	{
+		init();
+		auto &context = *engine.vkContext;
+		const auto before = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
+		auto &sample = *engine.m_playerUi;
+		using gameui::Screen;
+		using gameui::Widget;
+		const auto widget = [&](std::string_view label) -> const Widget & {
+			for (const auto &item : sample.m_widgets.widgets())
+				if (item.label == label)
+					return item;
+			throw std::runtime_error("showcase control missing");
+		};
+		const auto center = [&](std::string_view label) {
+			const auto bounds = sample.m_widgets.bounds(widget(label)).rect;
+			return (glm::vec2(bounds) + glm::vec2(bounds.z, bounds.w)) * 0.5f;
+		};
+		const auto click = [&](glm::vec2 point) {
+			SDL_WarpMouseInWindow(engine.window, point.x, point.y);
+			button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y);
+			button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y);
+		};
+		resize(1920, 1080);
+		frames(3);
+		const auto firstPolicy = engine.inputContext();
+		CHECK(firstPolicy.interactive && !firstPolicy.devKeyboard,
+			"focused WSI test starts with gameplay ownership; focused=" << firstPolicy.interactive
+			<< " developer=" << firstPolicy.devKeyboard);
+		tap(SDLK_E);
+		present();
+		CHECK(engine.inventoryPanelOpen() && sample.screens().top() == Screen::Inventory &&
+			!engine.mouseCaptured && !engine.simulationSuspended(), "inventory releases cursor without pausing solo");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && sample.screens().top() == Screen::Hud && engine.mouseCaptured,
+			"Escape closes inventory and restores capture");
+
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		engine.handleEvents();
+		CHECK(engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "held W initially belongs to gameplay");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && engine.simulationSuspended() &&
+			!engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W) && !engine.mouseCaptured,
+			"solo Escape opens Pause and clears held gameplay");
+		CHECK(sample.screens().focus() == widget("Resume").id,
+			"new Pause focuses Resume (focus=" << sample.screens().focus() << ", layout revision=" <<
+			sample.m_layoutRevision << ", screen revision=" << sample.screens().revision() << ")");
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		CHECK(sample.screens().focus() == widget("Widget showcase").id,
+			"Tab focuses the showcase opener (focus=" << sample.screens().focus() << ", active=" <<
+			engine.inputContext().interactive << ", developer text=" << engine.inputContext().devText <<
+			", layout=" << sample.m_layoutRevision << ", stack=" << sample.screens().revision() << ")");
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::Showcase && sample.m_ownsTextInput && SDL_TextInputActive(engine.window),
+			"keyboard opens showcase and starts SDL text input at the first field (screen=" <<
+			int(sample.screens().top()) << ", focus=" << sample.screens().focus() << ")");
+		SDL_Event editing{};
+		editing.type = SDL_EVENT_TEXT_EDITING;
+		editing.edit.windowID = SDL_GetWindowID(engine.window);
+		editing.edit.text = "\xc3\xa9";
+		checked(SDL_PushEvent(&editing), "queue SDL composition");
+		engine.handleEvents();
+		CHECK(sample.m_field.value().empty() && sample.m_field.composition() == "\xc3\xa9", "SDL preedit stays uncommitted");
+		SDL_Event text{};
+		text.type = SDL_EVENT_TEXT_INPUT;
+		text.text.windowID = SDL_GetWindowID(engine.window);
+		text.text.text = "Qa\xc3\xa9";
+		tap(SDLK_Q);
+		checked(SDL_PushEvent(&text), "queue UTF-8 text commit");
+		present();
+		CHECK(sample.m_field.value() == "Qa\xc3\xa9" && sample.m_field.composition().empty(),
+			"committed text reaches one editor without gameplay ownership");
+		tap(SDLK_LEFT);
+		tap(SDLK_BACKSPACE);
+		present();
+		CHECK(sample.m_field.value() == "Q\xc3\xa9", "caret moves and deletes at UTF-8 boundaries");
+		tap(SDLK_TAB);
+		key(SDLK_SPACE, SDL_EVENT_KEY_DOWN);
+		key(SDLK_SPACE, SDL_EVENT_KEY_DOWN, true);
+		key(SDLK_SPACE, SDL_EVENT_KEY_UP);
+		present();
+		CHECK(!sample.m_feature && !sample.m_ownsTextInput && !engine.jumpPressed,
+			"toggle fires once and keyboard space does not queue gameplay jump");
+		tap(SDLK_TAB);
+		tap(SDLK_RIGHT);
+		tap(SDLK_TAB);
+		tap(SDLK_DOWN);
+		present();
+		CHECK(std::abs(sample.m_slider - 0.55f) < 0.001f && sample.m_list.selected == 1,
+			"keyboard adjusts slider and list selection");
+		SDL_Event wheel{};
+		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
+		wheel.wheel.y = -1.f;
+		wheel.wheel.mouse_x = center("Biome preview").x;
+		wheel.wheel.mouse_y = center("Biome preview").y;
+		checked(SDL_PushEvent(&wheel), "queue SDL wheel");
+		present();
+		CHECK(sample.m_list.first == 1 && sample.m_list.selected == 1, "wheel scrolls only the visible list");
+
+		auto pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		tap(SDLK_ESCAPE);
+		engine.handleEvents();
+		CHECK(!sample.m_feature && sample.screens().top() == Screen::Showcase && !engine.windowFocused,
+			"focus loss cancels a press and ignores delayed Escape");
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		click(center("Unavailable"));
+		present();
+		CHECK(sample.screens().top() == Screen::Showcase && sample.screens().focus() == 0,
+			"disabled control cannot focus or activate");
+		const auto oldPanel = sample.m_panel;
+		pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		engine.handleEvents();
+		resize(1160, 680);
+		frames(2);
+		pos = center("Preview option");
+		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
+		present();
+		CHECK(sample.m_panel != oldPanel && !sample.m_feature, "WSI resize reflows geometry and cancels the old press");
+		click(pos);
+		present();
+		CHECK(sample.m_feature, "real pointer events hit the relocated control");
+
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id,
+			"back restores focus to the showcase opener");
+		tap(SDLK_TAB);
+		tap(SDLK_RETURN);
+		present();
+		CHECK(sample.screens().top() == Screen::ConfirmExit && engine.suppressDeveloperUi(),
+			"confirmation takes full-window priority over Developer UI");
+		tap(SDLK_F10);
+		present();
+		CHECK(!engine.m_pendingVSync.has_value(), "modal vetoes view-changing globals");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Pause && !engine.suppressDeveloperUi() &&
+			sample.screens().focus() == widget("Exit to desktop").id, "Escape dismisses only the confirmation");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::Hud && !engine.simulationSuspended() &&
+			!engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "resume cannot replay held W");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		key(SDLK_W, SDL_EVENT_KEY_DOWN);
+		engine.handleEvents();
+		CHECK(engine.m_inputRouter.gameplayKey(SDL_SCANCODE_W), "fresh gameplay press works after resume");
+		key(SDLK_W, SDL_EVENT_KEY_UP);
+		context.waitIdle();
+		if (context.isValidationEnabled())
+			CHECK(context.validationErrorCount() - before == context.rtssValidationErrorCount() - rtssBefore,
+				"showcase presentation reports only the known RTSS subset if the hook is loaded");
+	}
+
 	static int queuedReleases()
 	{
 		int result = 0;
@@ -296,12 +487,15 @@ struct GameUiBackendProbe
 		motion.motion.y = pos.y;
 		checked(SDL_PushEvent(&motion), "queue pointer movement across the floating window");
 		button(SDL_EVENT_MOUSE_BUTTON_DOWN, pos.x, pos.y);
+		tap(SDLK_P);
 		present(floating);
 		button(SDL_EVENT_MOUSE_BUTTON_UP, pos.x, pos.y);
 		present(floating);
 		present(floating);
 		CHECK(sample.m_activations == 4 && floatingClicked,
 			"a click before NewFrame belongs to the ImGui window covering Game UI");
+		CHECK(sample.screens().top() == gameui::Screen::Hud,
+			"a gameplay shortcut queued with the developer press cannot open the pause menu");
 
 		SDL_WarpMouseInWindow(engine.window, pos.x, pos.y);
 		frames(2);
@@ -496,6 +690,14 @@ int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output)
 	GameUiBackendProbe(engine).presentProof(output);
 	if (testmain::fails == 0)
 		std::cout << "PASS: Game UI present proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runGameUiShowcaseProof(Engine &engine)
+{
+	GameUiBackendProbe(engine).showcaseProof();
+	if (testmain::fails == 0)
+		std::cout << "PASS: Game UI showcase proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }
 

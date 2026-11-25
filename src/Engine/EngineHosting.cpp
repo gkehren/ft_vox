@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <Engine/GameUiSample.hpp>
 
 void Engine::loadHosting()
 {
@@ -120,6 +121,9 @@ void Engine::requestExit()
 	m_exitAfterHostedStop = true;
 	m_hostAutoProfile.reset();
 	m_hostServer.stop();
+	if (m_playerUi && !m_uiSpike)
+		m_playerUi->resetScreens();
+	setInventoryOpen(false);
 	if (gameUi)
 		gameUi->showHostPanel();
 	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0)
