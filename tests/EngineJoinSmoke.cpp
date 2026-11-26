@@ -283,7 +283,7 @@ struct EngineJoinProbe
 		// its slots) reads destroyed storage — the 0xC0000005 this round
 		// chases. Every access takes an owned copy and reports liveness
 		// failures with their own diagnostic.
-		const auto &remote = *engine.m_remote;
+		const auto &remote = mandatoryRemote("witness");
 		if (!remote.welcome)
 			throw std::runtime_error("witness: the session has no welcome identity yet");
 		const auto inventory = remote.transport.inventory();
@@ -351,6 +351,10 @@ struct EngineJoinProbe
 
 	bool seesPeer() const
 	{
+		// F12: polled state — a departed session keeps the poll waiting
+		// within its deadline instead of dereferencing null.
+		if (!engine.m_remote)
+			return false;
 		const auto &remote = *engine.m_remote;
 		const auto &sample = remote.transport.playerSnapshots().current;
 		return remote.ready() && sample && sample->count == 2;
@@ -541,10 +545,22 @@ struct EngineJoinProbe
 	/// dereferencing it).
 	std::array<items::ItemStack, items::kInventorySize> confirmedSlots() const
 	{
-		const auto inventory = engine.m_remote->transport.inventory();
+		const auto inventory = mandatoryRemote("confirmed inventory").transport.inventory();
 		if (!inventory)
 			throw std::runtime_error("the authoritative inventory is unavailable (resync or departure)");
 		return inventory->slots;
+	}
+
+	/// F12 (#316): mandatory session state — the closure cannot continue
+	/// without it, so a missing session is a controlled terminal failure with
+	/// its own diagnostic instead of a null dereference. Polling contexts
+	/// read engine.m_remote directly and simply keep waiting within their
+	/// deadline; nothing here retains a reference across a pump().
+	Engine::RemoteSession &mandatoryRemote(const char *what) const
+	{
+		if (!engine.m_remote)
+			throw std::runtime_error(std::string(what) + ": the remote session departed unexpectedly");
+		return *engine.m_remote;
 	}
 
 	/// F09: the full deterministic inventory operation matrix, driven through
@@ -640,7 +656,14 @@ struct EngineJoinProbe
 					total += stack.count;
 			return total;
 		};
-		const auto itemTotal = [&](items::ItemId item) { return *totalOf(item); };
+		const auto itemTotal = [&](items::ItemId item) {
+			// F12: a mandatory read — the matrix rows need the confirmed
+			// total, so a missing snapshot fails instead of dereferencing.
+			const auto total = totalOf(item);
+			if (!total)
+				throw std::runtime_error("itemTotal: the authoritative inventory is unavailable (resync or departure)");
+			return *total;
+		};
 		const auto settle = [&](std::string_view feedback, const char *what) {
 			until([&] { return !engine.m_remote->actionPending; }, what);
 			const auto *published = engine.m_remote->feedback;
@@ -964,7 +987,7 @@ struct EngineJoinProbe
 			CHECK(dropped.size() == 1 && dropped.front().second.item == kMaterialA &&
 				dropped.front().second.count == 1,
 				"drop one removes exactly one unit and creates one identified world item");
-			waitPickupRestored(dropped, kMaterialA, *totalOf(kMaterialA),
+			waitPickupRestored(dropped, kMaterialA, itemTotal(kMaterialA),
 				"the one-unit drop was not collected back");
 		}
 		// M7 — drop stack: the seated B pile is selected by its number key and
@@ -989,8 +1012,101 @@ struct EngineJoinProbe
 			CHECK(dropped.size() == 1 && dropped.front().second.item == kMaterialB &&
 				dropped.front().second.count == 8,
 				"the stack drop empties the selected stack and creates its world item");
-			waitPickupRestored(dropped, kMaterialB, *totalOf(kMaterialB),
+			waitPickupRestored(dropped, kMaterialB, itemTotal(kMaterialB),
 				"the stack drop was not collected back");
+		}
+		// M8 — duplicate native interaction (F14): while the whole move is
+		// pending, a competing gesture through REAL SDL events must not
+		// submit a second command; the pending metadata stays exactly the
+		// original one and exactly one transfer executes. (M1's direct
+		// adapter rejection stays as complementary coverage.)
+		{
+			constexpr int source = 12, dest = 2, rival = 11;
+			const auto before = slots();
+			click(source, SDL_BUTTON_LEFT);
+			click(dest, SDL_BUTTON_LEFT);
+			const auto pending = engine.m_remote->pendingInventoryAction;
+			if (!pending || pending->command != inventoryui::Command::Move ||
+				pending->from.index != source || pending->to.index != dest)
+				throw std::runtime_error("M8: the first native move did not arm its pending action");
+			click(source, SDL_BUTTON_LEFT);
+			click(rival, SDL_BUTTON_LEFT);
+			const auto &current = engine.m_remote->pendingInventoryAction;
+			CHECK(current && current->command == pending->command &&
+				current->from == pending->from && current->to == pending->to,
+				"a competing native gesture cannot replace the pending action (F14)");
+			if (slots() != before)
+				throw std::runtime_error("the competing native gesture mutated the confirmed inventory before the ack");
+			settle("Action accepted", "the M8 whole move was not acknowledged");
+			CHECK(at(source).isEmpty() && at(dest) == before[size_t(source)] &&
+				at(rival) == before[size_t(rival)],
+				"exactly the original transfer executes after duplicate native gestures");
+		}
+		// M10 — HUD-to-inventory pending feedback (F14): a shortcut submitted
+		// while the screen is closed arms its pending slots; opening the
+		// inventory before the authoritative result exposes them, and each
+		// ack clears them. No pump runs between the submission and the open,
+		// so the loopback ack cannot win the race by construction.
+		{
+			engine.setInventoryOpen(false);
+			until([&] { return !engine.inventoryPanelOpen(); },
+				"the HUD pending row could not close the inventory", std::chrono::seconds(5));
+			// HUD selection shortcut: slot 0 holds a capped A pile.
+			tap(SDLK_1);
+			CHECK(engine.m_remote->pendingInventoryAction &&
+				engine.m_remote->pendingInventoryAction->command == inventoryui::Command::Select &&
+				engine.m_remote->pendingInventoryAction->from.index == 0,
+				"the HUD selection armed its pending action while the screen was closed");
+			CHECK(engine.playerInventoryView().pendingSlots.has_value() &&
+				engine.playerInventoryView().pendingSlots->affects(inventoryui::SlotId{0}),
+				"the closed-screen HUD selection exposes its pending slot (F04)");
+			engine.setInventoryOpen(true);
+			until([&] { return engine.inventoryPanelOpen(); },
+				"the HUD pending row could not reopen the inventory", std::chrono::seconds(5));
+			CHECK(engine.playerInventoryView().pendingSlots.has_value() &&
+				engine.playerInventoryView().pendingSlots->affects(inventoryui::SlotId{0}),
+				"HUD selection pending state is visible after opening the inventory");
+			settle("Action accepted", "the HUD selection was not acknowledged");
+			CHECK(!engine.m_remote->pendingInventoryAction && !engine.playerInventoryView().pendingSlots,
+				"the HUD selection pending state clears after the authoritative result");
+			// HUD drop from the same selected slot: one A unit leaves, the
+			// affected slot exposes its pending state on open, and the
+			// shared pickup restores the exact total.
+			const auto beforeDrop = itemTotal(kMaterialA);
+			const auto entitiesBefore = itemIdSet();
+			engine.setInventoryOpen(false);
+			until([&] { return !engine.inventoryPanelOpen(); },
+				"the HUD pending row could not close the inventory for the drop",
+				std::chrono::seconds(5));
+			tap(SDLK_Q);
+			CHECK(engine.m_remote->pendingInventoryAction &&
+				engine.m_remote->pendingInventoryAction->command == inventoryui::Command::DropOne &&
+				engine.m_remote->pendingInventoryAction->from.index == 0,
+				"the HUD drop armed its pending action while the screen was closed");
+			CHECK(engine.playerInventoryView().pendingSlots.has_value() &&
+				engine.playerInventoryView().pendingSlots->affects(inventoryui::SlotId{0}),
+				"the closed-screen HUD drop exposes its pending slot (F04)");
+			engine.setInventoryOpen(true);
+			until([&] { return engine.inventoryPanelOpen(); },
+				"the HUD pending row could not reopen the inventory for the drop",
+				std::chrono::seconds(5));
+			CHECK(engine.playerInventoryView().pendingSlots.has_value() &&
+				engine.playerInventoryView().pendingSlots->affects(inventoryui::SlotId{0}),
+				"HUD drop pending state is visible on the affected slot");
+			settle("Action accepted", "the HUD drop was not acknowledged");
+			until([&] { return totalOf(kMaterialA) == beforeDrop - 1; },
+				"the HUD drop did not confirm its inventory loss");
+			const auto dropped = awaitWorldItems(entitiesBefore, "the HUD drop did not publish its world item");
+			CHECK(dropped.size() == 1 && dropped.front().second.item == kMaterialA &&
+				dropped.front().second.count == 1,
+				"the HUD drop removes exactly one unit and creates one identified world item");
+			waitPickupRestored(dropped, kMaterialA, itemTotal(kMaterialA),
+				"the HUD drop was not collected back");
+			// The closure's end-state contract expects the fixture selection.
+			tap(SDLK_1 + 3);
+			settle("Action accepted", "the HUD pending row selection restore was not acknowledged");
+			CHECK(engine.selectedHotbarSlot() == 3,
+				"the HUD pending row restores the fixture hotbar selection");
 		}
 		// M9 — rejected action (F08): the empty hotbar slot is discovered
 		// dynamically, verified empty before the drop, and the complete
@@ -1174,6 +1290,14 @@ struct EngineJoinProbe
 			const auto cell = breakRemoteAction("fixed shared terrain edit");
 			publish(edit, std::to_string(cell.x) + " " + std::to_string(cell.y) + " " + std::to_string(cell.z));
 
+			// F13 (#316): the guest confirms reception of the LIVE terrain
+			// modification before the stop — the fixture checkpoint must
+			// restore a state both clients actually observed while the
+			// server was running.
+			until([&] { return fs::exists(round / "guest-edit-confirmed.txt"); },
+				"the guest did not confirm the live terrain edit before the fixture stop",
+				std::chrono::seconds(120));
+
 			// The fixture rewrite assumes a clean committed item population:
 			// the mined drop must be consumed (server-side pickup) before the
 			// stop, so items.state commits empty and the restart cannot
@@ -1224,11 +1348,28 @@ struct EngineJoinProbe
 			publish(round / "fixture-endpoint.txt", endpoint);
 			until([&] { return seesPeer(); }, "the guest did not rejoin the fixture world",
 				std::chrono::seconds(120));
+			// F13 (#316): the guest verified its exact fixture inventory and
+			// is watching it before the first owner action runs.
+			until([&] { return fs::exists(round / "guest-inventory-ready.txt"); },
+				"the guest did not confirm its fixture inventory before the matrix",
+				std::chrono::seconds(120));
 			hostedInventoryMatrix();
 			publish(round / "matrix-done.txt", "done");
 		}
 		else if (!host && !restoring)
 		{
+			// F13 (#316): confirm the live shared-terrain edit as soon as the
+			// owner publishes it — the fixture checkpoint must restore a
+			// state the guest observed while the server was running.
+			until([&] { return fs::exists(edit); }, "owner did not publish the edited cell",
+				std::chrono::seconds(120));
+			glm::ivec3 liveCell{};
+			if (!(std::ifstream(edit) >> liveCell.x >> liveCell.y >> liveCell.z))
+				throw std::runtime_error("invalid hosted edit witness");
+			until([&] { return materialAt(liveCell) == TextureType::AIR; },
+				"the guest must see the edited block before the fixture stop",
+				std::chrono::seconds(60));
+			publish(round / "guest-edit-confirmed.txt", "ok");
 			until([&] {
 				const auto ui = frame();
 				return ui.multiplayerStatus && ui.joinServer && engine.m_remote && !engine.m_remote->scope;
@@ -1258,14 +1399,19 @@ struct EngineJoinProbe
 			const auto expected = guestFixture();
 			CHECK(before == expected.slots && witness().selected == expected.selected,
 				"the fixture restart restores the guest's distinct private inventory");
+			// F13 (#316): the guest publishes its readiness marker and keeps
+			// watching its contents AND selection until the matrix completes.
+			publish(round / "guest-inventory-ready.txt", "ready");
 			until([&] {
 				const auto inventory = engine.m_remote->transport.inventory();
-				if (inventory && inventory->slots != before)
+				if (inventory && (inventory->slots != before ||
+					inventory->selected != expected.selected))
 					throw std::runtime_error("the guest's private inventory changed while the owner ran the matrix");
 				return fs::exists(round / "matrix-done.txt");
 			}, "the owner's inventory matrix did not complete for the isolated guest",
 				std::chrono::seconds(300));
-			CHECK(confirmedSlots() == before && !engine.m_remote->pendingInventoryAction,
+			CHECK(confirmedSlots() == before && witness().selected == expected.selected &&
+				!engine.m_remote->pendingInventoryAction,
 				"the guest's private inventory is still unchanged after the matrix");
 		}
 		else
@@ -1398,7 +1544,7 @@ struct EngineJoinProbe
 	/// transport stays Connected — the exact state a slow terrain sync produces.
 	void checkReadinessPresentation()
 	{
-		auto &remote = *engine.m_remote;
+		auto &remote = mandatoryRemote("readiness presentation");
 		const bool ready = remote.ready();
 		remote.hasCameraPose = false;
 		const bool gateObserved = !remote.ready();
@@ -1426,7 +1572,7 @@ struct EngineJoinProbe
 
 	void checkRetiredProjection()
 	{
-		const auto &remote = *engine.m_remote;
+		const auto &remote = mandatoryRemote("retired projection");
 		CHECK(!remote.scope && !remote.projection && !remote.hasCameraPose &&
 		    !remote.transport.inventory() && remote.prediction.backlog() == 0,
 		    "departure clears replica, inventory, camera hold and predicted inputs");

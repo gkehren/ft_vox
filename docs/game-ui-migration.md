@@ -66,6 +66,30 @@ Windows 11, MSVC Release, GeForce RTX 4070 Ti, Vulkan 1.4.357. CPU-only and grap
 | `tests/test_multiplayer_join_native.py` | PASS, 60 checks (readiness, reconnect, blocked-session recovery, motion tracing across switches) |
 | `tests/test_hosted_closure_native.py` (two native clients + hosted child) | PASS end to end (deterministic fixture matrix + checkpoint restart phase), repeated consecutive executions without an access violation — see the F07 note above for the resolved crash |
 
+### Correction round 3 (#316 F01, F11–F14)
+
+A small final pass over the ownership handoff, the input-modality filter and the validation harness. The architecture, server authority, wire protocol and save formats are unchanged.
+
+- **Right-click ownership handoff (F01).** A right-click on an inventory control now transfers keyboard ownership to the native screen exactly like the left-click path (owner-checked; gameplay and other native screens keep left-click-only), so a half-stack gesture can start immediately after interacting with the Developer UI. While a deferred handoff drains, stale ImGui signals (a released `ActiveId`, a lingering `NavVisible`) cannot re-latch the developer ownership: the round-2 latch observes them only when no yield boundary is pending. The inventory ownership proof now covers a real non-textual ImGui button: focus and release without an active `ActiveId`, developer-only Tab/arrows/Enter/Space, right-click handoff, deferred frames without re-latching and a completed half-stack split through native input.
+- **Modality filtering completion (F11).** Pointer modality changes only on a validated press over a control or the matched release that activates it; keyboard modality updates only when supported navigation actually moves the focus (the previous focus is recorded before navigation, covering Tab, Shift+Tab and the arrows), and the unreachable Tab condition in the arrow branch is gone.
+- **Checked harness access (F12).** The hosted closure reaches mandatory remote session state only through a checked helper that fails with its own diagnostic when the authoritative snapshot is missing; polling state (peer visibility, transiently unavailable inventory snapshots) keeps waiting within the deadline instead of dereferencing.
+- **Guest synchronization (F13).** The owner waits for two guest-published rendezvous markers: one after the guest observes the live terrain edit before the checkpoint fixture is prepared, one after the guest verifies its exact fixture inventory and hotbar selection before the matrix starts. The guest polls its private inventory and selection until the matrix completes and re-verifies both after the checkpoint restart.
+- **Pending-state regressions (F14).** Two new matrix rows: a duplicate native gesture while an action is pending must not replace the pending metadata, mutate the confirmed inventory or submit a second command (complementing the direct adapter rejection check), and HUD shortcuts submitted with the inventory closed (hotbar selection and drop) expose the affected slot as pending when the inventory opens, then clear on the authoritative result.
+- **Windows CI `GameUiStyle` concurrency failure.** The R03 reader check (`concurrent readers never report a false corrupt record or a partial value`) failed once in `cpu-windows`. The persistence code is from #302 and untouched by this PR; the failure also reproduces on `main` (run 45719082861) but not locally (40 consecutive passes), and is tracked as issue #317.
+
+#### Round-3 verification
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti, Vulkan 1.4.357, all proofs with `FT_VOX_VALIDATION=1`.
+
+| Check | Result |
+| --- | --- |
+| `test_engine_reload.exe --player-inventory-proof` | PASS, 49 checks (round-3 ownership sequence including the non-textual button; only the 21 known RTSS swapchain validation messages) |
+| `test_engine_reload.exe --player-hud-proof` | PASS, 48 checks |
+| `test_engine_reload.exe --game-ui-showcase-proof` | PASS, 40 checks |
+| `ctest -C Release` | 75/75 passed |
+| `tests/test_multiplayer_join_native.py` | PASS, 60 checks |
+| `tests/test_hosted_closure_native.py` (two native clients + hosted child) | PASS end to end, 15 checks, including both round-3 guest rendezvous points |
+
 ### Inventory verification
 
 Windows 11, MSVC Release, GeForce RTX 4070 Ti (621.24), Vulkan 1.4.357, SDL 3.4.18, Low quality, seed 42. The native proof submits real SDL mouse and keyboard events and renders through the game swapchain. The screenshot layer captured the presented frames in a separate run from validation.

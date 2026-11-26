@@ -356,15 +356,23 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		if (imgui && policy.interactive && !policy.modal && !mouseCaptured &&
 			((motion && owner != DeveloperUi) || (!motion && owner == DeveloperUi)))
 			imgui->observePointer(x, y);
-		if (imgui && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT &&
-			((owner == PlayerUi && m_playerUi && (policy.nativeScreen ? m_playerUi->canFocusWidget(x, y) : policy.nativePointer)) ||
-			 (owner == Gameplay && !mouseCaptured)))
+		if (imgui && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+			((event.button.button == SDL_BUTTON_LEFT &&
+				 ((owner == PlayerUi && m_playerUi &&
+					  (policy.nativeScreen ? m_playerUi->canFocusWidget(x, y) : policy.nativePointer)) ||
+				  (owner == Gameplay && !mouseCaptured))) ||
+			 (event.button.button == SDL_BUTTON_RIGHT && owner == PlayerUi && policy.inventory &&
+				 m_playerUi && m_playerUi->canFocusWidget(x, y))))
 		{
 			m_inputRouter.cancelKeyboard(DeveloperUi);
 			imgui->yieldKeyboard();
 			// F01 (round 2): the press is a meaningful move toward the
 			// native screen — clicking an inventory slot restores native
 			// keyboard navigation.
+			// F01 (round 3): a right-click on an inventory control hands
+			// the keyboard back just the same, so a half-stack gesture can
+			// start right after Developer UI interaction. Gameplay and the
+			// other native screens keep the left-click-only behavior.
 			imgui->releaseKeyboardOwnership();
 		}
 		if (owner == PlayerUi && m_playerUi && !policy.nativeScreen)

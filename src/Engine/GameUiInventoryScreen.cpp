@@ -95,24 +95,35 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 		// passive motion can still route here but never reaches this branch.
 		if (button != SDL_BUTTON_LEFT && button != SDL_BUTTON_RIGHT)
 			return {};
-		m_inventoryModality = InventoryModality::Pointer;
 		const auto control = inventoryControlAt({event.button.x, event.button.y});
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
 			if (!m_inventoryPress)
 			{
 				m_inventoryPress = InventoryPress{control, button};
+				// F11 (round 3): the modality follows only a validated
+				// press on an actual control — an inert press on empty
+				// panel space leaves the presentation alone.
 				if (control == kClose || (control && enabled))
+				{
 					m_screens.focus(control);
+					m_inventoryModality = InventoryModality::Pointer;
+				}
 			}
 			return {};
 		}
+		// F11 (round 3): an unmatched release — nothing armed, a different
+		// button, or a release that left the pressed control — is not a
+		// meaningful interaction and never moves the preview.
 		if (!m_inventoryPress || m_inventoryPress->button != button)
 			return {};
 		const auto armed = m_inventoryPress->control;
 		m_inventoryPress.reset();
 		if (control == armed)
+		{
+			m_inventoryModality = InventoryModality::Pointer;
 			return activate(control, button == SDL_BUTTON_RIGHT);
+		}
 		return {};
 	}
 	case SDL_EVENT_MOUSE_WHEEL:
@@ -161,6 +172,9 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 		}
 	}
 	const bool dropEnabled = canDropStack(m_inventoryView);
+	// F11 (round 3): the focus is recorded before navigation so the
+	// modality follows exactly the supported navigations that move it.
+	const auto previousFocus = focus;
 	if (key == SDLK_TAB)
 	{
 		if (event.key.repeat)
@@ -175,7 +189,6 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 	else if (enabled && controlSlot(focus).valid())
 	{
 		const int col = (focus - 1) % kColumns;
-		const int previous = focus;
 		if (key == SDLK_LEFT && col > 0)
 			--focus;
 		if (key == SDLK_RIGHT && col < kColumns - 1)
@@ -184,12 +197,12 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 			focus -= kColumns;
 		if (key == SDLK_DOWN && focus <= kSlotCount - kColumns)
 			focus += kColumns;
-		// F11 (#316): an arrow that actually moves the focus is the
-		// navigation interaction that anchors the held stack; an arrow at a
-		// grid edge changes nothing and does not move the preview.
-		if (focus != previous || key == SDLK_TAB)
-			m_inventoryModality = InventoryModality::Keyboard;
 	}
+	// F11 (#316, round 3): any supported navigation that actually moves the
+	// focus — Tab, Shift+Tab, or an arrow that leaves a grid edge — anchors
+	// the held stack to the newly focused slot; inert keys change nothing.
+	if (focus != previousFocus)
+		m_inventoryModality = InventoryModality::Keyboard;
 	m_screens.focus(focus);
 	if (!event.key.repeat && (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE))
 	{

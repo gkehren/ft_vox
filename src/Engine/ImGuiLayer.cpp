@@ -399,7 +399,10 @@ void ImGuiLayer::beginFrame()
 	// visible keyboard-navigation highlight. A passively retained focus
 	// (an ImGui window merely stayed focused) shows none of these and
 	// never latches, so the native player screens keep their keys.
-	if (ownsActiveInput() || ImGui::GetIO().NavVisible)
+	// Round 3: a deferred keyboard handoff still reports the previous
+	// owner's signals while its queued events drain; those stale signals
+	// must not re-latch the ownership the player just took back.
+	if (!m_yieldThroughEvent && (ownsActiveInput() || ImGui::GetIO().NavVisible))
 		m_devKeyboardOwner = true;
 	if (!nextOwner.empty())
 	{

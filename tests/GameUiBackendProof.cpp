@@ -1338,17 +1338,6 @@ struct GameUiBackendProbe
 		clickAt(slotPoint(capped), SDL_BUTTON_RIGHT);
 		clickAt(slotPoint(over));
 		present();
-		const std::string_view feedbackNow = engine.playerInventoryView().feedback;
-		std::cout << "DBG held=" << held() << " capped=" << capped << " over=" << over
-			<< " feedback=" << (feedbackNow.empty() ? std::string_view("null") : feedbackNow) << '\n';
-		{
-			const auto all = snapshot();
-			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
-				if (!all[size_t(slot)].isEmpty())
-					std::cout << "DUMP slot=" << slot << " item="
-						<< static_cast<int>(all[size_t(slot)].item)
-						<< " count=" << all[size_t(slot)].count << '\n';
-		}
 		CHECK(!held() && snapshot()[size_t(capped)].item == Cobblestone &&
 			snapshot()[size_t(capped)].count == 40 && snapshot()[size_t(over)].count == 64,
 			"the split fills the destination slot to capacity and keeps the remainder in the source");
@@ -1511,6 +1500,98 @@ struct GameUiBackendProbe
 		CHECK(int(sample.screens().focus()) == focusResume + 1,
 			"native keyboard navigation resumes after the developer handoff");
 		capture("ownership");
+
+		// PR #316 round 3 F01: keyboard ownership with a NON-TEXTUAL widget.
+		// A focused button stays the owner after its ActiveId releases; Tab,
+		// arrows, Enter and Space reach only the Developer UI; a right-click
+		// on a native slot hands the keyboard back and arms a half-stack
+		// gesture that the deferred handoff must not re-latch away.
+		int buttonActivations = 0;
+		glm::vec2 buttonPoint{};
+		const auto navButton = [&] {
+			// Below the round-2 editor rect: that window stops being submitted
+			// here, but ImGui can keep it as HoveredWindow for a while, and a
+			// overlapping rect would steal the hover from this one.
+			ImGui::SetNextWindowPos({45.f, 200.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({220.f, 84.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Inventory keyboard button", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				if (ImGui::Button("Dev button"))
+					++buttonActivations;
+				const auto item = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				buttonPoint = {item.x - origin.x + 15.f, item.y - origin.y + 8.f};
+			}
+			ImGui::End();
+		};
+		present(navButton); // paints the window and locates the button
+		// Focus and release in separate builds: the press arms the widget
+		// (ActiveId), the next build releases it and activates the button —
+		// the exact press-then-release an interactive focus carries. The
+		// pointer position is fed to ImGui directly: a real interaction has
+		// the OS cursor at the press point, and the desktop can move the
+		// physical cursor between the frames of an automated run. Events
+		// queued behind a keyboard-yield boundary drain over a few frames,
+		// so the activation is polled within a bounded deadline.
+		SDL_WarpMouseInWindow(engine.window, buttonPoint.x, buttonPoint.y);
+		engine.imgui->observePointer(buttonPoint.x, buttonPoint.y);
+		motion(buttonPoint.x, buttonPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, buttonPoint.x, buttonPoint.y);
+		present(navButton);
+		engine.imgui->observePointer(buttonPoint.x, buttonPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, buttonPoint.x, buttonPoint.y);
+		for (int frame = 0; frame < 8 && buttonActivations == 0; ++frame)
+			present(navButton);
+		present(navButton); // the latch observes the released ActiveId here
+		CHECK(buttonActivations == 1,
+			"the click reaches and activates the non-textual developer button exactly once");
+		CHECK(engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"a released non-textual developer button keeps the keyboard (no editing field involved)");
+		CHECK(!engine.imgui->ownsActiveInput(),
+			"the released button holds no ActiveId while the keyboard ownership persists");
+		const auto beforeDevNav = snapshot();
+		const int focusBeforeDevNav = int(sample.screens().focus());
+		tap(SDLK_TAB);
+		tap(SDLK_LEFT);
+		tap(SDLK_RIGHT);
+		tap(SDLK_RETURN);
+		tap(SDLK_SPACE);
+		engine.handleEvents();
+		for (int frame = 0; frame < 4; ++frame) // ImGui consumes its event queue one frame late
+			present(navButton);
+		CHECK(engine.imgui->ownsKeyboard() && !held() && snapshot() == beforeDevNav &&
+			int(sample.screens().focus()) == focusBeforeDevNav,
+			"Tab, arrows, Enter and Space reach only the developer button, not the inventory");
+		engine.sim->grantItems(Sand, 20);
+		present(navButton);
+		const auto sandSlot = [&] {
+			const auto all = snapshot();
+			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
+				if (all[size_t(slot)].item == Sand && all[size_t(slot)].count == 20)
+					return slot;
+			throw std::runtime_error("proof found no sand stack for the round-3 ownership handoff");
+		}();
+		const auto emptyMain = [&] {
+			for (int slot = items::kHotbarSize; slot < inventoryui::kSlotCount; ++slot)
+				if (snapshot()[size_t(slot)].isEmpty())
+					return slot;
+			throw std::runtime_error("proof found no empty main slot for the round-3 split");
+		}();
+		clickAt(slotPoint(sandSlot), SDL_BUTTON_RIGHT);
+		present(navButton);
+		CHECK(held() && !engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"a right-click on a native slot takes the keyboard back and arms the half-stack gesture");
+		for (int frame = 0; frame < 6; ++frame)
+			present(navButton);
+		CHECK(held() && !engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"deferred frames do not restore the developer keyboard ownership");
+		clickAt(slotPoint(emptyMain));
+		present(navButton);
+		CHECK(!held() && snapshot()[size_t(sandSlot)].count == 10 &&
+			snapshot()[size_t(emptyMain)].item == Sand && snapshot()[size_t(emptyMain)].count == 10,
+			"the half-stack split completes through native input after the developer handoff");
+		capture("ownership-button");
 
 		engine.setDeveloperWorkspaceVisible(false);
 		resize(960, 540);
