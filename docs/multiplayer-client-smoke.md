@@ -90,8 +90,10 @@ crashes, maximum-size records and a reader that stops draining the feed.
 The opt-in Vulkan `--hosting-smoke` drives Start, auto-join,
 Administration callbacks, and a window-close event against a real child.
 It checks the assigned port, profile, suspended solo state, roster, owner
-permission, delegated grant, ban, audit and final checkpoint. Pass a fresh
-temporary directory for the smoke's saves.
+permission, delegated grant, ban and audit. It also checks that Pause leaves
+the server ticking, leaving keeps the server running, and a deferred exit
+during a queued join waits for the final checkpoint. Pass a fresh temporary
+directory for the smoke's saves.
 
 ```powershell
 $smokeRoot = Join-Path $env:TEMP ("ft-vox-host-" + [guid]::NewGuid())
