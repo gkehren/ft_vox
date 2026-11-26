@@ -195,6 +195,32 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 {
 	if (path.empty())
 		return LoadStatus::Missing;
+#if defined(_WIN32)
+	// A reader stays on one complete record while MoveFileEx replaces the
+	// path. The CRT stream does not share DELETE access with the replacer.
+	for (int attempt = 0; attempt < 40; ++attempt)
+	{
+		const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (file != INVALID_HANDLE_VALUE)
+		{
+			char record[kMaxPlayerUiSettingsBytes + 1];
+			DWORD bytesRead = 0;
+			const bool read = ReadFile(file, record, static_cast<DWORD>(sizeof(record)), &bytesRead, nullptr) != 0;
+			CloseHandle(file);
+			return read && parse(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
+		}
+		const auto error = GetLastError();
+		if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+			return LoadStatus::Missing;
+		if (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION &&
+			error != ERROR_LOCK_VIOLATION && error != ERROR_DELETE_PENDING)
+			break;
+		Sleep(1);
+	}
+	return LoadStatus::Corrupt;
+#else
 	// Open first, then read bounded chunks from that same handle (issue #302
 	// R03). Asking for the size separately would describe one record while the
 	// handle pointed at another once a concurrent writer replaces the file.
@@ -231,6 +257,7 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 	if (in.bad() || record.size() > kMaxPlayerUiSettingsBytes)
 		return LoadStatus::Corrupt;
 	return parse(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
+#endif
 }
 
 bool PlayerUiSettings::save(const std::filesystem::path &path) const
