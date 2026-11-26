@@ -297,6 +297,45 @@ void layoutAndWidgets()
 	CHECK(list.first == 5 && list.selected == 0, "list wheel is bounded and does not select");
 	list.select(2, 8, 3);
 	CHECK(list.first == 2 && list.selected == 2, "selection reveals its row");
+	// Correction F11: the administrative roster decouples the selection from
+	// the scroll window — wheel browsing works without a selection, the
+	// offset survives unchanged views, shrinkage clamps it, and the explicit
+	// unselected state never implicitly picks a row.
+	ListSelection roster;
+	roster.clear();
+	CHECK(!roster.any() && roster.selected == -1, "the explicit unselected state is no row");
+	roster.scroll(3, 10, 4);
+	CHECK(roster.first == 3 && !roster.any(), "the wheel scrolls without a selection");
+	roster.select(8, 10, 4);
+	CHECK(roster.selected == 8 && roster.first == 5, "an explicit selection reveals its row");
+	roster.scroll(-2, 10, 4);
+	CHECK(roster.first == 3 && roster.selected == 8, "the offset moves freely around a selection");
+	roster.scroll(0, 6, 4);
+	CHECK(roster.first == 2, "roster shrinkage clamps the scroll offset");
+	roster.clear();
+	CHECK(!roster.any() && roster.first == 2, "clearing the selection preserves the scroll window");
+	roster.select(roster.selected + 1, 10, 4);
+	CHECK(roster.selected == 0 && roster.first == 0, "keyboard navigation starts from the first row and reveals it");
+	// Correction F17: bounds reconciliation keeps the wheel offset — the
+	// shared list helper no longer reveals the selected row every frame, and
+	// select() stays reserved for explicit interaction.
+	ListSelection shared;
+	shared.select(4, 6, 5);
+	shared.scroll(1, 6, 5);
+	CHECK(shared.first == 1 && shared.selected == 4, "the wheel browses beyond the selected row");
+	shared.reconcile(6, 5);
+	CHECK(shared.first == 1 && shared.selected == 4, "reconciliation preserves the offset and selection");
+	shared.reconcile(3, 5);
+	CHECK(shared.first == 0 && shared.selected == 2, "shrinkage clamps the offset and the selection");
+	shared.reconcile(0, 5);
+	CHECK(shared.first == 0 && shared.selected == 0, "an empty collection is safe");
+	ListSelection fresh;
+	fresh.reconcile(4, 3);
+	CHECK(fresh.selected == 0 && fresh.first == 0, "a fresh list keeps its default first-row selection");
+	ListSelection unselected;
+	unselected.clear();
+	unselected.reconcile(4, 3);
+	CHECK(!unselected.any(), "the explicit unselected state survives reconciliation");
 }
 
 void reusableBindings()

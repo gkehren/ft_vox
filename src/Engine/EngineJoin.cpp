@@ -1,6 +1,7 @@
 #include "EngineMultiplayer.hpp"
 
 #include <Engine/ClientProfile.hpp>
+#include <Engine/GameUiSample.hpp>
 
 #include <cassert>
 #include <utility>
@@ -266,6 +267,8 @@ void Engine::resumeSolo()
 		shaderParams.dayTime = m_suspendedSolo->dayTime;
 		m_suspendedSolo.reset();
 		m_remote.reset();
+		if (m_playerUi && gameui::multiplayerScreen(m_playerUi->screens().top()))
+			m_playerUi->resetScreens();
 		if (showDemoPlayers)
 			worldRenderer->overlays().setPlayers(demoPlayers);
 		// Paused streaming does not dispatch meshes. Restore the nearby

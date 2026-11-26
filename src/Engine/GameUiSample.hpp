@@ -2,6 +2,7 @@
 
 #include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerSessionUi.hpp>
+#include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiFonts.hpp>
@@ -12,6 +13,7 @@
 #include <SDL3/SDL.h>
 
 #include <chrono>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +46,8 @@ public:
 	std::optional<gameui::SessionRequest> takeSessionRequest();
 	bool holdingForSession() const;
 	void finishSessionScreen();
+	void setMultiplayerView(gameui::MultiplayerView view);
+	std::optional<gameui::MultiplayerRequest> takeMultiplayerRequest();
 	void invalidateLayout();
 	void back();
 	void openPause();
@@ -135,6 +139,64 @@ private:
 	InputResult applyGalleryActivate(gameui::ControlId id);
 
 	bool buildSessionScreen(gameui::Screen screen, gameui::StackLayout &column);
+	// --- Native multiplayer state (issue #306) ------------------------------
+	// Kept grouped here (correction F09): a future PR may extract a dedicated
+	// MultiplayerScreenController owning this block plus
+	// GameUiMultiplayerScreen.cpp; no Engine or networking responsibility may
+	// be added to GameUiSample beyond the view/intent pair.
+	void buildMultiplayerScreen(gameui::Screen screen, gameui::StackLayout &column);
+	bool activateMultiplayerControl(gameui::ControlId id);
+	void changeMultiplayerControl(gameui::ControlId id);
+	gameui::MultiplayerView m_multiplayer;
+	std::optional<gameui::MultiplayerRequest> m_multiplayerRequest, m_multiplayerConfirm;
+	gameui::TextField m_joinEndpoint, m_joinSeed, m_profileName, m_hostWorld, m_hostPort, m_hostBind,
+		m_hostSlots, m_hostRadius;
+	/// Last AUTOMATIC join endpoint (correction F06): while the player has
+	/// not edited the draft, a session context change re-syncs the field to
+	/// the connected endpoint or the most recent saved one; an edited draft
+	/// survives navigation and session changes untouched.
+	std::string m_joinEndpointAuto;
+	gameui::Toggle m_hostLan, m_autoJoin{true};
+	gameui::ListBox m_mpList, m_mpSecondList, m_mpThirdList;
+	std::vector<std::string> m_mpRows, m_mpSecondRows;
+	std::vector<std::string_view> m_mpLabels, m_mpSecondLabels;
+	std::deque<std::string> m_mpText;
+	std::shared_ptr<const localcontrol::Reply> m_mpAdminDisplayed;
+	/// Roster row cache (correction F07): the Players list rebuilds only when
+	/// the supervisor publishes a new monitor sample or the verified roles
+	/// change — both tracked by pointer identity, not by content comparison.
+	std::shared_ptr<const monitoring::Status> m_mpMonitorDisplayed;
+	std::shared_ptr<const localcontrol::Reply> m_mpRosterAdminDisplayed;
+	std::vector<std::string> m_mpRosterRows;
+	std::vector<std::string_view> m_mpRosterLabels;
+	/// Explicit administration target (correction F01): a stable identity,
+	/// never a row index — a roster refresh moves rows without retargeting
+	/// actions, and a disappearing target clears the selection instead of
+	/// falling back onto another player.
+	sim::PlayerId m_mpAdminTarget{};
+	/// Administration context the selection belongs to (correction F12):
+	/// server launch, verified world identity and live authorization. Any
+	/// change clears the target and the cached reply — the same numeric
+	/// PlayerId in another world or launch is a different player.
+	uint64_t m_mpAdminContextLaunch{}, m_mpAdminContextWorld{};
+	bool m_mpAdminContextAuthorized{};
+	std::vector<std::string> m_mpAdminRows;
+	std::vector<std::string_view> m_mpAdminLabels;
+	int m_mpWorkerChoice{1}, m_mpStreamingChoice{1};
+	std::string m_mpError, m_mpDetail;
+	/// Persistent status slot (correction F19): the live connection or
+	/// supervisor state, painted beside the transient operation feedback so
+	/// neither can mask the other.
+	std::string m_mpStatus;
+	gameui::Clip m_mpStatusMessage{};
+	/// Short-lived clipboard feedback (correction F08); cleared by the next
+	/// join-screen operation.
+	std::string m_mpClipboard;
+	gameui::Clip m_mpMessage{};
+	uint64_t m_mpListRevision{UINT64_MAX};
+	/// m_mpError was raised by the Start server validation: it is cleared when
+	/// the player leaves the host screens (correction F06).
+	bool m_mpErrorOnHost{}, m_mpInitialized{};
 	bool activateSessionControl(gameui::ControlId id);
 	gameui::WorldCatalog m_worldCatalog;
 	std::vector<std::string_view> m_worldNames;

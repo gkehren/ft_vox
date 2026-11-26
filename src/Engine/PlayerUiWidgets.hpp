@@ -97,6 +97,20 @@ struct ListSelection
 	int first{}, selected{};
 	void scroll(int rows, int count, int visible);
 	void select(int index, int count, int visible);
+	/// Bounds reconciliation WITHOUT reveal (correction F17): keeps the
+	/// scroll offset, clamps the selected index to the rows that still exist
+	/// (a fresh list keeps its default first-row selection and an explicit
+	/// unselected state stays unselected) and clamps the offset to the valid
+	/// window. `select` stays reserved for explicit click and keyboard
+	/// interaction, which reveal the chosen row.
+	void reconcile(int count, int visible);
+	/// Explicit unselected state (corrections F01/F11): no row is highlighted
+	/// and the scroll window is PRESERVED so wheel browsing keeps working;
+	/// keyboard navigation starts from the first row. `select`/`scroll` keep
+	/// their historical clamp-to-valid contract, so consumers that never call
+	/// `clear` see no behavior change.
+	void clear() { selected = -1; }
+	bool any() const { return selected >= 0; }
 };
 
 struct Glyph
@@ -213,6 +227,11 @@ public:
 	void setEnabled(ControlId id, bool enabled, ControlId &focus);
 	std::span<const Widget> widgets() const { return {m_items.data(), m_count}; }
 	const ScrollViewport &viewport() const { return m_viewport; }
+	void fitContent(float height)
+	{
+		m_viewport.contentHeight = height;
+		m_viewport.setOffset(m_viewport.offset);
+	}
 	Clip bounds(const Widget &widget) const { return m_viewport.place(widget.bounds); }
 	const Widget *find(ControlId id) const;
 	const Widget *at(glm::vec2 point) const;

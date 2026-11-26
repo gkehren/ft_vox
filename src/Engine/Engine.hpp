@@ -26,6 +26,7 @@
 #include <Engine/InventoryUi.hpp>
 #include <Engine/PlayerUiPreferences.hpp>
 #include <Engine/PlayerSessionUi.hpp>
+#include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
 #include <Core/ThreadPool.hpp>
@@ -194,6 +195,15 @@ private:
 	void queueHostedJoin(const hosting::Snapshot &server, const std::string &profile);
 	void requestExit();
 	void pumpPlayerSession();
+	void pumpPlayerMultiplayer();
+	uint64_t m_playerMultiplayerEpoch{};
+	/// Last refused multiplayer request of the current session generation
+	/// (correction F03): typed, operation-scoped feedback the native surface
+	/// displays; invalidated when the epoch moves or a new request runs.
+	std::optional<gameui::MultiplayerFeedback> m_multiplayerNotice;
+	/// Server launch a server-scoped refusal was reported against (F13): a
+	/// ServerChanged verdict clears when this launch moves again.
+	uint64_t m_multiplayerNoticeServer{};
 	void showMainMenu();
 	void queuePlayerSession(gameui::SessionRequest request);
 	bool acceptsPlayerSession(gameui::SessionAction action) const;

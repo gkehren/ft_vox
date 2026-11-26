@@ -7,7 +7,14 @@
 
 namespace gameui
 {
-enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock, Worlds, CreateWorld, SessionError, ConfirmLeave, Multiplayer, Settings, ConfirmForceStop };
+enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock, Worlds, CreateWorld, SessionError, ConfirmLeave, Multiplayer, Settings, ConfirmForceStop,
+	JoinServer, HostServer, HostOptions, MultiplayerProfiles, MultiplayerRoster, MultiplayerDiagnostics,
+	MultiplayerAdmin, MultiplayerAudit, MultiplayerConfirm };
+
+inline bool multiplayerScreen(Screen screen)
+{
+	return screen == Screen::Multiplayer || (screen >= Screen::JoinServer && screen <= Screen::MultiplayerConfirm);
+}
 using ControlId = uint16_t;
 
 class ScreenStack
@@ -46,6 +53,8 @@ public:
 	uint64_t revision() const { return m_revision; }
 	bool suppressDeveloper() const
 	{
+		if (multiplayerScreen(top()))
+			return true;
 		switch (top())
 		{
 		case Screen::MainMenu: case Screen::Worlds: case Screen::CreateWorld:
@@ -61,7 +70,7 @@ public:
 
 private:
 	struct Entry { Screen screen{}; ControlId focus{}; };
-	std::array<Entry, 6> m_entries{};
+	std::array<Entry, 8> m_entries{};
 	size_t m_size{1};
 	uint64_t m_revision{};
 };

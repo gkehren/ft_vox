@@ -114,8 +114,8 @@ transient world.
 
 ## Multiplayer quick start
 
-From the main menu or Pause, choose **Multiplayer** to open the existing
-Host and Join panel.
+From the main menu or Pause, choose **Multiplayer** to open the native Host
+and Join screens.
 
 - **Join:** create or select a profile, enter the server address and port,
   and connect. Disconnect, reconnect and switch profiles from the same panel.
@@ -123,9 +123,9 @@ Host and Join panel.
   and click **Start server**. The game supervises a separate
   `ft_vox_server` process and can join automatically. A new world binds
   its primary owner to the selected local profile; existing ownership is preserved.
-- **Players / Network / Administration:** inspect live server status and
-  roster when hosting, view your own network diagnostics, and manage access
-  using server-verified local administrative permissions.
+- **Players / Connection details / Administration:** inspect the live host
+  roster or nearby players, view your own connection estimates, and manage
+  access on a locally hosted server with verified local permissions.
 
 You can also run a dedicated server without graphics:
 

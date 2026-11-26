@@ -460,3 +460,196 @@ callbacks during the corrected session proof matched that known signature.
 [Loading](images/session-menu-305/loading.png) ·
 [Pause](images/session-menu-305/pause.png) ·
 [Recoverable error](images/session-menu-305/recoverable-error.png)
+
+## Native multiplayer (#306)
+
+Open **Multiplayer** from the main menu or Pause. **Join server** accepts a
+private IPv4 endpoint and optional expected seed. Use **Profiles** to create
+or select the local identity, and save endpoints as favorites or reuse recent
+connections. A reconnect uses the active session's original profile. Use
+**Switch server or profile** to submit a different draft. **Play** becomes
+available when the confirmed player, inventory and terrain are ready.
+
+**Host server** starts the existing supervised dedicated process. Choose a
+server world and local profile, select a port or use 0 for an ephemeral port,
+and choose whether to join when ready. The hosting options page controls
+loopback versus an explicit trusted LAN or VPN address, player slots, interest
+radius, terrain workers and streaming budget. Cancel a connection separately
+from stopping a server. A confirmed stop waits for the checkpoint. The
+force-stop action appears only after a delayed shutdown and warns about
+uncommitted changes.
+
+**Players** shows fresh full monitoring data on the local host and the nearby
+players included in a connected client's snapshots. The wire protocol provides
+nearby actor IDs to remote clients. Full roles come from the locally verified
+administration reply. **Connection details** shows each client's own RTT
+estimate, sample age and missing snapshots when available. Transport and
+prediction counters remain in Developer UI.
+
+**Administration** uses the launcher's verified local control channel. Refresh
+the registered player list and audit before acting on newly registered players.
+A confirmation captures the server launch, permission epoch, operation and
+selected player. The Engine rechecks those values against the supervisor before
+dispatch. Kicking also requires a fresh live roster entry. A role-only remote
+profile has no local control channel. Owner recovery remains the documented
+offline dedicated-server operation. [Dedicated server guide](dedicated-server.md)
+
+The original Developer UI panel remains available during migration. The native
+player flow uses the same Engine adapters for profiles, preferences, join,
+hosting and administration. No credentials or child logs enter its view model.
+
+Run the opt-in proof from a Windows Release graphics build. It launches two
+graphical clients with isolated profile directories and an ephemeral loopback
+server, drives the native controls through SDL and writes PNG evidence.
+
+```powershell
+$env:FT_VOX_VALIDATION = '1'
+python tests/test_hosted_closure_native.py --menu --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/native-multiplayer-evidence
+```
+
+The historical hosted-closure phases (persistent identities and inventories
+across a checkpoint restart, without the native menu) stay on the same runner:
+
+```powershell
+python tests/test_hosted_closure_native.py --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/hosted-closure-evidence
+```
+
+### Review corrections (#306 round 2)
+
+- **Identity-stable administration targeting.** The registered-player list
+  selection is a `sim::PlayerId`, never a row index: roster reorderings keep
+  the target, a disappearing target clears the selection into an explicit
+  unselected state (no row highlighted, targeted actions hidden until a
+  player is chosen again), and a press armed when the target changed is
+  cancelled. No destructive operation can implicitly fall back onto another
+  player.
+- **Kick semantics are explicit.** A kick intentionally targets the persistent
+  player identity: the server stores a 60-second `kickedUntil` lockout on the
+  persistent access record, actively closes the session and refuses rejoin
+  while the lockout runs. The confirmation says so, and both the client
+  revalidation and the server refuse to kick a target that is not online with
+  a fresh monitor sample. A role revocation also demotes by disconnecting the
+  target so it re-enters as a plain player.
+- **Refused requests produce typed feedback.** Every drained multiplayer
+  request is evaluated before dispatch (`gameui::evaluateMultiplayerRequest`):
+  `StaleSession`, `ServerChanged`, `Busy`, `InvalidState`,
+  `PermissionChanged` or `ActionUnavailable` surface on the screen that owns
+  the action, scoped to the session generation so an old refusal can never
+  mask a newer session. Navigating away before the pump runs is an intentional
+  cancellation and stays silent. The Engine adapters remain authoritative.
+- **Draft lifecycle.** The join endpoint follows the session context (the
+  connected endpoint or the most recent saved one) only while the player has
+  not edited it; an edited draft survives navigation and session changes.
+  Operation-specific errors clear when their screen family is left.
+- **Clipboard copy reports success or failure**, roster rows rebuild only when
+  the monitor sample or verified roles change, and the multiplayer state in
+  `GameUiSample` stays grouped for a future `MultiplayerScreenController`
+  extraction.
+
+The `--menu` proof covers: profile creation and selection, host start with
+auto-join, invalid endpoint and wrong-seed rejections, favorites, live roster
+and independent ping, grant admin with confirmation, an obsolete-epoch
+refusal, delegated control refused across the credential boundary, an
+end-to-end kick (the guest observes the disconnect and the refused rejoin),
+ban and unban of the offline target, allowlist enable, membership and
+disable, a cancelled stop with no side effect, stale epoch, stale launch and
+vanished-target confirmations refused through the real execution pipeline,
+single-execution audit evidence, stop-and-save with checkpoint, and the
+occupied-port bind failure. CPU-side, `test_multiplayer_intents` pins the
+eligibility and outcome rules for every operation without a GPU.
+
+### Review corrections (#306 rounds 3 and 4)
+
+- **Endpoint editing is stable.** The automatic endpoint is re-published only
+  when its value changed and never while a text composition or an active
+  text selection is in progress: the caret, selection and IME state survive
+  every frame. A synchronization deferred while editing retries once the
+  field is left, an untouched draft follows the session context, and an
+  edited draft survives navigation and session transitions. Choosing a
+  favorite or recent endpoint counts as an explicit edit.
+- **Every multiplayer list scrolls independently.** The shared list helper
+  reconciles the selected row index and the scroll offset
+  (`ListSelection::reconcile`) without revealing anything: wheel browsing
+  works with and without a selection across favorites, recent endpoints,
+  saved profiles, hosted worlds, the live roster, delegated-control
+  profiles and the audit history, the offset survives unchanged views and
+  clamps on shrinkage, and only an explicit click or a keyboard step
+  reveals a row.
+- **The administrative selection is server-scoped.** It belongs to one hosted
+  launch, one verified world identity and a live authorization. A relaunch, a
+  world change or a lost channel clears the target and the cached reply, so
+  identical numeric PlayerIds across worlds or launches can never inherit a
+  target.
+- **Refusal feedback is generation-scoped.** Server-scoped notices name their
+  launch; a `ServerChanged` verdict is reported against the new launch and
+  clears on the next launch change, so an old result never masks the current
+  server state. Client connection feedback stays scoped to its session
+  generation.
+- **Transient results never mask state.** A persistent status slot
+  (connection or supervisor state) paints beside the transient operation
+  feedback: the clipboard result displays independently of a standing
+  connection error, the supervisor state stays visible beside a hosting
+  operation error, and an administrative refusal stays visible after the
+  channel itself disappeared.
+- **The gameplay boundary is restored.** `pumpPlayerMultiplayer` returns
+  before building any frame or view when no multiplayer screen is active; a
+  queued request is consumed as a silent, intentional cancellation. Hosting
+  supervision, auto-join and the remote session keep advancing in their own
+  ticks, and the first pump after re-entering a screen rebuilds current data.
+
+The final review pass also hardened the proof harness itself. The `--menu`
+proof flushes queued real pointer events before each synthetic click
+(desktop mouse motion or window leaves cancelled armed activations and
+silently dropped navigation clicks), re-issues the idempotent
+administration refresh until the registry names the session the monitor
+observes (the guest's deliberate seed-mismatch rejection re-registers it a
+moment after the roster first shows two players), and drives a UI scale
+sweep: the Join screen stays reachable at 100%, 150% and 200% on a
+1920x1080 window with keyboard navigation revealing the primary action,
+with `join-scale-100.png`, `join-scale-150.png` and `join-scale-200.png` as
+evidence. The F17 regression lives in the proof as well: a six-row saved
+profiles list keeps its wheel scroll offset across screen reconstructions
+and a row picked outside the initial window drives the profile action. CPU
+tests pin `ListSelection::reconcile` (selection clamp, offset clamp, `-1`
+preserved) and the deferred endpoint synchronization retry.
+
+### Validation record (#306)
+
+Covered by existing suites (verified, not duplicated here):
+
+- Unsupported protocol versions: the `rejectHello` version matrix in
+  `test_wire_protocol`.
+- Server capacity rejection: the excess-client `Full` rejection in
+  `test_udp_transport` and the `Full` status mapping in `test_multiplayer_ui`.
+- Lost connections and stale monitoring: the timeout/retry path in
+  `EngineJoinSmoke`, `test_server_restart_client` and the hosted-closure
+  phases.
+- Checkpoint failure: `test_world_checkpoint` and the persistence contracts in
+  `test_voxel_world` / `test_world_save`.
+- Delayed shutdown and force-stop safeguards: `test_server_supervisor`
+  (direct force-stop refused, delayed stop escalation, stale-roster
+  freshness).
+- CPU intent rules: `test_multiplayer_intents` (eligibility, typed outcomes,
+  notice lifetime, cross-world selection scope) and the `ListSelection`
+  scrolling and reconcile cases in `test_game_ui_interaction`.
+
+Executed graphical validation (Windows, RTX 4070 Ti, validation layers on):
+
+- `python tests/test_hosted_closure_native.py --menu ...`: two consecutive
+  clean runs (25 owner checks, 27 guest checks), including the scale sweep
+  screenshots at 1920x1080.
+- `python tests/test_hosted_closure_native.py ...` (first and restart
+  phases): host and guest across checkpoint restart, 71/29/13/15 checks.
+- Full `ctest -C Release`: 76/76. CPU-only configure
+  (`FT_VOX_GRAPHICS=OFF`): 54/54.
+
+Remaining manual validation before closing #306 (NOT executed here):
+
+- A positive delegated local-control authorization with a correctly enrolled
+  local profile on the launcher machine — the isolated two-process proof can
+  only verify the credential-boundary refusal.
+- Human inspection of the native screens on the GPU machine: administrative
+  roster scrolling with 10+ registered players, scrolling in favorites,
+  profiles and hosted worlds, endpoint editing with caret and text
+  selection, and a visual check of the three scale screenshots for clipping
+  or inaccessible controls.

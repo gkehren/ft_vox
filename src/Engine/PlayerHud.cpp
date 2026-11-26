@@ -85,20 +85,9 @@ HudSession hudSession(HudSessionState state, bool ready, std::string_view label,
 	return out;
 }
 
-std::string_view recoveryInstruction(bool workspaceVisible, bool mouseCaptured)
+std::string_view recoveryInstruction()
 {
-	// The developer menu bar is the only owner of Multiplayer > Reconnect: show
-	// the workspace with the global chord, then release the mouse if it is still
-	// captured. Each branch names exactly the steps that are missing.
-	if (!workspaceVisible)
-	{
-		if (mouseCaptured)
-			return "Ctrl+Shift+D, C, then Multiplayer > Reconnect.";
-		return "Ctrl+Shift+D, then Multiplayer > Reconnect.";
-	}
-	if (mouseCaptured)
-		return "C to free the mouse, then Multiplayer > Reconnect.";
-	return "Multiplayer > Reconnect.";
+	return "Esc > Multiplayer > Join server.";
 }
 
 HudLayout hudLayout(Clip scene, Clip safeArea, const style::Theme &theme, float scale)

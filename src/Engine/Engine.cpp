@@ -276,7 +276,8 @@ void Engine::resetWorldProjection()
 	clearGameplayInput();
 	m_inputRouter.cancelPlayerUi();
 	m_inventoryResult.reset();
-	if (m_playerUi && !m_playerSessionRequest)
+	++m_playerMultiplayerEpoch;
+	if (m_playerUi && !m_playerSessionRequest && !gameui::multiplayerScreen(m_playerUi->screens().top()))
 		m_playerUi->resetScreens();
 	if (worldRenderer)
 	{
@@ -1950,10 +1951,7 @@ gameui::HudView Engine::playerHudView() const
 		view.recovery = session.recovery;
 		if (session.blocked)
 		{
-			// Only the host knows whether the menu bar is reachable right now, so
-			// the recovery line follows the actual workspace and capture state
-			// (issue #303 F03). It names the existing Multiplayer > Reconnect path.
-			view.recovery = gameui::recoveryInstruction(m_showDeveloperUi, mouseCaptured);
+			view.recovery = gameui::recoveryInstruction();
 		}
 		if (session.showHotbar && synchronized)
 		{
@@ -2198,6 +2196,7 @@ void Engine::run()
 			break;
 		}
 		pumpPlayerSession();
+		pumpPlayerMultiplayer();
 		if (!running)
 		{
 			GetProfiler().endFrame();

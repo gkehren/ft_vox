@@ -59,6 +59,14 @@ void GameUiSample::resetScreens(Screen root)
 	cancelInventoryGesture();
 	m_screens.reset(root);
 	m_sessionRequest.reset();
+	m_multiplayerRequest.reset();
+	m_multiplayerConfirm.reset();
+	m_mpError.clear();
+	m_mpErrorOnHost = false;
+	// The explicit administration target and the clipboard note belong to the
+	// multiplayer visit being left (corrections F01/F08).
+	m_mpAdminTarget = {};
+	m_mpClipboard.clear();
 	m_sessionStatus.clear();
 	m_worldName = {};
 	m_worldSeed = {};
@@ -84,6 +92,8 @@ void GameUiSample::back()
 		m_sessionRequest = SessionRequest{SessionAction::Cancel, {}, {}};
 		return;
 	}
+	if (m_screens.top() == Screen::MultiplayerConfirm)
+		m_multiplayerConfirm.reset();
 	if (m_screens.top() == Screen::Inventory)
 	{
 		setInventoryView({});
@@ -124,23 +134,31 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
-	const float height = screen == Screen::Showcase ? 364.f :
+	const bool multiplayer = multiplayerScreen(screen);
+	const float multiplayerHeight = screen == Screen::MultiplayerConfirm ? 310.f : 524.f;
+	const float height = multiplayer ? multiplayerHeight : screen == Screen::Showcase ? 364.f :
 		(screen == Screen::Pause ? 450.f : (screen == Screen::Worlds ? 355.f : 260.f));
-	const float width = screen == Screen::Showcase ? 640.f : 456.f;
+	const float width = multiplayer ? 560.f : screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
 	m_panel = panel;
 	if (moved)
 		m_widgets.cancelPress();
 	const auto body = inset(m_panel, 14.f * scale);
-	const float contentHeight = (height - 28.f) * scale;
+	const float contentHeight = (multiplayer ? 760.f : height - 28.f) * scale;
 	m_widgets.reset(body, contentHeight, offset);
 	StackLayout column(rectangle(glm::vec2(body.rect), {size(body).x, contentHeight}), true, 6.f * scale);
 	const auto add = [&](ControlId id, Control control, float h, std::string_view title) {
 		m_widgets.add({id, column.next(h * scale), title, {}, control});
 	};
 	m_sessionMessage = {};
-	if (buildSessionScreen(screen, column))
+	if (multiplayer)
+	{
+		buildMultiplayerScreen(screen, column);
+		if (const auto widgets = m_widgets.widgets(); !widgets.empty())
+			m_widgets.fitContent(widgets.back().bounds.rect.w - body.rect.y);
+	}
+	else if (buildSessionScreen(screen, column))
 	{
 		// Session controls use the same focus, clipping and input path.
 	}
@@ -212,6 +230,18 @@ void GameUiSample::paintScreen(glm::vec2 pointer)
 	if (m_screens.suppressDeveloper())
 		paint.backdrop(m_draws.bounds(), theme.palette.scrim);
 	paint.card(m_panel);
+	if (multiplayerScreen(m_screens.top()) && !m_mpStatusMessage.empty())
+	{
+		auto bodyPaint = surface(m_widgets.viewport().clip);
+		bodyPaint.wrappedLabel(m_widgets.viewport().place(m_mpStatusMessage), m_mpStatus,
+			style::TextRole::Body, theme.palette.ink, 5);
+	}
+	if (multiplayerScreen(m_screens.top()) && !m_mpMessage.empty())
+	{
+		auto bodyPaint = surface(m_widgets.viewport().clip);
+		bodyPaint.wrappedLabel(m_widgets.viewport().place(m_mpMessage), m_mpDetail,
+			style::TextRole::Body, theme.palette.ink, 5);
+	}
 	if (m_screens.top() == Screen::SessionError)
 		paint.wrappedLabel(m_sessionMessage, m_sessionStatus, style::TextRole::Body, theme.palette.ink, 5);
 	if (m_screens.top() == Screen::Loading)
@@ -253,7 +283,7 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 	{
 		if (m_screens.top() == Screen::Gallery)
 			return applyGalleryActivate(event.id);
-		if (activateSessionControl(event.id))
+		if (activateMultiplayerControl(event.id) || activateSessionControl(event.id))
 			return InputResult::Consumed;
 		switch (event.id)
 		{
@@ -268,6 +298,8 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 		default: break;
 		}
 	}
+	if (event.action == WidgetAction::Change)
+		changeMultiplayerControl(event.id);
 	if (event.action == WidgetAction::Change && event.id == EnableSecond)
 	{
 		auto focus = m_screens.focus();
@@ -474,12 +506,6 @@ bool GameUiSample::buildSessionScreen(Screen screen, StackLayout &column)
 		button(Return, "Cancel");
 		button(ConfirmLeave, "Leave", true, style::ButtonVariant::Danger);
 		break;
-	case Screen::Multiplayer:
-		label("Multiplayer");
-		label("Use the Multiplayer panel to host or join.");
-		button(Multiplayer, "Show Multiplayer panel");
-		button(Return, "Back");
-		break;
 	case Screen::Settings:
 		label("Settings");
 		label("Use the Graphics panel for display settings.");
@@ -517,11 +543,7 @@ bool GameUiSample::activateSessionControl(ControlId id)
 	case Save: request(SessionAction::Save); break;
 	case Leave: openScreen(Screen::ConfirmLeave); break;
 	case ConfirmLeave: request(SessionAction::Leave); break;
-	case Multiplayer:
-		if (m_screens.top() != Screen::Multiplayer)
-			openScreen(Screen::Multiplayer);
-		request(SessionAction::Multiplayer);
-		break;
+	case Multiplayer: openScreen(Screen::Multiplayer); break;
 	case Settings:
 		if (m_screens.top() != Screen::Settings)
 			openScreen(Screen::Settings);

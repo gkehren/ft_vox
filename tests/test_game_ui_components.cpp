@@ -1009,7 +1009,7 @@ void liveHud()
 	HudView occupied = blank;
 	occupied.status = "Timed out";
 	occupied.activity = "The server did not respond in time.";
-	occupied.recovery = recoveryInstruction(false, true);
+	occupied.recovery = recoveryInstruction();
 	resolved = resolveHud(overlapped, occupied);
 	CHECK(resolved.reticle && !resolved.status && !resolved.activity && !resolved.recovery,
 		"secondary copy yields to the reticle instead of hiding it");
@@ -1161,7 +1161,7 @@ void hudSessionRows()
 	quiet.status = "Synchronizing session";
 	CHECK(hudHasSessionFeedback(quiet), "a status headline suppresses the demonstration strip");
 	quiet.status = {};
-	quiet.recovery = recoveryInstruction(false, false);
+	quiet.recovery = recoveryInstruction();
 	CHECK(hudHasSessionFeedback(quiet), "a recovery line alone also suppresses the strip");
 
 	// F03: the blocked copy plus its reconnect steps fit the bounded feedback
@@ -1169,7 +1169,7 @@ void hudSessionRows()
 	// drop and without leaving the gameplay rectangle.
 	for (const float scale : {1.f, 1.5f, 2.f})
 	{
-		for (const bool workspaceVisible : {true, false})
+		for ([[maybe_unused]] const bool workspaceVisible : {true, false})
 		{
 			const auto layout =
 				hudLayout({{0.f, 0.f, 960.f, 540.f}}, {{0.f, 0.f, 960.f, 540.f}}, theme(), scale);
@@ -1178,7 +1178,7 @@ void hudSessionRows()
 			HudView view{};
 			view.status = timedOut.status;
 			view.activity = timedOut.activity;
-			view.recovery = recoveryInstruction(workspaceVisible, true);
+			view.recovery = recoveryInstruction();
 			view.statusKind = timedOut.kind;
 			DrawList draws;
 			draws.reset({960.f, 540.f}, 16);
@@ -1195,34 +1195,10 @@ void hudSessionRows()
 	}
 }
 
-// Issue #303 F03/F12: the reconnect steps follow the actual presentation state
-// instead of a fixed menu path, and only name controls that exist.
 void recoveryInstructions()
 {
-	const auto hiddenCaptured = recoveryInstruction(false, true);
-	const auto hiddenFree = recoveryInstruction(false, false);
-	const auto visibleCaptured = recoveryInstruction(true, true);
-	const auto visibleFree = recoveryInstruction(true, false);
-	CHECK(hiddenCaptured == "Ctrl+Shift+D, C, then Multiplayer > Reconnect." &&
-			hiddenFree == "Ctrl+Shift+D, then Multiplayer > Reconnect." &&
-			visibleCaptured == "C to free the mouse, then Multiplayer > Reconnect." &&
-			visibleFree == "Multiplayer > Reconnect.",
-		"each workspace/capture state names exactly the steps it still needs");
-	CHECK(hiddenCaptured != hiddenFree && hiddenCaptured != visibleCaptured &&
-			visibleCaptured != visibleFree && hiddenFree != visibleFree,
-		"the instruction follows the state instead of being a fixed literal");
-	for (const auto text : {hiddenCaptured, hiddenFree, visibleCaptured, visibleFree})
-	{
-		const auto menu = text.find("Multiplayer > Reconnect");
-		const auto chord = text.find("Ctrl+Shift+D");
-		const auto mouse = text.find("free the mouse");
-		CHECK(menu != std::string_view::npos && text.size() <= 52,
-			"the recovery line stays one short sentence: " << text);
-		CHECK((chord == std::string_view::npos || chord < menu) &&
-				(mouse == std::string_view::npos || mouse < menu) &&
-				text.find("Esc") == std::string_view::npos,
-			"the steps are ordered and never point at a menu that does not exist: " << text);
-	}
+	CHECK(recoveryInstruction() == "Esc > Multiplayer > Join server.",
+		"recovery points to the native Join screen");
 }
 
 void gallery()
