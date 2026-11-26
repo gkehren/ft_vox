@@ -150,6 +150,10 @@ See the [dedicated server guide](docs/dedicated-server.md),
 
 ## Controls
 
+Open **Settings** from the main menu or pause menu to change window size, VSync,
+anti-aliasing, mouse sensitivity, vertical look direction, or player UI scale.
+**Controls reference** shows the keyboard and mouse bindings in-game.
+
 | Input | Action |
 |-------|--------|
 | WASD / mouse | Move / look |

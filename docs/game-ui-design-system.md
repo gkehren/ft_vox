@@ -155,24 +155,12 @@ Details:
 
 ### Persisted override (settings seam)
 
-`PlayerUiPreferences.*` stores `<saves-root>/.client-profiles/player-ui.txt`:
-
-```text
-ftvox-player-ui 1
-scale fixed 1.50
-```
-
-- Written atomically (staging file + rename, never deleting a directory).
-- Read strictly: unknown version, unknown key, duplicate key, out-of-grid or
-  out-of-range value → `LoadStatus::Corrupt`, defaults kept, loud log, session
-  unchanged. A missing file is `LoadStatus::Missing` (fresh install, no log).
-- The Engine loads it at startup, pushes it into the player UI as a policy, and
-  persists a request raised by a surface (the gallery's scale selector today,
-  the settings screen in #307). Presentation-only: no gameplay, save or wire
-  field is touched.
-- A failed read or write is reported twice: a loud log line, and the
-  `setSettingsNotice` seam, which the gallery prints under the scale selector
-  instead of hiding the failure behind a stderr line the player never sees.
+The Engine loads the scale policy from `<saves-root>/.client-settings/player-settings.txt`
+and passes it to the scale controller. **Settings** previews the scale before
+saving it. The design gallery continues to send direct scale requests through
+the same preference store and shows its read or write errors under the scale
+selector. See [Player settings](game-ui-migration.md#player-settings-307) for
+validation, legacy scale migration, and precedence.
 
 ## 4. Components
 

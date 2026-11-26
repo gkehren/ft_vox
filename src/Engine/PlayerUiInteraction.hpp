@@ -9,7 +9,7 @@ namespace gameui
 {
 enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock, Worlds, CreateWorld, SessionError, ConfirmLeave, Multiplayer, Settings, ConfirmForceStop,
 	JoinServer, HostServer, HostOptions, MultiplayerProfiles, MultiplayerRoster, MultiplayerDiagnostics,
-	MultiplayerAdmin, MultiplayerAudit, MultiplayerConfirm };
+	MultiplayerAdmin, MultiplayerAudit, MultiplayerConfirm, Controls };
 
 inline bool multiplayerScreen(Screen screen)
 {
@@ -60,6 +60,7 @@ public:
 		case Screen::MainMenu: case Screen::Worlds: case Screen::CreateWorld:
 		case Screen::Loading: case Screen::SessionError: case Screen::ConfirmLeave:
 		case Screen::ConfirmExit: case Screen::ConfirmForceStop:
+		case Screen::Settings: case Screen::Controls:
 			return true;
 		default: return false;
 		}

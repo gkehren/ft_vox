@@ -24,7 +24,7 @@
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/InventoryUi.hpp>
-#include <Engine/PlayerUiPreferences.hpp>
+#include <Engine/PlayerSettingsUi.hpp>
 #include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
@@ -81,6 +81,11 @@ public:
 	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
 
 	void setVSync(bool enabled);
+	void setPlayerSettingsOverrides(bool vsync, bool fxaa)
+	{
+		m_playerVSyncOverride = vsync;
+		m_playerFxaaOverride = fxaa;
+	}
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
 	int worldSeed() const;
@@ -183,12 +188,20 @@ private:
 	friend struct GameUiBackendProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
-	/// Player UI preferences (issue #302): the persisted scale override, loaded
-	/// once at startup, applied at the next frame boundary and re-saved when a
-	/// player surface raises a request through the settings seam.
 	void loadPlayerUiPreferences();
 	void persistPlayerUiPreferences();
 	void applyPlayerUiScaleRequests();
+	void pumpPlayerSettings();
+	void updatePlayerDisplayPreview(int pixelW, int pixelH);
+	void handlePlayerSettingsRequest(const gameui::SettingsRequest &request);
+	void beginPlayerDisplayPreview(std::optional<gameui::WindowSize> size,
+		std::optional<gameui::ScalePolicy> scale, bool reset = false);
+	void revertPlayerDisplayPreview(std::string_view notice = {});
+	void publishPlayerSettingsView();
+	void requestPlayerVSync(bool enabled, bool persist);
+	void finishPlayerVSync(bool applied);
+	void applyPlayerMouseSensitivity(int percent);
+	void resetPlayerSettingsDefaults();
 	void loadHosting();
 	void populateHostingUi(GameUIFrame &frame);
 	void tickHosting();
@@ -491,9 +504,21 @@ private:
 	client::JoinPreferences m_joinPreferences;
 	gameui::PlayerUiSettings m_playerUiSettings{};
 	std::string m_playerUiError;
-	/// True while the in-memory preference is not known to be on disk. A failed
-	/// write is retried by the next selection, even of the same value (F17).
+	std::string m_playerSettingsNotice;
 	bool m_playerUiDirty{};
+	bool m_playerVSyncOverride{}, m_playerFxaaOverride{};
+	// Present while a settings-originated request awaits swapchain recreation.
+	// True means a successful application is also an explicit disk edit.
+	std::optional<bool> m_playerVSyncRequest;
+	struct DisplayPreview
+	{
+		gameui::DisplayView view;
+		gameui::WindowSize previousWindow;
+		gameui::ScalePolicy previousScale;
+		std::chrono::steady_clock::time_point deadline;
+		bool reset{};
+	};
+	std::optional<DisplayPreview> m_playerDisplayPreview;
 	std::vector<std::string> m_joinProfiles;
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;

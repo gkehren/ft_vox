@@ -224,14 +224,6 @@ void Engine::pumpPlayerSession()
 				m_worldCatalog = std::async(std::launch::async, listLocalWorlds, m_savesRoot);
 			}
 			break;
-		case Settings:
-			// Native navigation already happened on activation. A stale panel
-			// request must not reopen a screen the player has left.
-			if (!gameUi || m_playerUi->screens().top() != Screen::Settings)
-				break;
-			setDeveloperWorkspaceVisible(true);
-			gameUi->showGraphicsPanel();
-			break;
 		case Retry: case Cancel: case ConfirmFailedQuit:
 		{
 			if (!acceptsPlayerSession(request->action))

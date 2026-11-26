@@ -27,8 +27,6 @@
 #include <random>
 #include <algorithm>
 
-#define FULLSCREEN 1
-
 namespace
 {
 /// Sky fallback clear (issue #209): shared by every recorded frame.
@@ -74,25 +72,11 @@ Engine::Engine(std::string resourcePackRoot)
 								 vulkanLibraryLoadHint());
 	}
 
-	windowWidth = 1920;
-	windowHeight = 1080;
+	windowWidth = gameui::kDefaultWindowSize.width;
+	windowHeight = gameui::kDefaultWindowSize.height;
 
-	Uint32 windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE |
+	const SDL_WindowFlags windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE |
 						 SDL_WINDOW_HIGH_PIXEL_DENSITY;
-	if (FULLSCREEN == 0)
-	{
-		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
-		if (mode)
-		{
-			windowWidth = mode->w;
-			windowHeight = mode->h;
-			windowFlags |= SDL_WINDOW_FULLSCREEN;
-		}
-	}
-	else if (FULLSCREEN == 2)
-	{
-		windowFlags |= SDL_WINDOW_BORDERLESS;
-	}
 
 	window = SDL_CreateWindow("ft_vox (Vulkan)", windowWidth, windowHeight, windowFlags);
 	if (!window)
@@ -409,14 +393,11 @@ void Engine::finishSoloBootstrap(glm::dvec3 bootstrapCenter, bool resident)
 
 void Engine::setVSync(bool enabled)
 {
+	m_playerVSyncRequest.reset();
 	renderSettings.vsyncEnabled = enabled;
-	if (!swapchain || (swapchain->isVSync() == enabled && !m_pendingVSync))
-		return;
-
 	// UI is built after beginFrame() acquired an image. Defer the mode change so
 	// the old swapchain remains alive through record/submit/present.
-	m_pendingVSync = enabled;
-	requestSwapchainRecreate();
+	m_pendingVSync = swapchain && swapchain->isVSync() != enabled ? std::optional{enabled} : std::nullopt;
 }
 
 void Engine::setGraphicsQualityPreset(GraphicsQualityPreset preset)
@@ -656,10 +637,9 @@ void Engine::onResize(int width, int height)
 {
 	if (width <= 0 || height <= 0)
 		return;
-	windowWidth = width;
-	windowHeight = height;
 	updateDisplayRefreshRate();
-	requestSwapchainRecreate();
+	// The pre-acquire viewport query handles extent changes. A delayed SDL
+	// notification for a size already applied must not recreate it again.
 }
 
 void Engine::requestSwapchainRecreate()
@@ -672,16 +652,44 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	if (!swapchain || width == 0 || height == 0)
 		return;
 
-	const bool desiredVSync = m_pendingVSync.value_or(swapchain->isVSync());
+	const bool previousVSync = swapchain->isVSync();
+	bool desiredVSync = m_pendingVSync.value_or(previousVSync);
+	if (m_playerVSyncRequest)
+	{
+		try
+		{
+			const auto support = VkSwapchain::querySupport(vkContext->getPhysicalDevice(), vkContext->getSurface());
+			VkSwapchain::selectPresentMode(support.presentModes, desiredVSync);
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "[ui] " << e.what() << '\n';
+			desiredVSync = renderSettings.vsyncEnabled = previousVSync;
+			m_pendingVSync.reset();
+			finishPlayerVSync(false);
+		}
+	}
 	const VkExtent2D extent = swapchain->getExtent();
-	if (!m_swapchainRecreateRequested && desiredVSync == swapchain->isVSync() &&
+	if (!m_swapchainRecreateRequested && desiredVSync == previousVSync &&
 		extent.width == width && extent.height == height)
 		return;
 
 	PROFILE_SCOPE("SwapchainRecreate");
 	// VkSwapchain::recreate waits for the device before destroying WSI state.
 	// Every swapchain consumer is refreshed before the next image acquisition.
-	swapchain->recreate(width, height, desiredVSync);
+	try
+	{
+		swapchain->recreate(width, height, desiredVSync);
+	}
+	catch (const std::exception &e)
+	{
+		if (!m_playerVSyncRequest)
+			throw;
+		std::cerr << "[ui] " << e.what() << '\n';
+		swapchain->recreate(width, height, previousVSync);
+		renderSettings.vsyncEnabled = previousVSync;
+		finishPlayerVSync(false);
+	}
 	frameCtx->onSwapchainRecreate(swapchain->getImageCount());
 	worldRenderer->onSwapchainRecreate(*swapchain);
 	if (m_playerUi)
@@ -693,6 +701,8 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	windowHeight = static_cast<int>(swapchain->getExtent().height);
 	m_pendingVSync.reset();
 	m_swapchainRecreateRequested = false;
+	if (m_playerVSyncRequest)
+		finishPlayerVSync(true);
 }
 
 void Engine::tickDayCycle(double dt)
@@ -1110,7 +1120,7 @@ void Engine::handleEvents()
 			if (mouseCaptured)
 			{
 				camera.processMouseMovement(static_cast<float>(event.motion.xrel),
-											static_cast<float>(event.motion.yrel));
+					static_cast<float>(event.motion.yrel) * (m_playerUiSettings.invertY ? -1.f : 1.f));
 			}
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -2203,6 +2213,7 @@ void Engine::run()
 			break;
 		}
 		applySessionRequests();
+		pumpPlayerSettings();
 
 		// (2) Viewport: a minimized/hidden window skips the whole frame; the
 		// clock resync AFTER the sleep keeps the skipped stretch out of the
@@ -2222,6 +2233,7 @@ void Engine::run()
 
 		recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
 								  static_cast<uint32_t>(pixelH));
+		updatePlayerDisplayPreview(pixelW, pixelH);
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		// Inspection timeout check runs BEFORE acquisition: breaking after a

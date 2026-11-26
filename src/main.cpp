@@ -439,6 +439,7 @@ int main(int argc, char **argv)
 		const bool directSolo = !worldName.empty() || directSeed || benchmarkDuration > 0.f ||
 			inspection || uiSpike || gameUi;
 		Engine engine(resourcePack);
+		engine.setPlayerSettingsOverrides(vsyncOverride.has_value(), qualityPreset.has_value());
 		engine.setShowDeveloperUi(showDeveloperUi && (directSolo || server.has_value()));
 		engine.setShowPlayerHud(showPlayerHud);
 		if (server)

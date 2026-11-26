@@ -1,21 +1,8 @@
 #pragma once
 
-// Persisted player UI preferences — issue #302, Epic #298 Phase D.
-//
-// The settings seam the epic asks for: the player UI scale override survives a
-// restart without touching the developer UI, the simulation, saves or the wire
-// protocol. The file is a tiny versioned text record next to the other client
-// preferences (`<saves-root>/.client-profiles/player-ui.txt`), written
-// atomically (unique staging file + rename) so a crash cannot leave a partial
-// record, and read strictly: an unknown version, an unknown key, a duplicate
-// key or an out-of-range value degrades to the defaults with `load` returning
-// false so the host can log it loudly and carry on.
-//
-// The record is deliberately presentation-only: no gameplay, renderer or
-// network preference may migrate here without its own review.
-
 #include <Engine/PlayerUiScale.hpp>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -25,7 +12,29 @@ namespace gameui
 {
 /// Upper bound for one preferences file; anything larger is corruption.
 inline constexpr size_t kMaxPlayerUiSettingsBytes = 4096;
-inline constexpr std::string_view kPlayerUiSettingsHeader = "ftvox-player-ui 1";
+inline constexpr std::string_view kLegacyPlayerUiSettingsHeader = "ftvox-player-ui 1";
+inline constexpr std::string_view kPlayerUiSettingsHeader = "ftvox-player-settings 1";
+inline constexpr std::string_view kPlayerSettingsPath = ".client-settings/player-settings.txt";
+inline constexpr std::string_view kLegacyPlayerSettingsPath = ".client-profiles/player-ui.txt";
+
+struct WindowSize
+{
+	int width{}, height{};
+	bool operator==(const WindowSize &) const = default;
+};
+
+inline constexpr std::array kWindowSizes{
+	WindowSize{960, 540}, WindowSize{1280, 720}, WindowSize{1600, 900}, WindowSize{1920, 1080}};
+inline constexpr WindowSize kDefaultWindowSize = kWindowSizes.back();
+
+inline constexpr std::array kSensitivitySteps{25, 50, 75, 100, 125, 150, 200, 250, 300};
+inline constexpr int kDefaultSensitivity = 100;
+inline constexpr float kDefaultCameraSensitivity = 0.1f;
+
+inline float cameraSensitivity(int percent)
+{
+	return kDefaultCameraSensitivity * static_cast<float>(percent) / 100.f;
+}
 
 /// Why a load did or did not change the settings.
 enum class LoadStatus : uint8_t
@@ -38,8 +47,13 @@ enum class LoadStatus : uint8_t
 struct PlayerUiSettings
 {
 	ScalePolicy scale{};
+	WindowSize window{kDefaultWindowSize};
+	bool vsync{true};
+	bool fxaa{true};
+	int sensitivity{kDefaultSensitivity};
+	bool invertY{};
 
-	/// Serialize to the on-disk record (header + one `scale` line).
+	bool valid() const;
 	std::string serialize() const;
 
 	/// Parse a whole record. Returns false (and leaves `*this` untouched) when

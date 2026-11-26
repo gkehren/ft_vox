@@ -59,6 +59,8 @@ void GameUiSample::resetScreens(Screen root)
 	cancelInventoryGesture();
 	m_screens.reset(root);
 	m_sessionRequest.reset();
+	m_settingsRequest.reset();
+	m_displayChoice = {};
 	m_multiplayerRequest.reset();
 	m_multiplayerConfirm.reset();
 	m_mpError.clear();
@@ -87,6 +89,13 @@ void GameUiSample::back()
 {
 	if (holdingForSession())
 		return;
+	if (m_screens.top() == Screen::Settings && m_settingsView.display)
+	{
+		m_settingsRequest = SettingsAction::Revert;
+		return;
+	}
+	if (m_screens.top() == Screen::Settings)
+		m_displayChoice = {};
 	if (m_screens.top() == Screen::SessionError)
 	{
 		m_sessionRequest = SessionRequest{SessionAction::Cancel, {}, {}};
@@ -133,28 +142,36 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 	else if (rebuilt)
 		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
+	const bool settings = screen == Screen::Settings || screen == Screen::Controls;
 	m_screenScale = scale;
 	const bool multiplayer = multiplayerScreen(screen);
+	const bool displayPreview = screen == Screen::Settings && m_settingsView.display.has_value();
+	const float settingsHeight = screen == Screen::Controls ? 520.f : displayPreview ? 278.f :
+		(m_settingsView.notice.empty() ? 470.f : 560.f);
 	const float multiplayerHeight = screen == Screen::MultiplayerConfirm ? 310.f : 524.f;
-	const float height = multiplayer ? multiplayerHeight : screen == Screen::Showcase ? 364.f :
+	const float height = settings ? settingsHeight : multiplayer ? multiplayerHeight : screen == Screen::Showcase ? 364.f :
 		(screen == Screen::Pause ? 450.f : (screen == Screen::Worlds ? 355.f : 260.f));
-	const float width = multiplayer ? 560.f : screen == Screen::Showcase ? 640.f : 456.f;
+	const float width = settings ? (displayPreview ? 480.f : 620.f) :
+		multiplayer ? 560.f : screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
 	m_panel = panel;
 	if (moved)
 		m_widgets.cancelPress();
 	const auto body = inset(m_panel, 14.f * scale);
-	const float contentHeight = (multiplayer ? 760.f : height - 28.f) * scale;
+	const float contentHeight = (settings ? 680.f : multiplayer ? 760.f : height - 28.f) * scale;
 	m_widgets.reset(body, contentHeight, offset);
 	StackLayout column(rectangle(glm::vec2(body.rect), {size(body).x, contentHeight}), true, 6.f * scale);
 	const auto add = [&](ControlId id, Control control, float h, std::string_view title) {
 		m_widgets.add({id, column.next(h * scale), title, {}, control});
 	};
 	m_sessionMessage = {};
-	if (multiplayer)
+	if (settings || multiplayer)
 	{
-		buildMultiplayerScreen(screen, column);
+		if (settings)
+			buildSettingsScreen(screen, column);
+		else
+			buildMultiplayerScreen(screen, column);
 		if (const auto widgets = m_widgets.widgets(); !widgets.empty())
 			m_widgets.fitContent(widgets.back().bounds.rect.w - body.rect.y);
 	}
@@ -246,6 +263,8 @@ void GameUiSample::paintScreen(glm::vec2 pointer)
 		paint.wrappedLabel(m_sessionMessage, m_sessionStatus, style::TextRole::Body, theme.palette.ink, 5);
 	if (m_screens.top() == Screen::Loading)
 		paint.progress(m_sessionMessage, 0.f, true, m_uiPhase);
+	if (m_screens.top() == Screen::Settings)
+		paintSettingsNotice();
 	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer, theme, m_atlasLayers,
 		m_fontScale);
 }
@@ -283,7 +302,7 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 	{
 		if (m_screens.top() == Screen::Gallery)
 			return applyGalleryActivate(event.id);
-		if (activateMultiplayerControl(event.id) || activateSessionControl(event.id))
+		if (activateSettingsControl(event.id) || activateMultiplayerControl(event.id) || activateSessionControl(event.id))
 			return InputResult::Consumed;
 		switch (event.id)
 		{
@@ -506,13 +525,6 @@ bool GameUiSample::buildSessionScreen(Screen screen, StackLayout &column)
 		button(Return, "Cancel");
 		button(ConfirmLeave, "Leave", true, style::ButtonVariant::Danger);
 		break;
-	case Screen::Settings:
-		label("Settings");
-		label("Use the Graphics panel for display settings.");
-		button(Settings, "Show Graphics panel");
-		button(Gallery, "Player UI scale");
-		button(Return, "Back");
-		break;
 	case Screen::ConfirmForceStop:
 		label("Force stop the hosted server?");
 		label("Recent server changes may be lost.");
@@ -544,11 +556,7 @@ bool GameUiSample::activateSessionControl(ControlId id)
 	case Leave: openScreen(Screen::ConfirmLeave); break;
 	case ConfirmLeave: request(SessionAction::Leave); break;
 	case Multiplayer: openScreen(Screen::Multiplayer); break;
-	case Settings:
-		if (m_screens.top() != Screen::Settings)
-			openScreen(Screen::Settings);
-		request(SessionAction::Settings);
-		break;
+	case Settings: openScreen(Screen::Settings); break;
 	case Retry: request(SessionAction::Retry); break;
 	case CancelFailure: request(SessionAction::Cancel); break;
 	case ForceStop: openScreen(Screen::ConfirmForceStop); break;
