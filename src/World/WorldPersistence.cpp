@@ -723,7 +723,7 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
                                                           const std::string &name,
                                                           int currentSeed,
                                                           uint32_t currentGeneratorVersion,
-                                                          bool dedicatedServer)
+                                                          bool dedicatedServer, bool existingOnly)
 {
 	// A prior open keeps its service alive until shutdown; reopening on top
 	// would leak a running worker.
@@ -765,9 +765,16 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	}
 	else if (read == worldsave::SaveStatus::NotFound)
 	{
+		if (existingOnly)
+		{
+			info.error = "world '" + name + "' no longer exists";
+			return info;
+		}
 		info.created = true;
+		// Publish identity before making chunks/, so a failed metadata
+		// write can leave a native creation reservation empty and retryable.
 		std::error_code ec;
-		std::filesystem::create_directories(chunksDir, ec);
+		std::filesystem::create_directories(worldDir, ec);
 		if (ec)
 		{
 			info.error = "failed to create world directories: " + ec.message();
@@ -778,6 +785,12 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		if (worldsave::writeWorldMeta(metaPath, meta) != worldsave::SaveStatus::Ok)
 		{
 			info.error = "failed to write " + metaPath.string();
+			return info;
+		}
+		std::filesystem::create_directories(chunksDir, ec);
+		if (ec)
+		{
+			info.error = "failed to create chunk directory: " + ec.message();
 			return info;
 		}
 		info.storedFormatVersion = meta.formatVersion;

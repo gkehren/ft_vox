@@ -71,7 +71,9 @@ struct EngineJoinProbe
 	void pump()
 	{
 		engine.tickHosting();
-		engine.applySessionRequests();
+		engine.pumpPlayerSession();
+		if (!engine.m_playerSessionRequest)
+			engine.applySessionRequests();
 		if (engine.m_remote)
 		{
 			// F09 (#316): the scenario never overrides the host's focus
@@ -215,16 +217,31 @@ struct EngineJoinProbe
 		}, "connected simulation stopped advancing while the menu was open");
 		CHECK(engine.m_remote->ready(), "server snapshots continue under the native menu");
 
+		engine.queuePlayerSession({gameui::SessionAction::Leave, {}, {}});
+		engine.m_sessionProgressPresented = true;
+		until([&] { return !engine.m_playerSessionRequest; }, "leave did not return to the menu");
+		CHECK(!engine.m_remote && engine.m_playerUi->screens().top() == gameui::Screen::MainMenu &&
+			engine.m_hostSnapshot.state == hosting::State::Ready, "leave keeps the hosted server running");
+
 		engine.running = true;
+		frame().joinHostedServer("host-choice");
+		CHECK(engine.m_joinRequest.has_value(), "a hosted join can queue from the empty menu");
+		engine.queuePlayerSession({gameui::SessionAction::Create, "conflicting-local", "42"});
+		CHECK(!engine.m_playerSessionRequest, "local creation cannot replace the queued remote transition");
 		SDL_Event close{};
 		close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 		close.window.windowID = SDL_GetWindowID(engine.window);
 		if (!SDL_PushEvent(&close))
 			throw std::runtime_error(SDL_GetError());
 		engine.handleEvents();
-		CHECK(engine.running && engine.m_exitAfterHostedStop, "game exit waits for its hosted server");
-		CHECK(engine.m_playerUi->screens().top() == gameui::Screen::Hud && !engine.suppressDeveloperUi(),
-			"host shutdown restores Developer UI for stop progress and recovery");
+		CHECK(engine.running && engine.m_deferredQuit && !engine.m_playerSessionRequest,
+			"window close waits for the queued network transition");
+		pump();
+		CHECK(engine.m_remote && engine.m_deferredQuit, "the queued join starts before deferred quit");
+		engine.pumpPlayerSession();
+		CHECK(engine.m_playerSessionRequest && engine.m_playerUi->screens().top() == gameui::Screen::Loading &&
+			engine.suppressDeveloperUi(), "the native loading screen owns input during hosted shutdown");
+		engine.noteSessionFramePresented();
 		until([&] { return !engine.running || engine.m_hostSnapshot.state == hosting::State::Failed; },
 			"game did not reach a terminal hosted shutdown");
 		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped && !engine.m_hostSnapshot.status &&

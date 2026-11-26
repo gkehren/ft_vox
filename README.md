@@ -107,9 +107,15 @@ make run
 For complete build instructions and dependency configuration, see
 [Building ft_vox](docs/building.md).
 
+Choose **Local worlds** from the main menu to open a save or create a world.
+Press **Escape** in play to pause, save, or return to the menu. To start
+directly, use `--world <name>` for a persistent world or `--seed <n>` for a
+transient world.
+
 ## Multiplayer quick start
 
-Launch the game normally and open **Multiplayer → Show panel**.
+From the main menu or Pause, choose **Multiplayer** to open the existing
+Host and Join panel.
 
 - **Join:** create or select a profile, enter the server address and port,
   and connect. Disconnect, reconnect and switch profiles from the same panel.

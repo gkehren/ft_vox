@@ -7,7 +7,7 @@
 
 namespace gameui
 {
-enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock };
+enum class Screen { Hud, Inventory, Pause, Showcase, ConfirmExit, MainMenu, Loading, Gallery, HudMock, Worlds, CreateWorld, SessionError, ConfirmLeave, Multiplayer, Settings, ConfirmForceStop };
 using ControlId = uint16_t;
 
 class ScreenStack
@@ -44,10 +44,20 @@ public:
 		++m_revision;
 	}
 	uint64_t revision() const { return m_revision; }
-	bool suppressDeveloper() const { return top() == Screen::ConfirmExit || top() == Screen::Loading; }
+	bool suppressDeveloper() const
+	{
+		switch (top())
+		{
+		case Screen::MainMenu: case Screen::Worlds: case Screen::CreateWorld:
+		case Screen::Loading: case Screen::SessionError: case Screen::ConfirmLeave:
+		case Screen::ConfirmExit: case Screen::ConfirmForceStop:
+			return true;
+		default: return false;
+		}
+	}
 	bool nativeScreen() const { return top() != Screen::Hud; }
 	bool blocksGameplay() const { return top() != Screen::Hud; }
-	bool pausesWorld(bool connected) const { return !connected && contains(Screen::Pause); }
+	bool pausesWorld(bool connected) const { return !connected && (contains(Screen::Pause) || contains(Screen::Loading) || contains(Screen::SessionError)); }
 
 private:
 	struct Entry { Screen screen{}; ControlId focus{}; };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine/PlayerHud.hpp>
+#include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiFonts.hpp>
@@ -35,7 +36,14 @@ public:
 	bool hasArmedPress() const { return m_armed || m_widgets.hasPress() || m_inventoryPress.has_value(); }
 	bool hitsStrip(float x, float y) const;
 	bool canFocusWidget(float x, float y) const;
-	void resetScreens();
+	void resetScreens(gameui::Screen root = gameui::Screen::Hud);
+	void setWorldCatalog(gameui::WorldCatalog catalog);
+	void setSessionStatus(std::string message, bool retry = false, bool force = false,
+		bool failedQuit = false);
+	void setSessionContext(bool remote, bool persistent, bool hosted);
+	std::optional<gameui::SessionRequest> takeSessionRequest();
+	bool holdingForSession() const;
+	void finishSessionScreen();
 	void invalidateLayout();
 	void back();
 	void openPause();
@@ -125,6 +133,17 @@ private:
 	void paintDesignSystem(glm::vec2 pointer);
 	InputResult applyWidgetEvent(gameui::WidgetEvent event);
 	InputResult applyGalleryActivate(gameui::ControlId id);
+
+	bool buildSessionScreen(gameui::Screen screen, gameui::StackLayout &column);
+	bool activateSessionControl(gameui::ControlId id);
+	gameui::WorldCatalog m_worldCatalog;
+	std::vector<std::string_view> m_worldNames;
+	gameui::ListBox m_worldList;
+	gameui::TextField m_worldName, m_worldSeed;
+	std::string m_sessionStatus;
+	gameui::Clip m_sessionMessage{};
+	std::optional<gameui::SessionRequest> m_sessionRequest;
+	bool m_retrySession{}, m_forceStop{}, m_failedQuit{}, m_remoteSession{}, m_persistentSession{}, m_hostedSession{};
 
 	gameui::Renderer m_renderer;
 	gameui::DrawList m_draws;

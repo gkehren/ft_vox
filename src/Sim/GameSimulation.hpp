@@ -287,6 +287,7 @@ public:
         std::string worldName;     // empty: transient session (no persistence)
         std::filesystem::path savesRoot{"saves"};
         bool dedicatedServer{false};
+        bool existingWorldOnly{false};
     };
 
     /// Result of finalizePlayerSpawn(): where the host camera should look

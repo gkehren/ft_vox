@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 
 #include <filesystem>
+#include <future>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,6 +25,7 @@
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/InventoryUi.hpp>
 #include <Engine/PlayerUiPreferences.hpp>
+#include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
 #include <Core/ThreadPool.hpp>
@@ -190,6 +193,34 @@ private:
 	void tickHosting();
 	void queueHostedJoin(const hosting::Snapshot &server, const std::string &profile);
 	void requestExit();
+	void pumpPlayerSession();
+	void showMainMenu();
+	void queuePlayerSession(gameui::SessionRequest request);
+	bool acceptsPlayerSession(gameui::SessionAction action) const;
+	bool blocksNetworkSessionRequests() const;
+	void startDeferredQuit();
+	void noteSessionFramePresented() { m_sessionProgressPresented |= m_playerSessionRequest.has_value(); }
+	void completePlayerSession();
+	void failPlayerSession(std::string message, bool retryable = true);
+	void finishSoloBootstrap(glm::dvec3 center, bool resident);
+	struct SoloWorkResult
+	{
+		std::unique_ptr<sim::GameSimulation> simulation;
+		glm::dvec3 center{};
+		std::string error;
+		bool retryable{true};
+	};
+	static SoloWorkResult prepareLocalWorld(const std::filesystem::path &root, const std::string &name,
+		int seed, gameui::SessionAction action, ThreadPool *pool,
+		const std::function<void(const std::filesystem::path &)> &beforeInitialize);
+	// Fault/delay seam for the opt-in session lifecycle proof.
+	std::function<void(const std::filesystem::path &)> m_beforeLocalWorldInitializeForTests;
+	std::future<SoloWorkResult> m_soloWork;
+	std::future<gameui::WorldCatalog> m_worldCatalog;
+	std::optional<gameui::SessionRequest> m_playerSessionRequest;
+	std::optional<gameui::SessionRequest> m_failedPlayerSession;
+	bool m_waitingForHostExit{}, m_hostExitFailed{}, m_deferredQuit{}, m_retryablePlayerFailure{};
+	bool m_sessionProgressPresented{}, m_leavingToMenu{}, m_useMainMenu{};
 	void persistJoinPreferences();
 	void populateJoinUi(GameUIFrame &frame);
 	void applySessionRequests();
@@ -203,7 +234,7 @@ private:
 	void startRemote(std::unique_ptr<RemoteSession> remote);
 	void resumeSolo();
 	void retireWorldProjection();
-	bool switchingSession() const { return m_nextRemote || m_returnToSolo; }
+	bool switchingSession() const { return m_nextRemote || m_returnToSolo || m_leavingToMenu; }
 	void pollRemote();
 	void sendRemoteInput(const physics::PlayerInput &input);
 	void updateRemoteCamera();

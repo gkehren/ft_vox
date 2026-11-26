@@ -27,7 +27,7 @@ static void printUsage(const char *argv0)
 			  << " [--connect <IPv4:port>] [--vsync <on|off>] [--benchmark <seconds>]\n"
 			  << "\n"
 			  << "Options:\n"
-			  << "  --seed <value>              Solo world seed or expected server seed (integer)\n"
+			  << "  --seed <value>              Start solo play directly or set the expected server seed\n"
 			  << "  --connect <IPv4:port>       Join an authoritative ft_vox_server via UDP\n"
 			  << "  --player-profile <dir>     Reuse a multiplayer key across launches or endpoint changes\n"
 			  << "  --world <name>              Open (or create) the persistent save saves/<name>\n"
@@ -69,6 +69,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 int main(int argc, char **argv)
 {
 	unsigned int seed_to_use = 0;
+	bool directSeed = false;
 	std::optional<net::udp::Address> server;
 	std::string serverEndpoint;
 	std::filesystem::path playerProfile;
@@ -207,6 +208,7 @@ int main(int argc, char **argv)
 				return kExitUsage;
 			}
 			seed_to_use = parsedSeed;
+			directSeed = true;
 			continue;
 		}
 		if (arg == "--world")
@@ -434,12 +436,14 @@ int main(int argc, char **argv)
 				playerProfile = std::filesystem::path("saves") / ".client-profiles" / serverEndpoint;
 			playerKey = client::playerKey(playerProfile, client::ProfileAccess::LoadOrCreate);
 		}
+		const bool directSolo = !worldName.empty() || directSeed || benchmarkDuration > 0.f ||
+			inspection || uiSpike || gameUi;
 		Engine engine(resourcePack);
-		engine.setShowDeveloperUi(showDeveloperUi);
+		engine.setShowDeveloperUi(showDeveloperUi && (directSolo || server.has_value()));
 		engine.setShowPlayerHud(showPlayerHud);
 		if (server)
 			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt, *playerKey);
-		else
+		else if (directSolo)
 		{
 			if (!worldName.empty())
 				engine.requestOpenWorld(worldName);

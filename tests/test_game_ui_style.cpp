@@ -485,6 +485,22 @@ void preferences()
 	}
 
 #if defined(_WIN32)
+	// An open handle with DELETE access models the sharing requirements of
+	// a replacement. A concurrent reader must share that access.
+	{
+		PlayerUiSettings kept;
+		kept.scale = {ScaleMode::Fixed, 1.5f};
+		CHECK(kept.save(path), "the record for a concurrent read is on disk");
+		const HANDLE holder = CreateFileW(path.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(holder != INVALID_HANDLE_VALUE, "another instance can hold a delete-enabled handle");
+		PlayerUiSettings loaded;
+		CHECK(loaded.load(path) == LoadStatus::Ok && loaded == kept,
+			"the preferences reader shares delete access with an in-progress replacement");
+		if (holder != INVALID_HANDLE_VALUE)
+			CloseHandle(holder);
+	}
+
 	// R03: a real replacement failure against the actual destination. A second
 	// instance holds the record without FILE_SHARE_DELETE, so MoveFileEx cannot
 	// land: save reports false, the previous record survives and the staging file

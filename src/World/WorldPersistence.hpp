@@ -365,7 +365,7 @@ public:
 	/// misread as "no overrides saved".
 	OpenInfo openOrCreate(const std::filesystem::path &savesRoot, const std::string &name,
 						  int currentSeed, uint32_t currentGeneratorVersion,
-						  bool dedicatedServer = false);
+						  bool dedicatedServer = false, bool existingOnly = false);
 
 	bool enabled() const { return m_enabled; }
 	int seed() const { return m_seed; }

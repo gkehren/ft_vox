@@ -100,7 +100,7 @@ gameui::InputContext Engine::inputContext() const
 			(mouseCaptured ? imgui->ownsActiveInput() : imgui->ownsKeyboard())),
 		.devDialog = devAvailable && (imgui->hasModal() || (gameUi && gameUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
-		.transition = switchingSession() || (m_remote && !m_remote->ready()),
+		.transition = m_playerSessionRequest.has_value() || switchingSession() || (m_remote && !m_remote->ready()),
 		.captureFailed = m_captureFailed,
 	};
 }
@@ -116,7 +116,7 @@ ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 void Engine::setInventoryOpen(bool open)
 {
 	if (m_playerUi)
-		m_playerUi->setInventoryOpen(open);
+		m_playerUi->setInventoryOpen(open && (sim || m_remote));
 	// F01 (round 2): a freshly opened native screen owns the keyboard —
 	// opening E clears the Developer UI latch (a real Developer UI owner —
 	// an editing field or a popup — re-latches itself next frame).

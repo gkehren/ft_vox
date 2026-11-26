@@ -374,3 +374,89 @@ Windows 11, MSVC Release (vcpkg), GeForce RTX 4070 Ti, driver 32.0.16.2124, Vulk
 | Linux/WSL compile | Debian GCC compiled and linked the graphical executable with the local build's cached shader compiler stub. The shader compile and GPU evidence above use the actual Windows Vulkan SDK toolchain. |
 
 Linux and macOS/MoltenVK graphics, UNORM swapchain output, high-DPI monitor transitions and OS-driven minimization were untested for the spike. Production UI timing and resource-pack reload measurements are follow-ups in #300–#309.
+
+## Main menu and local sessions (#305)
+
+A graphical launch without a world, seed, remote endpoint, benchmark, inspection
+or UI proof starts at the native main menu. It has no simulation or terrain
+projection, and displaying the menu does not create a world. The developer
+workspace starts hidden on this launch path. `--world <name>`
+still opens or creates that save directly, `--seed <n>` still starts a transient
+world, and `--connect`, `--benchmark`, `--view`, `--ui-spike` and `--game-ui`
+retain their direct entry points. The server and headless runners keep their
+existing command lines.
+
+- **Local worlds** lists up to 64 saves from a scan of at most 512 directory
+  entries. Refresh rereads the directory. Open uses the selected world's
+  metadata, including its seed. A missing save produces an error.
+- **Create world** takes a new name of 1–32 ASCII letters, digits, dashes or
+  underscores. Leave the seed blank for a random seed, or enter an integer
+  from 1 to 2147483647. Creation reserves a new directory, so reusing a name
+  cannot open or overwrite an existing save. A failed creation releases its
+  empty reservation so the same name can be retried. A folder containing data
+  is preserved and the screen directs the player to refresh or use another name.
+- **Escape** opens Pause in play and moves back through menus and confirmations.
+  Use **Save world** to checkpoint and stay in Pause, or **Save and return to
+  menu** to checkpoint and close. Solo uses the existing suspension policy.
+  A remote Pause blocks local controls while the server continues ticking.
+  **Leave server** disconnects the client and keeps an independently hosted
+  server running.
+- **Exit to desktop** and the window close button share the Engine's exit
+  path. Exit first saves any local world, then stops a server launched by
+  this client and waits for its final checkpoint. A delayed hosted stop
+  offers the supervisor's existing force-stop operation behind confirmation.
+  An unconfirmed hosted checkpoint remains visible for an explicit exit
+  decision. A local checkpoint failure keeps the world open for retry or
+  return to play. A close during loading, saving, leaving, or a queued
+  connection change is remembered. A failed transition pauses that quit.
+  Retry keeps the quit pending through a successful retry, and Back cancels it.
+- **Multiplayer** and **Settings** are the navigation points for #306 and
+  #307. Their interim controls open the existing Multiplayer and Graphics
+  panels. Showing a panel again keeps the current native screen and focus.
+  The Settings page also links to the native player scale control. Dev world
+  and player actions require a live world. The Graphics and Multiplayer panels
+  are available from the empty menu.
+
+The native UI queues one typed request per transition. The loop consumes it
+before frame acquisition and presents a loading screen before retiring the
+projection when visible. Filesystem scans, world initialization and terrain
+generation, and save/checkpoint work run away from SDL input dispatch. During
+solo save and close, the worker exclusively owns the simulation. The frame
+owner retires or rebuilds the Vulkan projection at the world boundary and
+resets the frame clock as control returns. Gameplay stays suppressed through
+screen or focus changes, and the epoch barrier clears HUD, inventory and
+render caches. Player preferences and the developer layout keep their
+existing storage. Engine validates each intent against live session ownership
+before starting work and checks that the frame-owner slot is empty before
+publishing a worker result.
+
+Projection reuse on explicit save is deferred. A save currently drains and
+retires the projection, checkpoints with exclusive CPU world ownership, and
+rebuilds the nearby projection on the frame owner. Keeping the projection
+requires a separate quiescence contract for retained world references.
+Catalogue pagination is also deferred. Refresh repeats the bounded scan and
+the screen reports when it stops at either limit. Use direct
+`--world <name>` for existing saves outside that list.
+
+The opt-in Windows Vulkan proof writes launch, world selection, loading,
+pause and recoverable error captures. It uses a fresh output directory and
+stores its fixture under that directory. It drives SDL keyboard, pointer,
+window-close and minimize events, and uses injected persistence faults to
+verify recovery.
+
+```powershell
+$env:FT_VOX_VALIDATION = "1"
+.\build\tests\Release\test_engine_reload.exe --session-menu-proof <fresh-output-directory>
+```
+
+Captured on Windows with an NVIDIA GeForce RTX 4070 Ti at 960×540.
+The proof exercises the production screen renderer and lifecycle with typed
+intents and SDL events. Vulkan validation reported the documented RTSS
+swapchain errors during initialization and recreation. All validation
+callbacks during the corrected session proof matched that known signature.
+
+[Launch](images/session-menu-305/launch.png) ·
+[World selection](images/session-menu-305/world-selection.png) ·
+[Loading](images/session-menu-305/loading.png) ·
+[Pause](images/session-menu-305/pause.png) ·
+[Recoverable error](images/session-menu-305/recoverable-error.png)

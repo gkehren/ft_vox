@@ -313,7 +313,7 @@ public:
 
 	// --- Persistent world lifecycle (issue #180 contracts, unchanged) -----------
 	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError,
-				   bool dedicatedServer = false);
+				   bool dedicatedServer = false, bool existingOnly = false);
 	/// Retryable close: quiesce, capture, flush, shutdown. False keeps the
 	/// persistence OPEN and usable (failed flush / stranded edits).
 	bool closeWorld();

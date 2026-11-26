@@ -2,6 +2,7 @@
 
 #include <Engine/ClientProfile.hpp>
 
+#include <cassert>
 #include <utility>
 
 void Engine::loadJoinPreferences()
@@ -43,14 +44,18 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 	frame.joinProfiles = &m_joinProfiles;
 	frame.joinError = m_joinError;
 	frame.joinPreferencesError = m_joinPreferencesError;
-	frame.switchingSession = switchingSession();
+	frame.switchingSession = switchingSession() || blocksNetworkSessionRequests();
 	frame.connectServer = [this](client::JoinRequest request) {
-		m_joinRequest = std::move(request);
+		if (!switchingSession() && !blocksNetworkSessionRequests())
+			m_joinRequest = std::move(request);
 	};
 	if (m_remote && !frame.switchingSession)
 		frame.returnToSolo = [this] {
-			m_joinError.clear();
-			m_returnToSolo = true;
+			if (!switchingSession() && !blocksNetworkSessionRequests())
+			{
+				m_joinError.clear();
+				m_returnToSolo = true;
+			}
 		};
 	frame.selectJoinProfile = [this](std::string_view name) {
 		m_joinError.clear();
@@ -138,6 +143,9 @@ void Engine::prepareRemoteJoin(const client::JoinRequest &request)
 
 void Engine::applySessionRequests()
 {
+	// Finish an already-queued network switch before a deferred quit.
+	if (m_playerSessionRequest || m_soloWork.valid() || m_failedPlayerSession)
+		return;
 	if (auto request = std::exchange(m_joinRequest, std::nullopt); request && !switchingSession())
 	{
 		try
@@ -162,6 +170,7 @@ void Engine::applySessionRequests()
 	auto remote = std::move(m_nextRemote);
 	if (sim && sim->isWorldOpen())
 	{
+		assert(renderBridge);
 		vkContext->waitIdle();
 		renderBridge->drainAsyncJobsForPersistence();
 		if (!sim->savePlayerState(camera.getYaw(), camera.getPitch()))
@@ -213,6 +222,8 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 		m_suspendedSolo.emplace(SuspendedSolo{std::move(sim), camera, paused, shaderParams.dayTime});
 		paused = false;
 	}
+	else if (!m_remote)
+		retireWorldProjection();
 	try
 	{
 		// Start the join timeout after the old projection has drained.
@@ -224,6 +235,8 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 	{
 		if (!m_remote && m_suspendedSolo)
 			resumeSolo();
+		else if (!m_remote && m_useMainMenu)
+			showMainMenu();
 		throw;
 	}
 	// Replacing the session closes its trace before opening the next one.
@@ -260,6 +273,11 @@ void Engine::resumeSolo()
 		if (paused)
 			renderBridge->meshResidentArea(camera.getPosition(), sim::GameSimulation::kBootstrapRadiusChunks,
 				vkContext->getAllocator(), *immediate, worldRenderer->arenas());
+	}
+	else if (m_useMainMenu)
+	{
+		m_remote.reset();
+		showMainMenu();
 	}
 	else
 	{

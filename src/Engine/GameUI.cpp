@@ -384,6 +384,13 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 		return;
 	}
 
+	if (!frame.camera)
+	{
+		ImGui::TextUnformatted("Enter a world to use player controls.");
+		ImGui::End();
+		return;
+	}
+
 	const playerui::PlayerSnapshot &p = frame.player;
 	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
 
@@ -488,6 +495,13 @@ void GameUI::drawWorld(GameUIFrame &frame)
 							 ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kWorld, &m_debug.panels.world))
 	{
+		ImGui::End();
+		return;
+	}
+
+	if (!frame.camera && !frame.multiplayerStatus)
+	{
+		ImGui::TextUnformatted("Enter a world to inspect terrain.");
 		ImGui::End();
 		return;
 	}

@@ -246,7 +246,8 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     if (wantPersistence)
     {
         std::string error;
-        if (m_world->openWorld(config.savesRoot.string(), config.worldName, error, config.dedicatedServer))
+        if (m_world->openWorld(config.savesRoot.string(), config.worldName, error,
+                              config.dedicatedServer, config.existingWorldOnly))
         {
             std::cout << "[world] opened '" << config.worldName << "' (seed " << seed << ")\n";
         }

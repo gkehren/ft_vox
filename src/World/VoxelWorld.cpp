@@ -1388,7 +1388,7 @@ std::vector<glm::ivec3> VoxelWorld::generateInitialAreaVoxels(const glm::vec3 &c
 // ---------------------------------------------------------------------------
 
 bool VoxelWorld::openWorld(const std::string &savesRoot, const std::string &worldName,
-						   std::string &outError, bool dedicatedServer)
+						   std::string &outError, bool dedicatedServer, bool existingOnly)
 {
 	outError.clear();
 	if (!m_terrainGenerator)
@@ -1405,7 +1405,7 @@ bool VoxelWorld::openWorld(const std::string &savesRoot, const std::string &worl
 	auto persistence = std::make_unique<WorldPersistence>();
 	const WorldPersistence::OpenInfo info = persistence->openOrCreate(
 		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion,
-		dedicatedServer);
+		dedicatedServer, existingOnly);
 	if (!info.ok)
 	{
 		outError = info.error;

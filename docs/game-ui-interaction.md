@@ -63,7 +63,11 @@ On a single-config build run `./tests/test_engine_reload --game-ui-showcase-proo
 
 For a manual pass, type different values into Name and Secondary name and change each slider independently. Disable the secondary field and try to focus it and type again. Open a floating Developer UI window while the native Name field is active, click into an ImGui `InputText`, keep typing, then click back into Name: each surface must receive only the characters typed while it held the caret, and an unfinished composition must not survive the transfer. Start dragging a floating Developer UI window, Alt+Tab away while holding the button, then release it and return. Check that a fresh click or drag works. Repeat in the default launch and with `--game-ui`. While holding an ImGui press, try a second button over the native strip, and release the buttons in reverse order. Dismiss the confirmation while holding a movement key, then resume and check that movement waits for a fresh press.
 
-Run `GameUiInteraction` and `GameUiDrawList` in a graphics-off build. The existing opt-in `--hosting-smoke` scenario also checks that remote snapshots keep arriving while the menu blocks local controls and that hosted shutdown restores the Host panel.
+Run `GameUiInteraction` and `GameUiDrawList` in a graphics-off build. The opt-in
+`--hosting-smoke` scenario checks that remote snapshots keep arriving while
+Pause blocks local controls. It also checks that leaving keeps the server
+running and that the native loading screen waits for the hosted checkpoint
+after a window close during a queued join.
 
 ## Verification
 
