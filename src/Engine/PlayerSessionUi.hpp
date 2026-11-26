@@ -5,6 +5,7 @@
 
 namespace gameui
 {
+// Native screens submit these intents. Engine validates them against live ownership.
 enum class SessionAction
 {
 	List, Create, Open, Save, Leave, Quit, Retry, Cancel, Multiplayer, Settings,

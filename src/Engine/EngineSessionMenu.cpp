@@ -6,6 +6,12 @@
 #include <charconv>
 #include <utility>
 
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 using gameui::SessionAction;
 using gameui::Screen;
@@ -41,6 +47,17 @@ bool directWorldDirectory(const fs::path &root, const fs::path &path)
 		return false;
 	const auto resolved = fs::canonical(path);
 	return resolved == fs::canonical(root) / path.filename();
+}
+
+bool removeEmptyDirectory(const fs::path &path)
+{
+	// Directory-only and atomic with respect to any entries arriving since
+	// reservation. A replaced regular file cannot be removed by this call.
+#ifdef _WIN32
+	return _wrmdir(path.c_str()) == 0;
+#else
+	return rmdir(path.c_str()) == 0;
+#endif
 }
 
 gameui::WorldCatalog listLocalWorlds(const fs::path &root)
@@ -83,9 +100,52 @@ void Engine::showMainMenu()
 	syncUiInput();
 }
 
+bool Engine::blocksNetworkSessionRequests() const
+{
+	return m_playerSessionRequest || m_failedPlayerSession || m_deferredQuit || m_soloWork.valid();
+}
+
+bool Engine::acceptsPlayerSession(SessionAction action) const
+{
+	using enum SessionAction;
+	switch (action)
+	{
+	case Retry: return m_failedPlayerSession && m_retryablePlayerFailure;
+	case Cancel: return m_failedPlayerSession.has_value();
+	case ConfirmFailedQuit: return m_failedPlayerSession && m_hostExitFailed;
+	case ForceStop:
+		if (m_waitingForHostExit)
+		{
+			const auto hosted = m_hostServer.snapshot();
+			return hosted.state == hosting::State::Stopping && hosted.delayed;
+		}
+		return false;
+	default: break;
+	}
+	if (m_playerSessionRequest || m_soloWork.valid() || m_failedPlayerSession ||
+		m_joinRequest || switchingSession() || m_exitAfterHostedStop)
+		return false;
+	switch (action)
+	{
+	case Create: case Open: return !sim && !m_remote && !m_suspendedSolo && !renderBridge;
+	case Save: return sim && sim->isWorldOpen() && !m_remote;
+	case Leave: return sim || m_remote;
+	case Quit: return true;
+	default: return false;
+	}
+}
+
+void Engine::startDeferredQuit()
+{
+	if (!m_deferredQuit || !acceptsPlayerSession(SessionAction::Quit))
+		return;
+	m_deferredQuit = false;
+	queuePlayerSession({SessionAction::Quit, {}, {}});
+}
+
 void Engine::queuePlayerSession(gameui::SessionRequest request)
 {
-	if (m_playerSessionRequest || switchingSession() || m_playerUi->screens().top() == Screen::SessionError)
+	if (!acceptsPlayerSession(request.action))
 		return;
 	using enum SessionAction;
 	const auto action = request.action;
@@ -102,8 +162,8 @@ void Engine::queuePlayerSession(gameui::SessionRequest request)
 	if (gameUi)
 		gameUi->cancelDeveloperDialogs();
 	setInventoryOpen(false);
-	m_joinRequest.reset();
-	m_hostAutoProfile.reset();
+	if (action == Quit || action == Leave)
+		m_hostAutoProfile.reset();
 	m_playerSessionRequest = std::move(request);
 	m_sessionProgressPresented = false;
 	m_playerUi->openScreen(Screen::Loading);
@@ -111,12 +171,13 @@ void Engine::queuePlayerSession(gameui::SessionRequest request)
 	syncUiInput();
 }
 
-void Engine::failPlayerSession(std::string message)
+void Engine::failPlayerSession(std::string message, bool retryable)
 {
 	m_failedPlayerSession = std::exchange(m_playerSessionRequest, std::nullopt);
+	m_retryablePlayerFailure = retryable && !m_hostExitFailed;
 	m_playerUi->finishSessionScreen();
 	m_playerUi->openScreen(Screen::SessionError);
-	m_playerUi->setSessionStatus(std::move(message), !m_hostExitFailed, false, m_hostExitFailed);
+	m_playerUi->setSessionStatus(std::move(message), m_retryablePlayerFailure, false, m_hostExitFailed);
 	syncUiInput();
 }
 
@@ -164,7 +225,11 @@ void Engine::pumpPlayerSession()
 			}
 			break;
 		case Multiplayer: case Settings:
-			m_playerUi->openScreen(request->action == Multiplayer ? Screen::Multiplayer : Screen::Settings);
+			// Native navigation already happened on activation. A stale panel
+			// request must not reopen a screen the player has left.
+			if (!gameUi || m_playerUi->screens().top() !=
+				(request->action == Multiplayer ? Screen::Multiplayer : Screen::Settings))
+				break;
 			setDeveloperWorkspaceVisible(true);
 			if (request->action == Multiplayer)
 				gameUi->showHostPanel();
@@ -172,25 +237,37 @@ void Engine::pumpPlayerSession()
 				gameUi->showGraphicsPanel();
 			break;
 		case Retry: case Cancel: case ConfirmFailedQuit:
-			if (!m_failedPlayerSession)
+		{
+			if (!acceptsPlayerSession(request->action))
 				break;
+			auto failed = std::exchange(m_failedPlayerSession, std::nullopt);
+			const bool hostedFailed = std::exchange(m_hostExitFailed, false);
+			m_retryablePlayerFailure = false;
 			m_playerUi->finishSessionScreen();
 			if (request->action == Retry)
-				queuePlayerSession(std::move(*m_failedPlayerSession));
-			else if (request->action == ConfirmFailedQuit && m_hostExitFailed)
-				running = false;
-			else if (!sim && !m_remote && m_hostExitFailed)
-				showMainMenu();
-			m_failedPlayerSession.reset();
-			m_hostExitFailed = false;
+				queuePlayerSession(std::move(*failed));
+			else
+			{
+				// A close recorded during a failed operation survives Retry.
+				// Cancel drops it so returning to the game cannot close it.
+				m_deferredQuit = false;
+				if (request->action == ConfirmFailedQuit)
+					running = false;
+				else if (!sim && !m_remote && hostedFailed)
+					showMainMenu();
+			}
 			break;
+		}
 		case ForceStop:
-			if (m_waitingForHostExit)
+			if (acceptsPlayerSession(ForceStop))
 				m_hostServer.forceStop();
 			break;
+		case Quit: requestExit(); break;
 		default: queuePlayerSession(std::move(*request)); break;
 		}
 	}
+	if (running)
+		startDeferredQuit();
 	if (!m_playerSessionRequest)
 		return;
 	const auto &request = *m_playerSessionRequest;
@@ -199,8 +276,9 @@ void Engine::pumpPlayerSession()
 	{
 		if (m_hostSnapshot.active())
 		{
-			m_playerUi->setSessionStatus(m_hostSnapshot.delayed ? m_hostSnapshot.message :
-				"Waiting for the hosted server checkpoint...", false, m_hostSnapshot.delayed);
+			const bool forceAvailable = m_hostSnapshot.state == hosting::State::Stopping && m_hostSnapshot.delayed;
+			m_playerUi->setSessionStatus(forceAvailable ? m_hostSnapshot.message :
+				"Waiting for the hosted server checkpoint...", false, forceAvailable);
 			return;
 		}
 		m_waitingForHostExit = false;
@@ -219,6 +297,13 @@ void Engine::pumpPlayerSession()
 		if (m_soloWork.wait_for(0s) != std::future_status::ready)
 			return;
 		auto result = m_soloWork.get();
+		// The request owns the worker until completion. Publish only into the
+		// empty frame-owner slot, after the previous projection was retired.
+		if (sim || m_remote || m_suspendedSolo || renderBridge)
+		{
+			failPlayerSession("The session changed before the world operation finished.", false);
+			return;
+		}
 		sim = std::move(result.simulation);
 		if (sim)
 		{
@@ -240,7 +325,7 @@ void Engine::pumpPlayerSession()
 		resetFrameClock();
 		if (!result.error.empty())
 		{
-			failPlayerSession(std::move(result.error));
+			failPlayerSession(std::move(result.error), result.retryable);
 			return;
 		}
 		if (action != Quit)
@@ -253,11 +338,16 @@ void Engine::pumpPlayerSession()
 	{
 		// Give the loading screen a presentation before retiring the GPU
 		// projection. Minimized windows have no swapchain frame to wait for.
-		if (!m_sessionProgressPresented &&
+		if (!m_sessionProgressPresented && !m_windowMinimized && !m_windowHidden &&
 			!(SDL_GetWindowFlags(window) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)))
 			return;
 		if (action == Open || action == Create)
 		{
+			if (sim || m_remote || m_suspendedSolo || renderBridge)
+			{
+				failPlayerSession("Leave the current session before opening a local world.", false);
+				return;
+			}
 			int seed = 0;
 			if (!request.seed.empty())
 			{
@@ -265,43 +355,24 @@ void Engine::pumpPlayerSession()
 				const auto parsed = std::from_chars(request.seed.data(), end, seed);
 				if (parsed.ec != std::errc{} || parsed.ptr != end || seed <= 0)
 				{
-					failPlayerSession("Enter a whole seed from 1 to 2147483647, or leave it blank.");
+					failPlayerSession("Enter a whole seed from 1 to 2147483647, or leave it blank.", false);
 					return;
 				}
 			}
 			if (!(action == Create ? createWorldName(request.name) : safeWorldName(request.name)))
 			{
-				failPlayerSession("Choose a valid world name.");
+				failPlayerSession("Choose a valid world name.", false);
 				return;
 			}
-			m_soloWork = std::async(std::launch::async,
-				[root = m_savesRoot, name = request.name, seed, action, pool = threadPool.get()]() -> SoloWorkResult {
-				try
-				{
-					const auto path = root / name;
-					if (action == Create)
-					{
-						fs::create_directories(root);
-						if (!fs::create_directory(path))
-							return {{}, {}, "That world name is already in use. Choose another name."};
-					}
-					else if (!directWorldDirectory(root, path) ||
-						!fs::is_regular_file(fs::symlink_status(path / "world.meta")))
-						return {{}, {}, "The selected world is missing or its path is unsafe. Refresh the list."};
-					auto world = std::make_unique<sim::GameSimulation>(pool);
-					sim::GameSimulation::Config config{seed, name, root};
-					config.existingWorldOnly = action == Open;
-					const auto center = world->initialize(config, {0., 100., 0.});
-					if (!world->isWorldOpen())
-						return {{}, {}, world->openWorldError()};
-					world->bootstrapTerrain(center);
-					return {std::move(world), center, {}};
-				}
-				catch (const std::exception &error)
-				{
-					return {{}, {}, error.what()};
-				}
-			});
+			try
+			{
+				m_soloWork = std::async(std::launch::async, prepareLocalWorld, m_savesRoot, request.name,
+					seed, action, threadPool.get(), m_beforeLocalWorldInitializeForTests);
+			}
+			catch (const std::system_error &error)
+			{
+				failPlayerSession(error.what());
+			}
 			return;
 		}
 		if (m_remote)
@@ -353,4 +424,61 @@ void Engine::pumpPlayerSession()
 	}
 	else
 		completePlayerSession();
+}
+
+Engine::SoloWorkResult Engine::prepareLocalWorld(const fs::path &root, const std::string &name, int seed,
+	SessionAction action, ThreadPool *pool, const std::function<void(const fs::path &)> &beforeInitialize)
+{
+	fs::path resolvedRoot, path;
+	bool ownsReservation = false;
+	const auto failed = [&](std::string message) -> SoloWorkResult {
+		if (!ownsReservation)
+			return {{}, {}, std::move(message)};
+		// A competing creation can only reserve the name after this directory
+		// is removed. Check its location and remove only an empty directory.
+		// No metadata, chunks, or unknown entries are ever removed.
+		try
+		{
+			if (!fs::exists(fs::symlink_status(path)) ||
+				(directWorldDirectory(resolvedRoot, path) && removeEmptyDirectory(path)))
+				return {{}, {}, std::move(message)};
+		}
+		catch (const fs::filesystem_error &)
+		{
+			// Report the preserved path when rollback cannot be verified.
+		}
+		return {{}, {}, "Could not create '" + name + "'. Its folder was kept. "
+			"Refresh Local worlds to open it if listed, or choose a different name. " + message, false};
+	};
+	try
+	{
+		if (action == SessionAction::Create)
+			fs::create_directories(root);
+		resolvedRoot = fs::canonical(root);
+		path = resolvedRoot / name;
+		if (action == SessionAction::Create)
+		{
+			ownsReservation = fs::create_directory(path);
+			if (!ownsReservation)
+				return {{}, {}, "That world name is already in use. Choose another name.", false};
+		}
+		else if (!directWorldDirectory(resolvedRoot, path) ||
+			!fs::is_regular_file(fs::symlink_status(path / "world.meta")))
+			return {{}, {}, "The selected world is missing or its path is unsafe. Refresh the list.", false};
+
+		if (beforeInitialize)
+			beforeInitialize(path);
+		auto world = std::make_unique<sim::GameSimulation>(pool);
+		sim::GameSimulation::Config config{seed, name, resolvedRoot};
+		config.existingWorldOnly = action == SessionAction::Open;
+		const auto center = world->initialize(config, {0., 100., 0.});
+		if (!world->isWorldOpen())
+			return failed(world->openWorldError());
+		world->bootstrapTerrain(center);
+		return {std::move(world), center, {}};
+	}
+	catch (const std::exception &error)
+	{
+		return failed(error.what());
+	}
 }

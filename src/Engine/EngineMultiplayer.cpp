@@ -793,9 +793,15 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 		}
 	}
 	if (!frame.switchingSession && remote.canReconnect())
-		frame.joinServer = [&remote] { remote.joinRequested = true; };
+		frame.joinServer = [this] {
+			if (!switchingSession() && !blocksNetworkSessionRequests())
+				m_remote->joinRequested = true;
+		};
 	else if (!frame.switchingSession && status != ClientStatus::Leaving)
-		frame.leaveServer = [&remote] { remote.leaveRequested = true; };
+		frame.leaveServer = [this] {
+			if (!switchingSession() && !blocksNetworkSessionRequests())
+				m_remote->leaveRequested = true;
+		};
 	if (const auto *player = remote.localPlayer())
 	{
 		frame.player.grounded = (player->flags & wire::PlayerState::grounded) != 0;
@@ -822,5 +828,5 @@ VoxelWorld *Engine::viewWorld() const
 {
 	if (m_remote)
 		return m_remote->projection ? &m_remote->projection->world() : nullptr;
-	return sim->world();
+	return sim ? sim->world() : nullptr;
 }

@@ -771,8 +771,10 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 			return info;
 		}
 		info.created = true;
+		// Publish identity before making chunks/, so a failed metadata
+		// write can leave a native creation reservation empty and retryable.
 		std::error_code ec;
-		std::filesystem::create_directories(chunksDir, ec);
+		std::filesystem::create_directories(worldDir, ec);
 		if (ec)
 		{
 			info.error = "failed to create world directories: " + ec.message();
@@ -783,6 +785,12 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		if (worldsave::writeWorldMeta(metaPath, meta) != worldsave::SaveStatus::Ok)
 		{
 			info.error = "failed to write " + metaPath.string();
+			return info;
+		}
+		std::filesystem::create_directories(chunksDir, ec);
+		if (ec)
+		{
+			info.error = "failed to create chunk directory: " + ec.message();
 			return info;
 		}
 		info.storedFormatVersion = meta.formatVersion;

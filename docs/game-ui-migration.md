@@ -392,7 +392,9 @@ existing command lines.
 - **Create world** takes a new name of 1–32 ASCII letters, digits, dashes or
   underscores. Leave the seed blank for a random seed, or enter an integer
   from 1 to 2147483647. Creation reserves a new directory, so reusing a name
-  cannot open or overwrite an existing save.
+  cannot open or overwrite an existing save. A failed creation releases its
+  empty reservation so the same name can be retried. A folder containing data
+  is preserved and the screen directs the player to refresh or use another name.
 - **Escape** opens Pause in play and moves back through menus and confirmations.
   Use **Save world** to checkpoint and stay in Pause, or **Save and return to
   menu** to checkpoint and close. Solo uses the existing suspension policy.
@@ -405,10 +407,15 @@ existing command lines.
   offers the supervisor's existing force-stop operation behind confirmation.
   An unconfirmed hosted checkpoint remains visible for an explicit exit
   decision. A local checkpoint failure keeps the world open for retry or
-  return to play.
+  return to play. A close during loading, saving, leaving, or a queued
+  connection change is remembered. A failed transition pauses that quit.
+  Retry keeps the quit pending through a successful retry, and Back cancels it.
 - **Multiplayer** and **Settings** are the navigation points for #306 and
   #307. Their interim controls open the existing Multiplayer and Graphics
-  panels. The Settings page also links to the native player scale control.
+  panels. Showing a panel again keeps the current native screen and focus.
+  The Settings page also links to the native player scale control. Dev world
+  and player actions require a live world. The Graphics and Multiplayer panels
+  are available from the empty menu.
 
 The native UI queues one typed request per transition. The loop consumes it
 before frame acquisition and presents a loading screen before retiring the
@@ -419,11 +426,23 @@ owner retires or rebuilds the Vulkan projection at the world boundary and
 resets the frame clock as control returns. Gameplay stays suppressed through
 screen or focus changes, and the epoch barrier clears HUD, inventory and
 render caches. Player preferences and the developer layout keep their
-existing storage.
+existing storage. Engine validates each intent against live session ownership
+before starting work and checks that the frame-owner slot is empty before
+publishing a worker result.
+
+Projection reuse on explicit save is deferred. A save currently drains and
+retires the projection, checkpoints with exclusive CPU world ownership, and
+rebuilds the nearby projection on the frame owner. Keeping the projection
+requires a separate quiescence contract for retained world references.
+Catalogue pagination is also deferred. Refresh repeats the bounded scan and
+the screen reports when it stops at either limit. Use direct
+`--world <name>` for existing saves outside that list.
 
 The opt-in Windows Vulkan proof writes launch, world selection, loading,
 pause and recoverable error captures. It uses a fresh output directory and
-stores its fixture under that directory.
+stores its fixture under that directory. It drives SDL keyboard, pointer,
+window-close and minimize events, and uses injected persistence faults to
+verify recovery.
 
 ```powershell
 $env:FT_VOX_VALIDATION = "1"
@@ -432,8 +451,9 @@ $env:FT_VOX_VALIDATION = "1"
 
 Captured on Windows with an NVIDIA GeForce RTX 4070 Ti at 960×540.
 The proof exercises the production screen renderer and lifecycle with typed
-intents. Vulkan validation reported the documented RTSS swapchain errors
-during initialization and no new errors during the offscreen scenario.
+intents and SDL events. Vulkan validation reported the documented RTSS
+swapchain errors during initialization and recreation. All validation
+callbacks during the corrected session proof matched that known signature.
 
 [Launch](images/session-menu-305/launch.png) ·
 [World selection](images/session-menu-305/world-selection.png) ·

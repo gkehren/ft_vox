@@ -29,6 +29,8 @@ void Engine::populateHostingUi(GameUIFrame &frame)
 	frame.hostError = m_hostError;
 	frame.exitAfterHostedStop = m_exitAfterHostedStop;
 	frame.startHostedServer = [this](hosting::Options options, bool autoJoin, std::string_view name) {
+		if (blocksNetworkSessionRequests())
+			return;
 		m_hostError.clear();
 		auto profile = loadNamedProfile(name, m_hostError);
 		if (!profile)
@@ -45,7 +47,7 @@ void Engine::populateHostingUi(GameUIFrame &frame)
 	frame.joinHostedServer = [this](std::string_view name) {
 		m_hostError.clear();
 		const auto server = m_hostServer.snapshot();
-		if (server.state != hosting::State::Ready || switchingSession())
+		if (server.state != hosting::State::Ready || switchingSession() || blocksNetworkSessionRequests())
 			return;
 		if (auto profile = loadNamedProfile(name, m_hostError))
 			queueHostedJoin(server, profile->name);
@@ -92,7 +94,7 @@ void Engine::tickHosting()
 		m_hostSnapshot = std::move(*next);
 	}
 	if (m_hostSnapshot.state == hosting::State::Ready && m_hostAutoProfile &&
-		!m_joinRequest && !switchingSession() && !m_exitAfterHostedStop && !m_playerSessionRequest)
+		!m_joinRequest && !switchingSession() && !m_exitAfterHostedStop && !blocksNetworkSessionRequests())
 	{
 		queueHostedJoin(m_hostSnapshot, *m_hostAutoProfile);
 		m_hostAutoProfile.reset();
@@ -113,7 +115,8 @@ void Engine::requestExit()
 {
 	if (m_playerUi && !m_uiSpike && !m_inspectionView && !m_benchmark.isActive())
 	{
-		queuePlayerSession({gameui::SessionAction::Quit, {}, {}});
+		if (!m_playerSessionRequest || m_playerSessionRequest->action != gameui::SessionAction::Quit)
+			m_deferredQuit = true;
 		return;
 	}
 	if (m_exitAfterHostedStop)

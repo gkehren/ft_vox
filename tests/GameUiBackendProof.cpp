@@ -125,8 +125,64 @@ struct GameUiBackendProbe
 		auto &sample = *engine.m_playerUi;
 		auto &device = *engine.vkContext;
 		const auto errors = device.validationErrorCount();
+		const auto rtssBefore = device.rtssValidationErrorCount();
 		constexpr VkExtent2D extent{960, 540};
 		resize(int(extent.width), int(extent.height));
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		const auto clickControl = [&](std::string_view label) {
+			for (const auto &widget : sample.m_widgets.widgets())
+				if (widget.label == label)
+				{
+					const auto rect = sample.m_widgets.bounds(widget).rect;
+					clickAt({(rect.x + rect.z) * 0.5f, (rect.y + rect.w) * 0.5f});
+					return;
+				}
+			throw std::runtime_error("missing native control: " + std::string(label));
+		};
+		const auto repeatPanel = [&](Screen screen, std::string_view label) {
+			const auto revision = sample.screens().revision();
+			const auto focus = sample.screens().focus();
+			for (int i = 0; i < 2; ++i)
+			{
+				engine.setDeveloperWorkspaceVisible(false);
+				present();
+				tap(SDLK_RETURN);
+				engine.handleEvents();
+				engine.pumpPlayerSession();
+				CHECK(engine.developerWorkspaceVisible() && sample.screens().focus() == focus &&
+					sample.screens().revision() == revision && sample.screens().top() == screen, label);
+			}
+			engine.setDeveloperWorkspaceVisible(false);
+			tap(SDLK_ESCAPE);
+			present();
+			CHECK(sample.screens().top() == Screen::MainMenu, "one Escape returns to the main menu");
+		};
+
+		tap(SDLK_TAB);
+		tap(SDLK_TAB);
+		tap(SDLK_RETURN);
+		engine.handleEvents();
+		engine.pumpPlayerSession();
+		present();
+		CHECK(sample.screens().top() == Screen::Settings && !engine.viewWorld() && engine.gameUi->showGraphics(),
+			"keyboard opens Graphics without an active world");
+		repeatPanel(Screen::Settings, "reopening Graphics keeps screen revision and focus");
+
+		clickControl("Multiplayer");
+		engine.handleEvents();
+		engine.pumpPlayerSession();
+		present();
+		GameUIFrame join;
+		engine.populateJoinUi(join);
+		CHECK(sample.screens().top() == Screen::Multiplayer && !engine.viewWorld() &&
+			join.connectServer && join.startHostedServer && join.hostedServer,
+			"pointer opens the existing Host and Join controls without a simulation");
+		join.connectServer({"invalid-endpoint", "", {}});
+		engine.applySessionRequests();
+		CHECK(!engine.m_joinError.empty() && !engine.viewWorld(), "Join validation works from the empty menu");
+		repeatPanel(Screen::Multiplayer, "reopening Multiplayer keeps screen revision and focus");
+
 		constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
 		engine.worldRenderer->resizeOutput(extent, format, kColorSpace);
 		sample.renderer().setOutput(format, kColorSpace);
@@ -156,15 +212,22 @@ struct GameUiBackendProbe
 			checked(done(), "session menu transition timed out");
 		};
 		const auto complete = [&] {
-			engine.m_sessionProgressPresented = true;
+			engine.noteSessionFramePresented();
 			until([&] { return !engine.m_playerSessionRequest; });
 		};
 
 		shot("launch.png");
-		CHECK(!engine.sim && !engine.renderBridge && !std::filesystem::exists(out / "saves"),
+		CHECK(!engine.viewWorld() && !engine.renderBridge && !std::filesystem::exists(out / "saves"),
 			"launch has no active world or saves folder");
-		sample.openScreen(Screen::Worlds);
-		request(List);
+		request(Save);
+		request(Leave);
+		request(ForceStop);
+		request(ConfirmFailedQuit);
+		CHECK(!engine.m_playerSessionRequest && engine.running && sample.screens().top() == Screen::MainMenu,
+			"stale requests are ignored without modifying the empty session");
+		clickControl("Local worlds");
+		engine.handleEvents();
+		engine.pumpPlayerSession();
 		until([&] { return !engine.m_worldCatalog.valid(); });
 		sample.openScreen(Screen::CreateWorld);
 		request(Create, "../escape", "42");
@@ -175,12 +238,26 @@ struct GameUiBackendProbe
 		complete();
 		CHECK(sample.screens().top() == Screen::SessionError, "invalid seed is visible");
 		request(Cancel);
+		engine.m_beforeLocalWorldInitializeForTests = [](const auto &) {
+			throw std::runtime_error("test failure before persistence initialization");
+		};
 		request(Create, "menu-proof", "42");
 		shot("loading.png");
 		request(Create, "duplicate", "43");
 		complete();
+		CHECK(sample.screens().top() == Screen::SessionError && engine.acceptsPlayerSession(Retry) &&
+			!std::filesystem::exists(out / "saves" / "menu-proof"), "failure releases the empty reservation");
+		engine.m_beforeLocalWorldInitializeForTests = {};
+		request(Retry);
+		complete();
 		CHECK(engine.sim && engine.sim->isWorldOpen() && engine.worldSeed() == 42 &&
 			!std::filesystem::exists(out / "saves" / "duplicate"), "create publishes one persistent world");
+		auto *const authority = engine.sim.get();
+		auto *const projection = engine.renderBridge.get();
+		request(Create, "unexpected", "43");
+		request(Open, "menu-proof");
+		CHECK(engine.sim.get() == authority && engine.renderBridge.get() == projection &&
+			!engine.m_playerSessionRequest, "invalid local start preserves the active authority and projection");
 		engine.tickStreaming(0.);
 		sample.openPause();
 		engine.syncUiInput();
@@ -207,16 +284,95 @@ struct GameUiBackendProbe
 		until([&] { return !engine.m_worldCatalog.valid(); });
 		CHECK(sample.m_worldCatalog.names == std::vector<std::string>{"menu-proof"}, "catalog lists the saved world");
 		shot("world-selection.png");
+		request(Create, "menu-proof", "43");
+		complete();
+		int storedSeed = 0;
+		std::string seedError;
+		CHECK(sample.screens().top() == Screen::SessionError &&
+			WorldPersistence::peekStoredSeed(out / "saves", "menu-proof", storedSeed, seedError) && storedSeed == 42,
+			"an existing name cannot replace the stored world identity");
+		request(Cancel);
+		shot("world-selection.png");
+		const auto worldPath = out / "saves" / "menu-proof";
+		std::filesystem::rename(worldPath, out / "moved-world");
+		clickControl("Open selected world");
+		engine.handleEvents();
+		engine.pumpPlayerSession();
+		complete();
+		CHECK(sample.screens().top() == Screen::SessionError && !std::filesystem::exists(worldPath),
+			"a removed catalog entry produces an error without recreating the save");
+		std::filesystem::rename(out / "moved-world", worldPath);
+		request(Cancel);
 		request(Open, "menu-proof");
 		complete();
 		CHECK(engine.sim && engine.sim->isWorldOpen() && engine.worldSeed() == 42, "reopen uses persisted metadata");
 		sample.openPause();
-		request(Save);
+
+		const auto beginCheckpointAndClose = [&] {
+			request(Save);
+			engine.noteSessionFramePresented();
+			engine.pumpPlayerSession();
+			checked(engine.m_soloWork.valid() && !engine.viewWorld() && !engine.renderBridge,
+				"the worker exclusively owns the world during checkpointing");
+			windowEvent(SDL_EVENT_WINDOW_CLOSE_REQUESTED);
+			windowEvent(SDL_EVENT_WINDOW_CLOSE_REQUESTED);
+			engine.handleEvents();
+			CHECK(engine.m_deferredQuit && engine.m_playerSessionRequest && engine.m_playerSessionRequest->action == Save,
+				"two window-close events preserve a single quit while checkpointing");
+		};
+		engine.sim->world()->worldPersistence()->setCheckpointFaultForTests(worldsave::CheckpointFaultPoint::BeforeStaging);
+		beginCheckpointAndClose();
 		complete();
-		CHECK(engine.sim && sample.screens().top() == Screen::Pause, "explicit save returns to pause");
-		request(Quit);
+		engine.pumpPlayerSession();
+		CHECK(engine.running && engine.sim && engine.m_deferredQuit && sample.screens().top() == Screen::SessionError,
+			"deferred quit stops at checkpoint failure");
+		request(Cancel);
+		CHECK(engine.running && !engine.m_deferredQuit && sample.screens().top() == Screen::Pause,
+			"Back clears the pending quit and returns to Pause");
+		beginCheckpointAndClose();
 		complete();
-		CHECK(!engine.running && !engine.sim && device.validationErrorCount() == errors, "quit closes the world without Vulkan validation errors");
+		engine.sim->world()->worldPersistence()->setCheckpointFaultForTests(worldsave::CheckpointFaultPoint::None);
+		request(Retry);
+		complete();
+		CHECK(engine.running && engine.sim && sample.screens().top() == Screen::Pause, "checkpoint retry completes before deferred quit starts");
+		engine.pumpPlayerSession();
+		CHECK(engine.m_playerSessionRequest && engine.m_playerSessionRequest->action == Quit,
+			"successful checkpoint releases deferred quit");
+		complete();
+		CHECK(!engine.running && !engine.viewWorld(), "deferred quit closes the saved world");
+
+		engine.running = true;
+		engine.showMainMenu();
+		engine.m_beforeLocalWorldInitializeForTests = [](const auto &path) {
+			std::ofstream(path / "recoverable-data") << "keep";
+			throw std::runtime_error("test failure after creating save data");
+		};
+		request(Create, "partial-save", "42");
+		complete();
+		CHECK(sample.screens().top() == Screen::SessionError && !engine.acceptsPlayerSession(Retry) &&
+			std::filesystem::exists(out / "saves" / "partial-save" / "recoverable-data"),
+			"creation preserves nonempty reservations and directs the player to other recovery");
+		request(Cancel);
+		engine.m_beforeLocalWorldInitializeForTests = {};
+		request(Create, "close-on-load", "42");
+		windowEvent(SDL_EVENT_WINDOW_MINIMIZED);
+		windowEvent(SDL_EVENT_WINDOW_CLOSE_REQUESTED);
+		engine.handleEvents();
+		engine.pumpPlayerSession();
+		CHECK(engine.m_windowMinimized && engine.m_soloWork.valid() && engine.m_deferredQuit && !engine.viewWorld(),
+			"minimize lets loading advance without a present and window close is deferred");
+		windowEvent(SDL_EVENT_WINDOW_RESTORED);
+		engine.handleEvents();
+		complete();
+		CHECK(engine.running && engine.viewWorld(), "loading publishes its world before deferred quit");
+		engine.pumpPlayerSession();
+		complete();
+		CHECK(!engine.running && !engine.viewWorld() && WorldPersistence::worldExists(out / "saves", "close-on-load"),
+			"quit after loading saves the new world");
+		const auto rtssErrors = device.rtssValidationErrorCount() - rtssBefore;
+		const auto validationErrors = device.validationErrorCount() - errors;
+		CHECK(validationErrors == rtssErrors, "session proof has no new application Vulkan validation errors");
+		std::cout << "Session menu validation errors=" << validationErrors << " known_rtss_errors=" << rtssErrors << '\n';
 	}
 
 
@@ -335,6 +491,7 @@ struct GameUiBackendProbe
 		engine.updateFrameUniforms(slot, int(size.width), int(size.height), 5.f);
 		engine.recordFrame(slot, image, 0, gpuTag);
 		checked(engine.frameCtx->submitAndPresent(*engine.swapchain, image), "present Game UI proof frame");
+		engine.noteSessionFramePresented();
 		++engine.frameNumber;
 		prof.endFrame();
 	}
@@ -2130,6 +2287,8 @@ int runSessionMenuProof(Engine &engine, const std::filesystem::path &output)
 {
 	std::filesystem::create_directories(output);
 	GameUiBackendProbe(engine).sessionMenuProof(output);
+	if (testmain::fails == 0)
+		std::cout << "PASS: Session menu Vulkan proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }
 

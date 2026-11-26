@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <future>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -195,20 +196,30 @@ private:
 	void pumpPlayerSession();
 	void showMainMenu();
 	void queuePlayerSession(gameui::SessionRequest request);
+	bool acceptsPlayerSession(gameui::SessionAction action) const;
+	bool blocksNetworkSessionRequests() const;
+	void startDeferredQuit();
+	void noteSessionFramePresented() { m_sessionProgressPresented |= m_playerSessionRequest.has_value(); }
 	void completePlayerSession();
-	void failPlayerSession(std::string message);
+	void failPlayerSession(std::string message, bool retryable = true);
 	void finishSoloBootstrap(glm::dvec3 center, bool resident);
 	struct SoloWorkResult
 	{
 		std::unique_ptr<sim::GameSimulation> simulation;
 		glm::dvec3 center{};
 		std::string error;
+		bool retryable{true};
 	};
+	static SoloWorkResult prepareLocalWorld(const std::filesystem::path &root, const std::string &name,
+		int seed, gameui::SessionAction action, ThreadPool *pool,
+		const std::function<void(const std::filesystem::path &)> &beforeInitialize);
+	// Fault/delay seam for the opt-in session lifecycle proof.
+	std::function<void(const std::filesystem::path &)> m_beforeLocalWorldInitializeForTests;
 	std::future<SoloWorkResult> m_soloWork;
 	std::future<gameui::WorldCatalog> m_worldCatalog;
 	std::optional<gameui::SessionRequest> m_playerSessionRequest;
 	std::optional<gameui::SessionRequest> m_failedPlayerSession;
-	bool m_waitingForHostExit{}, m_hostExitFailed{};
+	bool m_waitingForHostExit{}, m_hostExitFailed{}, m_deferredQuit{}, m_retryablePlayerFailure{};
 	bool m_sessionProgressPresented{}, m_leavingToMenu{}, m_useMainMenu{};
 	void persistJoinPreferences();
 	void populateJoinUi(GameUIFrame &frame);

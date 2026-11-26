@@ -517,8 +517,16 @@ bool GameUiSample::activateSessionControl(ControlId id)
 	case Save: request(SessionAction::Save); break;
 	case Leave: openScreen(Screen::ConfirmLeave); break;
 	case ConfirmLeave: request(SessionAction::Leave); break;
-	case Multiplayer: request(SessionAction::Multiplayer); break;
-	case Settings: request(SessionAction::Settings); break;
+	case Multiplayer:
+		if (m_screens.top() != Screen::Multiplayer)
+			openScreen(Screen::Multiplayer);
+		request(SessionAction::Multiplayer);
+		break;
+	case Settings:
+		if (m_screens.top() != Screen::Settings)
+			openScreen(Screen::Settings);
+		request(SessionAction::Settings);
+		break;
 	case Retry: request(SessionAction::Retry); break;
 	case CancelFailure: request(SessionAction::Cancel); break;
 	case ForceStop: openScreen(Screen::ConfirmForceStop); break;

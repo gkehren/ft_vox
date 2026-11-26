@@ -904,7 +904,7 @@ void Engine::handleEvents()
 	// reconstructed for every single key event.
 	GameUIFrame shortcutFrame{};
 	shortcutFrame.render = &renderSettings;
-	shortcutFrame.paused = m_remote ? nullptr : &paused;
+	shortcutFrame.paused = sim ? &paused : nullptr;
 	shortcutFrame.setVSync = [this](bool v) { setVSync(v); };
 
 	SDL_Event event;
@@ -1020,7 +1020,7 @@ void Engine::handleEvents()
 				break;
 			}
 
-			if (m_benchmark.isActive() || !windowFocused)
+			if (m_benchmark.isActive() || !windowFocused || (!sim && !m_remote))
 				break;
 			if (key == SDLK_SPACE && !paused)
 			{
@@ -1599,7 +1599,7 @@ void Engine::drawUi()
 	const bool prevPause = presentedPause;
 
 	GameUIFrame f{};
-	f.camera = &camera;
+	f.camera = viewWorld() ? &camera : nullptr;
 	// Read-only player snapshot for the UI (issue #184): biome/chunk resolved
 	// here via the canonical queries so panels never touch the generator or
 	// the simulation's player controller directly. The kinematic/diagnostic
@@ -1662,11 +1662,15 @@ void Engine::drawUi()
 			camera.setMode(mode);
 		};
 	}
-	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
-	f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
-	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
+	if (f.camera)
+		f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
+	if (sim)
+	{
+		f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
+		f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
+	}
 	f.chunks = renderBridge.get();
-	f.pool = chunkPool.get();
+	f.pool = renderBridge ? renderBridge->getChunkPool() : nullptr;
 	f.generator = sim ? sim->terrainGenerator() : nullptr;
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
@@ -1678,9 +1682,12 @@ void Engine::drawUi()
 	f.timing = &renderTiming;
 	f.staging = &stagingRing;
 	// Commands-only sim surface (review M6).
-	f.highlight = &highlight;
-	f.mouseCaptured = &presentedCapture;
-	f.showChunkBorders = &showChunkBorders;
+	if (f.camera)
+	{
+		f.highlight = &highlight;
+		f.mouseCaptured = &presentedCapture;
+		f.showChunkBorders = &showChunkBorders;
+	}
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
 	populateJoinUi(f);
@@ -1767,7 +1774,7 @@ void Engine::drawUi()
 		const ResourcePackApplyResult r = applyResourcePack(path);
 		return {r.atlasOk, r.isError, r.isWarning, r.message};
 	};
-	if (threadPool && !m_remote)
+	if (threadPool && f.generator)
 	{
 		f.submitBiomeMap = [this](BiomeMapRequest req) -> std::future<BiomeMapResult> {
 			if (!m_benchmark.config().biomeMapSequential)
@@ -2196,15 +2203,14 @@ void Engine::run()
 			GetProfiler().endFrame();
 			break;
 		}
-		if (!m_playerSessionRequest)
-			applySessionRequests();
+		applySessionRequests();
 
 		// (2) Viewport: a minimized/hidden window skips the whole frame; the
 		// clock resync AFTER the sleep keeps the skipped stretch out of the
 		// next gameplay timestep (restore = rawDt of a normal frame).
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
-		if (pixelW == 0 || pixelH == 0 ||
+		if (pixelW == 0 || pixelH == 0 || m_windowHidden || m_windowMinimized ||
 			(SDL_GetWindowFlags(window) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)))
 		{
 			if (m_remote)
@@ -2335,8 +2341,8 @@ void Engine::run()
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
-			else if (m_playerSessionRequest)
-				m_sessionProgressPresented = true;
+			else
+				noteSessionFramePresented();
 		}
 
 		// (16) Live memory/workload gauges for the developer console (issue
