@@ -97,11 +97,12 @@ struct ListSelection
 	int first{}, selected{};
 	void scroll(int rows, int count, int visible);
 	void select(int index, int count, int visible);
-	/// Explicit unselected state (correction F01): no row is highlighted and
-	/// the next keyboard step starts from the first row. `select`/`scroll`
-	/// keep their historical clamp-to-valid contract, so consumers that never
-	/// call `clear` see no behavior change.
-	void clear() { first = 0; selected = -1; }
+	/// Explicit unselected state (corrections F01/F11): no row is highlighted
+	/// and the scroll window is PRESERVED so wheel browsing keeps working;
+	/// keyboard navigation starts from the first row. `select`/`scroll` keep
+	/// their historical clamp-to-valid contract, so consumers that never call
+	/// `clear` see no behavior change.
+	void clear() { selected = -1; }
 	bool any() const { return selected >= 0; }
 };
 

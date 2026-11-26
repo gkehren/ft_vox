@@ -510,6 +510,9 @@ struct GameUiBackendProbe
 		frame();
 		press("Multiplayer");
 		press(host ? "Host server" : "Join server");
+		if (!host)
+			CHECK(sample.m_joinEndpoint.value() == "127.0.0.1:7777",
+				"the join draft starts at the automatic default (F10)");
 		press("Profiles");
 		type("New profile name", host ? "owner-native" : "guest-native");
 		press("Create profile");
@@ -537,7 +540,44 @@ struct GameUiBackendProbe
 			until([&] { return fs::exists(evidence / "endpoint"); }, "native host did not publish an endpoint");
 			std::string endpoint;
 			std::ifstream(evidence / "endpoint") >> endpoint;
+			// F10 untouched case: selecting the AUTOMATIC draft must survive
+			// view updates — the previous per-frame re-initialization
+			// destroyed the caret and selection while the value still matched
+			// the automatic endpoint.
+			press("Private IPv4 address and port");
+			tap(SDLK_A, SDL_KMOD_CTRL);
+			frame();
+			CHECK(sample.m_joinEndpoint.selectionStart() == 0 &&
+				sample.m_joinEndpoint.selectionEnd() == sample.m_joinEndpoint.value().size(),
+				"Ctrl+A selects the automatic draft (F10)");
+			const std::string automatic = sample.m_joinEndpoint.value();
+			for (int i = 0; i < 6; ++i)
+				frame();
+			CHECK(sample.m_joinEndpoint.value() == automatic &&
+				sample.m_joinEndpoint.selectionStart() == 0 &&
+				sample.m_joinEndpoint.selectionEnd() == automatic.size(),
+				"the untouched draft selection survives view updates (F10)");
 			type("Private IPv4 address and port", "invalid");
+			// Correction F10: the automatic endpoint must not fight the
+			// editor — the value, the caret and a Ctrl+A selection survive
+			// rendered frames while the draft is being edited.
+			const std::string draft = sample.m_joinEndpoint.value();
+			CHECK(sample.m_joinEndpoint.caret() == draft.size(), "typing leaves the caret at the end");
+			for (int i = 0; i < 6; ++i)
+				frame();
+			CHECK(sample.m_joinEndpoint.value() == draft &&
+				sample.m_joinEndpoint.caret() == draft.size(),
+				"an edited draft and its caret survive view updates (F10)");
+			tap(SDLK_A, SDL_KMOD_CTRL);
+			frame();
+			CHECK(sample.m_joinEndpoint.selectionStart() == 0 &&
+				sample.m_joinEndpoint.selectionEnd() == draft.size(),
+				"Ctrl+A selects the whole draft (F10)");
+			for (int i = 0; i < 6; ++i)
+				frame();
+			CHECK(sample.m_joinEndpoint.selectionStart() == 0 &&
+				sample.m_joinEndpoint.selectionEnd() == draft.size(),
+				"the selection survives view updates (F10)");
 			press("Connect");
 			frame();
 			CHECK(!sample.m_multiplayer.joinError.empty(), "native Join shows an invalid endpoint");
@@ -641,7 +681,11 @@ struct GameUiBackendProbe
 				return sample.m_multiplayer.adminResult == localcontrol::Result::InvalidCredential;
 			}, "delegating a profile that is not the target's own credential is refused");
 			// Kick end-to-end (corrections F02/F04): destructive moderation of
-			// a live target through the confirmation pipeline.
+			// a live target through the confirmation pipeline. The guest
+			// finishes its closed-menu probe first (F14), so the kick lands
+			// against a known client state.
+			until([&] { return fs::exists(evidence / "guest-ready-for-kick"); },
+				"the guest did not finish its closed-menu probe");
 			press("Kick for 60 seconds...");
 			CHECK(sample.m_multiplayerConfirm->administration->operation == localcontrol::Operation::Kick &&
 				sample.m_multiplayerConfirm->administration->subject &&
@@ -652,15 +696,32 @@ struct GameUiBackendProbe
 			until([&] { return fs::exists(evidence / "guest-kicked"); }, "the kicked guest did not observe it");
 			until([&] { return fs::exists(evidence / "guest-kick-refused"); },
 				"the kicked profile was not refused reconnection");
-			// Ban and unban the now-offline target (correction F04).
+			// Ban the now-offline target (corrections F04/F16): an in-flight
+			// administration request disables a close-succession duplicate
+			// activation, and a resubmission of the SAME captured intent is
+			// refused by the pipeline revalidation because its row changed.
+			const auto banEnabled = [&] {
+				const auto widgets = sample.m_widgets.widgets();
+				const auto found = std::ranges::find(widgets, "Ban...", &gameui::Widget::label);
+				return found != widgets.end() && found->enabled;
+			};
 			press("Ban...");
+			auto duplicateBan = *sample.m_multiplayerConfirm;
 			press("Confirm");
+			until([&] { return sample.m_multiplayer.adminPending; },
+				"the ban request reached the server");
+			CHECK(!banEnabled(), "an in-flight administration request blocks a duplicate activation (F16)");
 			until([&] {
 				const auto &admin = sample.m_multiplayer.administration;
 				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
 					return row.id == guest && row.banned;
 				});
 			}, "native confirm did not ban the player");
+			sample.m_multiplayerRequest = std::move(duplicateBan);
+			frame();
+			CHECK(sample.m_multiplayer.notice &&
+				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::PermissionChanged,
+				"a duplicated submission is refused because its captured row changed (F16)");
 			press("Unban...");
 			press("Confirm");
 			until([&] {
@@ -699,6 +760,7 @@ struct GameUiBackendProbe
 			// below are enqueued directly so the pump evaluates them exactly
 			// as a late or duplicated submission would arrive.
 			press("Enable allowlist...");
+			const auto revisionBefore = sample.m_multiplayer.administration->revision;
 			auto staleEpoch = *sample.m_multiplayerConfirm;
 			++staleEpoch.administration->epoch;
 			sample.m_multiplayerRequest = std::move(staleEpoch);
@@ -714,15 +776,22 @@ struct GameUiBackendProbe
 			CHECK(sample.m_multiplayer.notice &&
 				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::ServerChanged,
 				"a confirmation from a previous server launch is refused");
+			press("Cancel");
+			// The vanished-target refusal uses a real TARGETED operation
+			// (correction F16): the rejection comes from the unknown subject,
+			// not from an untargeted operation incorrectly carrying one.
+			press("Ban...");
 			auto staleTarget = *sample.m_multiplayerConfirm;
-			staleTarget.administration->subject = localcontrol::Player{sim::PlayerId{99},
-				localcontrol::Role::Player, false, false, false, 0};
+			staleTarget.administration->subject->id = sim::PlayerId{99};
 			sample.m_multiplayerRequest = std::move(staleTarget);
 			frame();
 			CHECK(sample.m_multiplayer.notice &&
 				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::PermissionChanged,
-				"a confirmation whose target vanished is refused");
+				"a confirmation whose target no longer exists is refused (F16)");
 			press("Cancel");
+			CHECK(sample.m_multiplayer.administration &&
+				sample.m_multiplayer.administration->revision == revisionBefore,
+				"refused and duplicated confirmations commit nothing (F16)");
 			// The reviewed action finally applies, proving the refusals above
 			// did not consume or corrupt the real intent.
 			press("Enable allowlist...");
@@ -751,6 +820,10 @@ struct GameUiBackendProbe
 				[&](const localcontrol::Audit &row) {
 					return row.operation == localcontrol::Operation::Kick && row.target == guest;
 				}) == 1, "exactly one committed kick reached the audit history");
+			CHECK(std::ranges::count_if(sample.m_multiplayer.administration->audit,
+				[&](const localcontrol::Audit &row) {
+					return row.operation == localcontrol::Operation::Ban && row.target == guest;
+				}) == 1, "a duplicated ban activation committed at most one operation (F16)");
 			tap(SDLK_ESCAPE);
 			frame();
 			tap(SDLK_ESCAPE);
@@ -766,6 +839,8 @@ struct GameUiBackendProbe
 				"occupied port did not reach native failure");
 			CHECK(sample.m_multiplayer.hostMessage.find("choose another port") != std::string::npos,
 				"the hosted bind failure offers a recovery step");
+			CHECK(!sample.m_mpAdminTarget.valid(),
+				"a failed relaunch cleared the administrative selection (F12)");
 		}
 		else
 		{
@@ -778,6 +853,40 @@ struct GameUiBackendProbe
 			until([&] { return sample.m_multiplayer.playable; }, "native reconnect did not finish");
 			CHECK(sample.m_multiplayer.self == self, "reconnect restored the original player identity");
 			publish("guest-reconnected", "yes");
+			// The clipboard result is displayed despite a standing connection
+			// error (correction F15), and a refused switch preserves the live
+			// session.
+			type("Private IPv4 address and port", "invalid");
+			press("Switch server or profile");
+			until([&] { return !sample.m_multiplayer.joinError.empty(); },
+				"the refused switch shows the endpoint error");
+			CHECK(sample.m_multiplayer.playable, "the refused switch preserved the live session");
+			press("Copy connected endpoint");
+			CHECK(sample.m_mpClipboard == "Endpoint copied to the clipboard.",
+				"the clipboard result is reported despite the connection error (F15)");
+			if (char *copied = SDL_GetClipboardText())
+			{
+				CHECK(std::string_view(copied) == sample.m_multiplayer.endpoint,
+					"the connected endpoint reached the clipboard");
+				SDL_free(copied);
+			}
+			else
+				checked(false, "the clipboard holds the endpoint");
+			type("Private IPv4 address and port", sample.m_multiplayer.endpoint);
+			// Closing the multiplayer flow does not pause the session
+			// (correction F14): the transport keeps advancing with the menu
+			// closed, and the flow re-enters cleanly afterwards.
+			press("Play");
+			for (int i = 0; i < 30; ++i)
+				frame();
+			CHECK(engine.m_remote && engine.m_remote->ready() &&
+				engine.m_remote->players.fresh(Engine::RemoteSession::Clock::now()),
+				"the live session keeps advancing with the multiplayer menu closed (F14)");
+			tap(SDLK_ESCAPE);
+			frame();
+			press("Multiplayer");
+			press("Join server");
+			publish("guest-ready-for-kick", "yes");
 			// The kick is destructive moderation observed end-to-end
 			// (correction F02): the server actively closes the session and the
 			// persistent identity is then refused reconnection.

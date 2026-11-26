@@ -174,6 +174,12 @@ private:
 	/// actions, and a disappearing target clears the selection instead of
 	/// falling back onto another player.
 	sim::PlayerId m_mpAdminTarget{};
+	/// Administration context the selection belongs to (correction F12):
+	/// server launch, verified world identity and live authorization. Any
+	/// change clears the target and the cached reply — the same numeric
+	/// PlayerId in another world or launch is a different player.
+	uint64_t m_mpAdminContextLaunch{}, m_mpAdminContextWorld{};
+	bool m_mpAdminContextAuthorized{};
 	std::vector<std::string> m_mpAdminRows;
 	std::vector<std::string_view> m_mpAdminLabels;
 	int m_mpWorkerChoice{1}, m_mpStreamingChoice{1};

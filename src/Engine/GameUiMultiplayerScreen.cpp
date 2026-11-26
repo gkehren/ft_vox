@@ -155,16 +155,40 @@ void GameUiSample::setMultiplayerView(MultiplayerView view)
 		m_mpError.clear();
 		m_mpErrorOnHost = false;
 	}
-	// Draft lifecycle (correction F06): while the player has not edited the
-	// join endpoint, a session context change re-syncs the field to the
-	// connected endpoint (or the most recent saved one); an edited draft
-	// survives navigation and session changes untouched.
+	// The administrative selection belongs to its server launch, its verified
+	// world identity and a live authorization (correction F12): the same
+	// numeric PlayerId is a different player in another world or launch, and
+	// losing the channel never restores a target. The cached reply is
+	// invalidated with it, and an armed pointer press from the previous
+	// context is cancelled.
+	const bool adminAuthorized = view.administration &&
+		view.administration->role != localcontrol::Role::Player;
+	const uint64_t adminWorld = adminAuthorized ? view.administration->world : 0;
+	if (!adminSelectionCompatible(view.launch, adminWorld, adminAuthorized,
+			m_mpAdminContextLaunch, m_mpAdminContextWorld, m_mpAdminContextAuthorized))
+	{
+		if (m_mpAdminTarget.valid() || m_mpAdminDisplayed)
+			cancelPointerPress();
+		m_mpAdminTarget = {};
+		m_mpAdminDisplayed.reset();
+		m_mpAdminContextLaunch = view.launch;
+		m_mpAdminContextWorld = adminWorld;
+		m_mpAdminContextAuthorized = adminAuthorized;
+	}
+	// Draft lifecycle (corrections F06/F10): the automatic endpoint is adopted
+	// ONLY when its value changed and the player has not edited the draft. An
+	// unchanged view never reconstructs the field, so the caret, selection and
+	// IME composition survive every frame; an edited draft (its value no longer
+	// matches the last automatic one) survives navigation and session changes.
+	// An active composition is never interrupted (F10).
 	const std::string endpointAuto = !view.endpoint.empty() ? view.endpoint :
 		(view.preferences.recent.empty() ? "127.0.0.1:7777" : client::formatEndpoint(view.preferences.recent.front()));
-	const std::string previousAuto = std::move(m_joinEndpointAuto);
-	m_joinEndpointAuto = endpointAuto;
-	if (m_joinEndpoint.value() == previousAuto)
-		setText(m_joinEndpoint, endpointAuto);
+	if (endpointAuto != m_joinEndpointAuto)
+	{
+		if (m_joinEndpoint.value() == m_joinEndpointAuto && m_joinEndpoint.composition().empty())
+			setText(m_joinEndpoint, endpointAuto);
+		m_joinEndpointAuto = endpointAuto;
+	}
 	m_multiplayer = std::move(view);
 	if (m_mpInitialized)
 		return;
@@ -256,6 +280,10 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		m_mpError.clear();
 		m_mpErrorOnHost = false;
 	}
+	// Transient clipboard feedback belongs to the Join screen (correction
+	// F15): leaving it clears the note so it cannot mask later feedback.
+	if (screen != Screen::JoinServer && !m_mpClipboard.empty())
+		m_mpClipboard.clear();
 	switch (screen)
 	{
 	case Screen::Multiplayer:
@@ -273,14 +301,15 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 	{
 		text("Join server", 32.f);
 		connection();
-		// Ordered feedback (corrections F03/F08): a typed refusal first, then
-		// the join error, the clipboard result, the transition status and the
-		// preferences error — the newest relevant message wins.
+		// Ordered feedback (corrections F03/F08/F15): a typed refusal, then
+		// the transient clipboard result — displayed independently of a
+		// historical connection error — then the join error, the transition
+		// status and the preferences error.
 		std::string message{noticeText(view, FeedbackGroup::Join)};
-		if (message.empty() && !view.joinError.empty())
-			message = view.joinError;
 		if (message.empty() && !m_mpClipboard.empty())
 			message = m_mpClipboard;
+		if (message.empty() && !view.joinError.empty())
+			message = view.joinError;
 		if (message.empty() && view.pending)
 			message = "Finishing the previous session...";
 		if (message.empty() && view.connection && view.connection->detail)
@@ -464,8 +493,15 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		text("Local administration", 32.f);
 		if (!authorized)
 		{
-			detail(view.adminChannelFailed ? "Local administration channel unavailable." :
-				"Waiting for verified local permissions. Remote roles do not grant local control.");
+			// A refusal produced while the channel was still verified stays
+			// visible after the authorization disappeared (correction F15):
+			// the player learns WHY the action failed, not just that the
+			// channel is gone.
+			const auto refusal = noticeText(view, FeedbackGroup::Admin);
+			detail(refusal.empty() ? std::string_view(view.adminChannelFailed ?
+				"Local administration channel unavailable." :
+				"Waiting for verified local permissions. Remote roles do not grant local control.") :
+				refusal);
 			break;
 		}
 		text("Local permission  |  " + std::string(localcontrol::label(admin->role)));
@@ -490,21 +526,25 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 					(row.banned ? "  |  Banned" : "") + (row.localAdmin ? "  |  Local control" : ""));
 			refs(m_mpAdminLabels, m_mpAdminRows);
 		}
-		// The target is a stable identity, never a row index (correction F01):
-		// reorderings keep it and a disappearing target clears the selection —
-		// the list then renders the explicit unselected state and every
-		// targeted action stays disabled until a player is chosen.
+		// The target is a stable identity, never a row index (corrections
+		// F01/F11): reorderings keep it and a disappearing target clears the
+		// selection. Clicks and keyboard steps already drove
+		// ListSelection::select themselves (with reveal); the build only
+		// RECONCILES the row index of the identity and clamps the scroll
+		// offset when the roster size changed — the scroll window is never
+		// reset while the view is unchanged.
 		const auto target = std::ranges::find(admin->players, m_mpAdminTarget, &localcontrol::Player::id);
-		if (target == admin->players.end())
+		const int targetRow = target == admin->players.end() ? -1
+			: static_cast<int>(target - admin->players.begin());
+		if (targetRow < 0)
 		{
 			if (m_mpAdminTarget.valid())
 				cancelPointerPress();
 			m_mpAdminTarget = {};
-			m_mpList.selection.clear();
 		}
-		else
-			m_mpList.selection.select(static_cast<int>(target - admin->players.begin()),
-				static_cast<int>(m_mpAdminLabels.size()), 4);
+		m_mpList.selection.selected = targetRow;
+		m_mpList.selection.first = std::clamp(m_mpList.selection.first, 0,
+			std::max(0, static_cast<int>(m_mpAdminLabels.size()) - 4));
 		// The admin list owns its selection state: the shared list() helper
 		// clamps to a valid row, which would implicitly select a player.
 		m_mpList.visibleRows = 4;

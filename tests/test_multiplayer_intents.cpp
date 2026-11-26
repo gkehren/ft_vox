@@ -212,5 +212,47 @@ int main()
 		== Submitted, "a verified administration channel submits");
 	CHECK(gameui::evaluateMultiplayerRequest(request(Administer, 8), clearContext(), administered)
 		== ServerChanged, "an administration intent from an old launch is refused");
+
+	// --- Feedback lifetime is scoped to its generation (F13/F15) ---
+	const gameui::MultiplayerFeedback clientRefused{gameui::MultiplayerOutcome::Busy,
+		gameui::MultiplayerAction::Connect, 9, 5};
+	CHECK(gameui::multiplayerNoticeValid(clientRefused, 5, 9, 9),
+		"client connection feedback lives for its session generation");
+	CHECK(gameui::multiplayerNoticeValid(clientRefused, 5, 12345, 12345),
+		"an unrelated hosting change does not discard client feedback");
+	CHECK(!gameui::multiplayerNoticeValid(clientRefused, 6, 9, 9),
+		"a new session generation drops the old refusal");
+	const gameui::MultiplayerFeedback serverBusy{gameui::MultiplayerOutcome::Busy,
+		gameui::MultiplayerAction::StopHost, 9, 5};
+	CHECK(gameui::multiplayerNoticeValid(serverBusy, 5, 9, 0),
+		"server-scoped feedback names its launch");
+	CHECK(!gameui::multiplayerNoticeValid(serverBusy, 5, 10, 10),
+		"a server restart drops refusals from the previous launch");
+	const gameui::MultiplayerFeedback serverMoved{gameui::MultiplayerOutcome::ServerChanged,
+		gameui::MultiplayerAction::Administer, 9, 5};
+	CHECK(gameui::multiplayerNoticeValid(serverMoved, 5, 10, 10),
+		"a ServerChanged verdict is reported against the new launch");
+	CHECK(!gameui::multiplayerNoticeValid(serverMoved, 5, 11, 10),
+		"the next launch change clears the ServerChanged verdict");
+	CHECK(gameui::serverScoped(gameui::MultiplayerAction::StartHost) &&
+		gameui::serverScoped(gameui::MultiplayerAction::JoinHost) &&
+		gameui::serverScoped(gameui::MultiplayerAction::StopHost) &&
+		gameui::serverScoped(gameui::MultiplayerAction::ForceStop) &&
+		gameui::serverScoped(gameui::MultiplayerAction::Administer) &&
+		!gameui::serverScoped(gameui::MultiplayerAction::Connect) &&
+		!gameui::serverScoped(gameui::MultiplayerAction::Favorite),
+		"only hosted and administrative actions are server-scoped");
+
+	// --- Cross-world administrative selection scope (F12) ---
+	CHECK(gameui::adminSelectionCompatible(9, 7, true, 9, 7, true),
+		"a roster refresh preserves the selection context");
+	CHECK(!gameui::adminSelectionCompatible(10, 7, true, 9, 7, true),
+		"a server relaunch invalidates the selection");
+	CHECK(!gameui::adminSelectionCompatible(9, 8, true, 9, 7, true),
+		"the same numeric PlayerId in another world is a different player");
+	CHECK(!gameui::adminSelectionCompatible(9, 7, false, 9, 7, true),
+		"losing the verified authorization invalidates the selection");
+	CHECK(!gameui::adminSelectionCompatible(9, 7, true, 9, 7, false),
+		"recovering the authorization never restores an obsolete selection context");
 	return testmain::exitCode();
 }

@@ -43,15 +43,26 @@ void Engine::pumpPlayerMultiplayer()
 {
 	if (!m_playerUi)
 		return;
+	// Gameplay boundary (correction F14): without an active multiplayer
+	// screen there is no presentation to update — no GameUIFrame and no
+	// MultiplayerView are built during normal gameplay, and no profile,
+	// world or endpoint collection is copied. A request queued before the
+	// player left the flow is an intentional cancellation, consumed without
+	// feedback. Hosting supervision, auto-join and the remote session
+	// advance in their own ticks, independent of UI visibility; the first
+	// pump after re-entering a multiplayer screen rebuilds current data.
+	if (!gameui::multiplayerScreen(m_playerUi->screens().top()))
+	{
+		m_playerUi->takeMultiplayerRequest();
+		return;
+	}
 	auto intent = m_playerUi->takeMultiplayerRequest();
-	// Intentional navigation cancellation (correction F03): the player left
-	// the multiplayer screens before the pump ran. The request is consumed
-	// without feedback — leaving a screen is never an error.
-	if (intent && !gameui::multiplayerScreen(m_playerUi->screens().top()))
-		intent.reset();
-	// Feedback is scoped to its session generation (correction F03): a
-	// refusal from an old epoch can never mask a newer session.
-	if (m_multiplayerNotice && m_multiplayerNotice->sessionEpoch != m_playerMultiplayerEpoch)
+	// Feedback lifetime (corrections F03/F13): scoped to its session
+	// generation and, for server-scoped actions, to the server launch the
+	// refusal was reported against — an old result never masks the current
+	// server state.
+	if (m_multiplayerNotice && !gameui::multiplayerNoticeValid(*m_multiplayerNotice,
+			m_playerMultiplayerEpoch, m_hostSnapshot.launch, m_multiplayerNoticeServer))
 		m_multiplayerNotice.reset();
 
 	GameUIFrame frame{};
@@ -134,8 +145,16 @@ void Engine::pumpPlayerMultiplayer()
 			}
 		}
 		else
+		{
 			m_multiplayerNotice = gameui::MultiplayerFeedback{outcome, intent->action,
 				intent->launch, m_playerMultiplayerEpoch};
+			// The launch this refusal is reported against (correction F13):
+			// a ServerChanged verdict describes the move to the CURRENT
+			// launch and clears when that launch moves again; other
+			// server-scoped refusals name their own launch and drop when it
+			// is gone.
+			m_multiplayerNoticeServer = m_hostSnapshot.launch;
+		}
 	}
 
 	gameui::MultiplayerView view;

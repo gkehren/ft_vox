@@ -557,3 +557,64 @@ vanished-target confirmations refused through the real execution pipeline,
 single-execution audit evidence, stop-and-save with checkpoint, and the
 occupied-port bind failure. CPU-side, `test_multiplayer_intents` pins the
 eligibility and outcome rules for every operation without a GPU.
+
+### Review corrections (#306 round 3)
+
+- **Endpoint editing is stable.** The automatic endpoint is re-published only
+  when its value changed and never while a text composition is active: the
+  caret, selection and IME state survive every frame. An untouched draft
+  follows the session context; an edited draft survives navigation and
+  session transitions.
+- **Administrative scrolling is independent.** The registered-player list
+  reconciles the row index of the selected identity without touching the
+  scroll window: wheel browsing works with and without a selection, the
+  offset survives unchanged views, roster shrinkage clamps it, and keyboard
+  steps reveal the newly selected row.
+- **The administrative selection is server-scoped.** It belongs to one hosted
+  launch, one verified world identity and a live authorization. A relaunch, a
+  world change or a lost channel clears the target and the cached reply, so
+  identical numeric PlayerIds across worlds or launches can never inherit a
+  target.
+- **Refusal feedback is generation-scoped.** Server-scoped notices name their
+  launch; a `ServerChanged` verdict is reported against the new launch and
+  clears on the next launch change, so an old result never masks the current
+  server state. Client connection feedback stays scoped to its session
+  generation.
+- **Transient results never mask state.** The clipboard result displays
+  independently of a standing connection error, a supervisor state
+  transition clears the previous hosting error, and an administrative refusal
+  stays visible after the channel itself disappeared.
+- **The gameplay boundary is restored.** `pumpPlayerMultiplayer` returns
+  before building any frame or view when no multiplayer screen is active; a
+  queued request is consumed as a silent, intentional cancellation. Hosting
+  supervision, auto-join and the remote session keep advancing in their own
+  ticks, and the first pump after re-entering a screen rebuilds current data.
+
+### Validation record (#306)
+
+Covered by existing suites (verified, not duplicated here):
+
+- Unsupported protocol versions: the `rejectHello` version matrix in
+  `test_wire_protocol`.
+- Server capacity rejection: the excess-client `Full` rejection in
+  `test_udp_transport` and the `Full` status mapping in `test_multiplayer_ui`.
+- Lost connections and stale monitoring: the timeout/retry path in
+  `EngineJoinSmoke`, `test_server_restart_client` and the hosted-closure
+  phases.
+- Checkpoint failure: `test_world_checkpoint` and the persistence contracts in
+  `test_voxel_world` / `test_world_save`.
+- Delayed shutdown and force-stop safeguards: `test_server_supervisor`
+  (direct force-stop refused, delayed stop escalation, stale-roster
+  freshness).
+- CPU intent rules: `test_multiplayer_intents` (eligibility, typed outcomes,
+  notice lifetime, cross-world selection scope) and the `ListSelection`
+  scrolling cases in `test_game_ui_interaction`.
+
+Remaining manual validation before closing #306 (NOT executed here):
+
+- A positive delegated local-control authorization with a correctly enrolled
+  local profile on the launcher machine — the isolated two-process proof can
+  only verify the credential-boundary refusal.
+- Interactive GPU validation of the native screens: keyboard and mouse
+  navigation, large administrative roster scrolling (10+ players), endpoint
+  editing and text selection, and UI scaling at 100%, 150% and 200%.

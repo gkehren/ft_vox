@@ -201,6 +201,9 @@ private:
 	/// (correction F03): typed, operation-scoped feedback the native surface
 	/// displays; invalidated when the epoch moves or a new request runs.
 	std::optional<gameui::MultiplayerFeedback> m_multiplayerNotice;
+	/// Server launch a server-scoped refusal was reported against (F13): a
+	/// ServerChanged verdict clears when this launch moves again.
+	uint64_t m_multiplayerNoticeServer{};
 	void showMainMenu();
 	void queuePlayerSession(gameui::SessionRequest request);
 	bool acceptsPlayerSession(gameui::SessionAction action) const;

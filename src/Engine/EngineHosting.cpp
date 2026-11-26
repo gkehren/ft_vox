@@ -91,6 +91,11 @@ void Engine::tickHosting()
 					m_hostWorlds.pop_back();
 			}
 		}
+		// A supervisor state transition supersedes the previous operation
+		// error (correction F15): an old hosting error can never mask the new
+		// state — failures surface through the summarized host message.
+		if (next->state != m_hostSnapshot.state)
+			m_hostError.clear();
 		m_hostSnapshot = std::move(*next);
 	}
 	if (m_hostSnapshot.state == hosting::State::Ready && m_hostAutoProfile &&

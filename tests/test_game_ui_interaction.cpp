@@ -297,6 +297,25 @@ void layoutAndWidgets()
 	CHECK(list.first == 5 && list.selected == 0, "list wheel is bounded and does not select");
 	list.select(2, 8, 3);
 	CHECK(list.first == 2 && list.selected == 2, "selection reveals its row");
+	// Correction F11: the administrative roster decouples the selection from
+	// the scroll window — wheel browsing works without a selection, the
+	// offset survives unchanged views, shrinkage clamps it, and the explicit
+	// unselected state never implicitly picks a row.
+	ListSelection roster;
+	roster.clear();
+	CHECK(!roster.any() && roster.selected == -1, "the explicit unselected state is no row");
+	roster.scroll(3, 10, 4);
+	CHECK(roster.first == 3 && !roster.any(), "the wheel scrolls without a selection");
+	roster.select(8, 10, 4);
+	CHECK(roster.selected == 8 && roster.first == 5, "an explicit selection reveals its row");
+	roster.scroll(-2, 10, 4);
+	CHECK(roster.first == 3 && roster.selected == 8, "the offset moves freely around a selection");
+	roster.scroll(0, 6, 4);
+	CHECK(roster.first == 2, "roster shrinkage clamps the scroll offset");
+	roster.clear();
+	CHECK(!roster.any() && roster.first == 2, "clearing the selection preserves the scroll window");
+	roster.select(roster.selected + 1, 10, 4);
+	CHECK(roster.selected == 0 && roster.first == 0, "keyboard navigation starts from the first row and reveals it");
 }
 
 void reusableBindings()

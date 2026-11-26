@@ -59,6 +59,43 @@ struct MultiplayerFeedback
 	uint64_t launch{}, sessionEpoch{};
 };
 
+/// Server-scoped actions (correction F13): their feedback describes one
+/// hosted server launch.
+inline bool serverScoped(MultiplayerAction action)
+{
+	using enum MultiplayerAction;
+	return action == StartHost || action == JoinHost || action == StopHost ||
+		action == ForceStop || action == Administer;
+}
+
+/// Notice validity (corrections F13/F15): client connection feedback lives
+/// for its session generation; server-scoped feedback additionally belongs to
+/// one launch. A ServerChanged verdict is reported against the launch the
+/// refusal was delivered in (`reportedLaunch`) and clears when that launch
+/// moves again; every other server-scoped refusal is dropped as soon as its
+/// own launch is gone, so an old result never masks the current server.
+inline bool multiplayerNoticeValid(const MultiplayerFeedback &notice, uint64_t sessionEpoch,
+	uint64_t serverLaunch, uint64_t reportedLaunch)
+{
+	if (notice.sessionEpoch != sessionEpoch)
+		return false;
+	if (!serverScoped(notice.action))
+		return true;
+	if (notice.outcome == MultiplayerOutcome::ServerChanged)
+		return serverLaunch == reportedLaunch;
+	return notice.launch == serverLaunch;
+}
+
+/// Administrative selection scope (correction F12): the selection belongs to
+/// one server launch, one verified world identity and a live authorization.
+/// Identical numeric PlayerIds in another world are unrelated players, and a
+/// lost authorization never restores a target.
+inline bool adminSelectionCompatible(uint64_t launch, uint64_t world, bool authorized,
+	uint64_t contextLaunch, uint64_t contextWorld, bool contextAuthorized)
+{
+	return launch == contextLaunch && world == contextWorld && authorized == contextAuthorized;
+}
+
 /// Live host-side context a drained request is judged against. Filled by the
 /// Engine from its frame state; kept pure so the decision is CPU-testable.
 struct MultiplayerContext
