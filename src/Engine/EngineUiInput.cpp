@@ -165,7 +165,6 @@ void Engine::syncUiInput()
 {
 	if (m_uiSpike)
 		return;
-	applyPlayerUiScaleRequests();
 	if (m_playerUi)
 	{
 		const auto revision = m_playerUi->screens().revision();

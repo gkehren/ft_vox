@@ -259,6 +259,16 @@ bool GameUiSample::hitsStrip(float x, float y) const
 	return m_screens.top() == gameui::Screen::Hud && contains(m_button, x, y);
 }
 
+bool GameUiSample::scaleAppliedForWindow(SDL_Window *window, gameui::ScalePolicy policy) const
+{
+	if (!scalePolicyApplied(policy))
+		return false;
+	if (policy.mode == gameui::ScaleMode::Fixed)
+		return m_scale.effective() == gameui::resolveScale(policy, {});
+	const auto inputs = scaleInputsFor(window);
+	return !gameui::validScaleInputs(inputs) || m_scale.effective() == gameui::resolveScale(policy, inputs);
+}
+
 void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent, gameui::Clip view,
 						   const TextureManager &atlas, uint64_t atlasGeneration, const gameui::HudView *hud)
 {

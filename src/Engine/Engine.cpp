@@ -647,48 +647,58 @@ void Engine::requestSwapchainRecreate()
 	m_swapchainRecreateRequested = true;
 }
 
-void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
+bool Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 {
 	if (!swapchain || width == 0 || height == 0)
-		return;
+		return false;
 
 	const bool previousVSync = swapchain->isVSync();
-	bool desiredVSync = m_pendingVSync.value_or(previousVSync);
-	if (m_playerVSyncRequest)
+	const bool desiredVSync = m_pendingVSync.value_or(previousVSync);
+	const auto extent = swapchain->getExtent();
+	const bool currentSwapchain = swapchain->getSwapchain() && !m_swapchainRecreateRequested &&
+		extent.width == width && extent.height == height;
+	const bool resizingPreview = m_playerDisplayPreview && m_playerDisplayPreview->view.window.has_value();
+	if (resizingPreview && m_playerDisplayPreview->recoveringSwapchain)
 	{
-		try
-		{
-			const auto support = VkSwapchain::querySupport(vkContext->getPhysicalDevice(), vkContext->getSurface());
-			VkSwapchain::selectPresentMode(support.presentModes, desiredVSync);
-		}
-		catch (const std::exception &e)
-		{
-			std::cerr << "[ui] " << e.what() << '\n';
-			desiredVSync = renderSettings.vsyncEnabled = previousVSync;
-			m_pendingVSync.reset();
-			finishPlayerVSync(false);
-		}
+		gameui::WindowSize logical;
+		SDL_GetWindowSize(window, &logical.width, &logical.height);
+		if (logical != m_playerDisplayPreview->previousWindow)
+			return false;
 	}
-	const VkExtent2D extent = swapchain->getExtent();
-	if (!m_swapchainRecreateRequested && desiredVSync == previousVSync &&
-		extent.width == width && extent.height == height)
-		return;
+	if (currentSwapchain && desiredVSync == previousVSync)
+		return true;
 
 	PROFILE_SCOPE("SwapchainRecreate");
 	// VkSwapchain::recreate waits for the device before destroying WSI state.
 	// Every swapchain consumer is refreshed before the next image acquisition.
 	try
 	{
-		swapchain->recreate(width, height, desiredVSync);
+		swapchain->recreate(width, height, desiredVSync, resizingPreview);
 	}
-	catch (const std::exception &e)
+	catch (const SwapchainConfigurationError &e)
 	{
-		if (!m_playerVSyncRequest)
+		if (!resizingPreview && !m_playerVSyncRequest)
 			throw;
+		if (resizingPreview)
+		{
+			auto &preview = *m_playerDisplayPreview;
+			if (!preview.recoveringSwapchain)
+			{
+				std::cerr << "[ui] " << e.what() << '\n';
+				revertPlayerDisplayPreview("This display rejected the requested size. Try a different size.");
+				setVSync(preview.previousVSync);
+				preview.recoveringSwapchain = true;
+			}
+			requestSwapchainRecreate();
+			return false;
+		}
 		std::cerr << "[ui] " << e.what() << '\n';
-		swapchain->recreate(width, height, previousVSync);
 		renderSettings.vsyncEnabled = previousVSync;
+		m_pendingVSync.reset();
 		finishPlayerVSync(false);
+		if (currentSwapchain && swapchain->getSwapchain())
+			return true;
+		swapchain->recreate(width, height, previousVSync);
 	}
 	frameCtx->onSwapchainRecreate(swapchain->getImageCount());
 	worldRenderer->onSwapchainRecreate(*swapchain);
@@ -703,6 +713,7 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	m_swapchainRecreateRequested = false;
 	if (m_playerVSyncRequest)
 		finishPlayerVSync(true);
+	return true;
 }
 
 void Engine::tickDayCycle(double dt)
@@ -936,6 +947,8 @@ void Engine::handleEvents()
 			break;
 		case SDL_EVENT_WINDOW_HIDDEN:
 			m_windowHidden = true;
+			if (m_playerDisplayPreview)
+				m_playerDisplayPreview->restoreCheck.reset();
 			[[fallthrough]];
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			windowFocused = false;
@@ -966,6 +979,8 @@ void Engine::handleEvents()
 			break;
 		case SDL_EVENT_WINDOW_MINIMIZED:
 			m_windowMinimized = true;
+			if (m_playerDisplayPreview)
+				m_playerDisplayPreview->restoreCheck.reset();
 			m_inputRouter.cancelAll();
 			clearGameplayInput();
 			cancelDeveloperInput();
@@ -2107,7 +2122,6 @@ void Engine::enableGameUi(bool standalone, bool previewStrip)
 	// it at the frame boundary (issue #302). A store problem is surfaced where
 	// the setting is edited, not silently swallowed.
 	sample->setScalePolicy(m_playerUiSettings.scale);
-	sample->setSettingsNotice(m_playerUiError);
 	sample->setPreviewStripVisible(previewStrip);
 	sample->setHudVisible(m_showPlayerHud);
 	m_uiSpike = standalone;
@@ -2218,10 +2232,14 @@ void Engine::run()
 		// (2) Viewport: a minimized/hidden window skips the whole frame; the
 		// clock resync AFTER the sleep keeps the skipped stretch out of the
 		// next gameplay timestep (restore = rawDt of a normal frame).
-		int pixelW = 0, pixelH = 0;
-		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
-		if (pixelW == 0 || pixelH == 0 || m_windowHidden || m_windowMinimized ||
-			(SDL_GetWindowFlags(window) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)))
+		const auto framebuffer = playerFramebufferSize();
+		const auto [pixelW, pixelH] = framebuffer;
+		const bool renderable = pixelW > 0 && pixelH > 0;
+		const bool swapchainReady = renderable && recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
+			static_cast<uint32_t>(pixelH));
+		if (renderable)
+			updatePlayerDisplayPreview(framebuffer, swapchainReady);
+		if (!swapchainReady)
 		{
 			if (m_remote)
 				pollRemote();
@@ -2230,10 +2248,6 @@ void Engine::run()
 			resetFrameClock();
 			continue;
 		}
-
-		recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
-								  static_cast<uint32_t>(pixelH));
-		updatePlayerDisplayPreview(pixelW, pixelH);
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		// Inspection timeout check runs BEFORE acquisition: breaking after a

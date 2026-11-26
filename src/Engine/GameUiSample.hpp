@@ -84,21 +84,11 @@ public:
 	void setScalePolicy(gameui::ScalePolicy policy) { m_scale.setPolicy(policy); }
 	gameui::ScalePolicy scalePolicy() const { return m_scale.policy(); }
 	float playerUiScale() const { return m_scale.effective(); }
-	/// A scale request raised by the gallery. The host persists it and pushes it back
-	/// through setScalePolicy, so the surface never touches the settings store.
-	std::optional<gameui::ScalePolicy> takeScaleRequest()
+	bool scalePolicyApplied(gameui::ScalePolicy policy) const
 	{
-		auto request = m_scaleRequest;
-		m_scaleRequest.reset();
-		return request;
+		return !m_scale.hasPending() && m_scale.policy() == policy;
 	}
-	/// A player-facing message about the persisted settings store (empty when it
-	/// read and wrote cleanly). Presentation only: the host owns the text and
-	/// the file, the surface just prints it next to the scale selector.
-	void setSettingsNotice(std::string_view notice)
-	{
-		m_settingsNotice.assign(notice.substr(0, 160));
-	}
+	bool scaleAppliedForWindow(SDL_Window *window, gameui::ScalePolicy policy) const;
 
 private:
 	friend struct UiSpikeProbe;
@@ -262,8 +252,7 @@ private:
 
 	// Player UI scale + player-surface state (issue #302).
 	gameui::ScaleController m_scale;
-	std::optional<gameui::ScalePolicy> m_scaleRequest;
-	std::string m_settingsNotice;
+	std::optional<gameui::ScalePolicy> m_galleryPreviousScale;
 	float m_uiPhase{};
 	uint32_t m_toastSerial{};
 	std::optional<std::chrono::steady_clock::time_point> m_lastFrame;

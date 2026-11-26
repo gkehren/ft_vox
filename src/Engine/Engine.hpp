@@ -190,9 +190,10 @@ private:
 	void loadJoinPreferences();
 	void loadPlayerUiPreferences();
 	void persistPlayerUiPreferences();
-	void applyPlayerUiScaleRequests();
 	void pumpPlayerSettings();
-	void updatePlayerDisplayPreview(int pixelW, int pixelH);
+	gameui::WindowSize playerFramebufferSize() const;
+	void updatePlayerDisplayPreview(gameui::WindowSize framebuffer, bool swapchainReady);
+	bool playerDisplayPreviewMatches(gameui::WindowSize framebuffer) const;
 	void handlePlayerSettingsRequest(const gameui::SettingsRequest &request);
 	void beginPlayerDisplayPreview(std::optional<gameui::WindowSize> size,
 		std::optional<gameui::ScalePolicy> scale, bool reset = false);
@@ -201,7 +202,7 @@ private:
 	void requestPlayerVSync(bool enabled, bool persist);
 	void finishPlayerVSync(bool applied);
 	void applyPlayerMouseSensitivity(int percent);
-	void resetPlayerSettingsDefaults();
+	void resetPlayerSettingsDefaults(bool resetWindow);
 	void loadHosting();
 	void populateHostingUi(GameUIFrame &frame);
 	void tickHosting();
@@ -273,7 +274,7 @@ private:
 	void handleEvents();
 	void onResize(int width, int height);
 	void requestSwapchainRecreate();
-	void recreateSwapchainIfNeeded(uint32_t width, uint32_t height);
+	bool recreateSwapchainIfNeeded(uint32_t width, uint32_t height);
 	void tickStreaming(double dt);
 	void tickDayCycle(double dt);
 	void processInput(double dt);
@@ -516,7 +517,12 @@ private:
 		gameui::WindowSize previousWindow;
 		gameui::ScalePolicy previousScale;
 		std::chrono::steady_clock::time_point deadline;
+		std::optional<std::chrono::steady_clock::time_point> restoreCheck;
+		std::chrono::steady_clock::duration restoreElapsed{};
 		bool reset{};
+		bool previousVSync{};
+		bool restoreWindowPending{};
+		bool recoveringSwapchain{};
 	};
 	std::optional<DisplayPreview> m_playerDisplayPreview;
 	std::vector<std::string> m_joinProfiles;

@@ -658,8 +658,13 @@ or UI scale to cycle the choices, then select **Preview display changes**.
 Engine sends SDL one resize request and uses the acquired framebuffer size
 for Vulkan. The confirmation screen shows the requested and current values.
 **Keep changes** saves the preview. **Revert changes**, Escape or 15 seconds
-without confirmation restore the previous size and scale. If the window
-manager refuses the resize, Settings reports it and retains the saved size.
+without confirmation restore the previous size and scale. The confirmation
+deadline also runs while the window is minimized or hidden. Rollback remains
+pending until the window can render again, and its verification timer only
+accrues while the framebuffer is available. Engine verifies the restored
+logical size, framebuffer and scale before reporting success. A recoverable
+Vulkan configuration refusal rolls back and refreshes all swapchain consumers
+before the next acquisition. Fatal Vulkan errors follow the client error path.
 Restore a maximized window to use the size selector.
 
 VSync changes at the next swapchain boundary. Off requires Vulkan's
@@ -667,8 +672,10 @@ IMMEDIATE mode and a refused request leaves the previous mode active. The
 FXAA switch affects scene rendering. Sensitivity is a percentage of the
 default mouse response (25–300% in steps), and vertical inversion changes
 local look input. **Controls reference** is browsable with Up and Down.
-**Reset to defaults** uses the display preview when window size or scale
-changes. The defaults are 1920 × 1080 windowed, VSync and FXAA on, 100%
+**Reset to defaults** previews changes to window size or scale. Cancelling the
+preview keeps every preference. Resetting a maximized or otherwise non-resizable
+window keeps the saved size, explains how to reset it, and resets the other
+eligible preferences. The defaults are 1920 × 1080 windowed, VSync and FXAA on, 100%
 sensitivity, normal vertical look and Auto UI scale.
 
 Engine writes the versioned record under
@@ -677,13 +684,17 @@ file and atomic replacement. This is a client-wide setting shared across
 solo worlds and remote connections. A missing record uses defaults. Invalid
 or unreadable records are reported and kept until the next explicit save.
 A failed write leaves the change active for the run and offers **Retry saving
-preferences**. If the new file is missing, Engine imports the scale from the
-legacy `<saves-root>/.client-profiles/player-ui.txt` at startup. The next
-explicit save writes the new record, and the legacy file remains available to
-older builds. ImGui scale and docking are stored independently in `imgui.ini`.
+preferences**. The current file requires the complete current schema. Its
+absence permits Engine to read the scale-only legacy
+`<saves-root>/.client-profiles/player-ui.txt` at startup. The next explicit save
+writes the new record, and the legacy file remains available to older builds.
+The design gallery previews scale temporarily and restores the previous player
+policy when leaving. ImGui scale and docking use `imgui.ini`.
 
 `--vsync` and the FXAA value selected by `--quality` take precedence over the
 record for the launch. Those controls show the active value and the override.
+Reset preserves the stored value for each overridden setting, so a subsequent
+launch without that flag restores the prior choice.
 CLI benchmark and inspection runs skip the preference loader and follow their
 existing launch policy. Dev UI controls and F10 still make session-only changes
 where their shortcuts apply. Opening Settings reads the live values and leaves
@@ -698,9 +709,13 @@ The opt-in proof presents through the real Vulkan swapchain and captures the
 same UI and scene into readback images after setting the window size. Build
 `test_engine_reload`, run it with the built resources available, then use
 `--player-settings-proof <fresh-output-dir>` to reproduce the captures.
-The Windows RTX 4070 Ti run passed all 17 checks, including VSync switching
-from FIFO to IMMEDIATE, Escape and timeout rollback, the startup loader,
-CLI precedence, and return to solo from a loopback connection attempt.
+Invoke `--player-settings-restart-proof <same-output-dir>` in a fresh process
+to verify the persisted fixture against the startup loader.
+On the Windows RTX 4070 Ti, the Settings proof passed 35 checks and the
+fresh-process proof passed two. The tests inject both a rejected Vulkan
+swapchain configuration and a fatal device error, exercise real minimize
+and restore events, and compare the saved record after cancelled previews,
+CLI overrides, and a write retry.
 Validation reported only the known [RTSS diagnostics](vulkan-validation.md#srgbstorage-errors-from-rtss-issue-99).
 
 - [Settings at 960 × 540](images/player-settings/settings.png)

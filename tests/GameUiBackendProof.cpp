@@ -31,6 +31,36 @@ void checked(bool ok, const char *message)
 		throw std::runtime_error(message);
 }
 
+std::string readText(const std::filesystem::path &path)
+{
+	std::ifstream in(path, std::ios::binary);
+	return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// Intercept only vkCreateSwapchainKHR. The usual retire, rollback and WSI
+// recovery paths still run on the real device.
+struct SwapchainCreationFailure
+{
+	static inline VkResult error{};
+	static inline int calls{};
+	PFN_vkCreateSwapchainKHR original = vkCreateSwapchainKHR;
+
+	explicit SwapchainCreationFailure(VkResult result)
+	{
+		error = result;
+		calls = 0;
+		vkCreateSwapchainKHR = reject;
+	}
+	~SwapchainCreationFailure() { vkCreateSwapchainKHR = original; }
+
+	static VKAPI_ATTR VkResult VKAPI_CALL reject(VkDevice, const VkSwapchainCreateInfoKHR *,
+		const VkAllocationCallbacks *, VkSwapchainKHR *)
+	{
+		++calls;
+		return error;
+	}
+};
+
 struct Readback
 {
 	VkContext &context;
@@ -1106,9 +1136,15 @@ struct GameUiBackendProbe
 		prof.beginFrame();
 		engine.handleEvents();
 		engine.pumpPlayerSettings();
-		const auto size = extent();
-		engine.recreateSwapchainIfNeeded(size.width, size.height);
-		engine.updatePlayerDisplayPreview(int(size.width), int(size.height));
+		const auto size = engine.playerFramebufferSize();
+		const bool ready = size.width > 0 && size.height > 0 &&
+			engine.recreateSwapchainIfNeeded(uint32_t(size.width), uint32_t(size.height));
+		engine.updatePlayerDisplayPreview(size, ready);
+		if (!ready)
+		{
+			prof.endFrame();
+			return;
+		}
 		uint32_t image = 0;
 		checked(engine.frameCtx->beginFrame(*engine.swapchain, image), "acquire Game UI proof frame");
 		const uint32_t slot = engine.frameCtx->frameIndex();
@@ -1124,7 +1160,7 @@ struct GameUiBackendProbe
 				extraDevUi();
 			engine.imgui->endFrame();
 		}
-		engine.updateFrameUniforms(slot, int(size.width), int(size.height), 5.f);
+		engine.updateFrameUniforms(slot, size.width, size.height, 5.f);
 		engine.recordFrame(slot, image, 0, gpuTag);
 		checked(engine.frameCtx->submitAndPresent(*engine.swapchain, image), "present Game UI proof frame");
 		engine.noteSessionFramePresented();
@@ -2023,72 +2059,43 @@ struct GameUiBackendProbe
 				"repeated atlas replacements leak no font or descriptor resources");
 		}
 
-		// S04: the Engine settings seam, on an isolated directory. A missing record
-		// stays silent, a corrupt one warns and stays untouched until the player
-		// selects a value, a failed write stays dirty and the next explicit
-		// selection persists.
+		// The gallery is a temporary presentation preview. Exercise the actual
+		// scale button and leave through both Back and an epoch-style screen reset.
 		{
 			namespace fs = std::filesystem;
 			const auto previousRoot = engine.m_savesRoot;
-			const auto root = fs::temp_directory_path() / "ftvox-player-ui-proof";
-			std::error_code ec;
-			fs::remove_all(root, ec);
+			const auto root = out / "gallery-preferences";
 			engine.setSavesRootForTests(root);
 			const auto record = root / gameui::kPlayerSettingsPath;
-			const auto readRecord = [&record] {
-				std::ifstream in(record, std::ios::binary);
-				return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			gameui::PlayerUiSettings saved;
+			saved.scale = {gameui::ScaleMode::Fixed, 1.f};
+			saved.window = {960, 540};
+			checked(saved.save(record), "seed gallery preference fixture");
+			const auto bytes = readText(record);
+			engine.loadPlayerUiPreferences();
+			const auto previewScale = [&] {
+				sample.openGallery();
+				frames(2);
+				const auto widgets = sample.m_widgets.widgets();
+				const auto scaleButton = std::ranges::find(widgets, std::string_view{"150%"}, &gameui::Widget::label);
+				checked(scaleButton != widgets.end(), "gallery exposes its scale selector");
+				sample.applyGalleryActivate(scaleButton->id);
+				frames(2);
+				CHECK(sample.playerUiScale() == 1.5f && readText(record) == bytes &&
+						engine.m_playerUiSettings == saved, "gallery scale changes only presentation");
 			};
-
-			engine.loadPlayerUiPreferences();
-			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto &&
-					!engine.m_playerUiDirty && engine.m_playerUiError.empty() && !fs::exists(record),
-				"a missing preference record loads Auto defaults without a warning or a write");
-			engine.applyPlayerUiScaleRequests();
-			CHECK(!fs::exists(record), "no unsolicited write happens without a selection");
-
-			fs::create_directories(record.parent_path(), ec);
-			{
-				std::ofstream corrupt(record, std::ios::binary | std::ios::trunc);
-				corrupt << "ftvox-player-ui 9\nscale auto\n";
-			}
-			const auto corruptBytes = readRecord();
-			engine.loadPlayerUiPreferences();
-			CHECK(engine.m_playerUiDirty && !engine.m_playerUiError.empty() &&
-					engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Auto,
-				"a corrupt preference record warns and asks for a repair");
-			engine.applyPlayerUiScaleRequests();
-			CHECK(readRecord() == corruptBytes,
-				"a corrupt record stays untouched while the player does not interact");
-
-			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Auto, 1.f};
-			engine.applyPlayerUiScaleRequests();
-			gameui::PlayerUiSettings repaired;
-			CHECK(repaired.load(record) == gameui::LoadStatus::Ok && engine.m_playerUiError.empty() &&
-					!engine.m_playerUiDirty,
-				"selecting the current default repairs the record and clears the warning");
-
-			// A destination that cannot be replaced (a directory in its place) keeps
-			// the change in memory and the store dirty.
-			fs::remove(record, ec);
-			fs::create_directories(record, ec);
-			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
-			engine.applyPlayerUiScaleRequests();
-			CHECK(engine.m_playerUiSettings.scale.mode == gameui::ScaleMode::Fixed &&
-					engine.m_playerUiSettings.scale.value == 1.5f && engine.m_playerUiDirty &&
-					!engine.m_playerUiError.empty(),
-				"a failed write keeps the in-memory preference and the dirty state");
-			fs::remove_all(record, ec);
-			sample.m_scaleRequest = gameui::ScalePolicy{gameui::ScaleMode::Fixed, 1.5f};
-			engine.applyPlayerUiScaleRequests();
-			gameui::PlayerUiSettings persisted;
-			CHECK(persisted.load(record) == gameui::LoadStatus::Ok &&
-					persisted.scale.mode == gameui::ScaleMode::Fixed && persisted.scale.value == 1.5f &&
-					engine.m_playerUiError.empty() && !engine.m_playerUiDirty,
-				"the same selection after recovery persists and clears the warning");
-
+			sample.resetScreens();
+			previewScale();
+			sample.back();
+			frames(2);
+			CHECK(sample.scalePolicyApplied(saved.scale) && readText(record) == bytes,
+				"leaving the gallery restores the original scale and leaves the file intact");
+			previewScale();
+			sample.resetScreens();
+			frames(2);
+			CHECK(sample.scalePolicyApplied(saved.scale) && readText(record) == bytes,
+				"resetting the screen stack also restores the original scale");
 			engine.setSavesRootForTests(previousRoot);
-			fs::remove_all(root, ec);
 		}
 
 		sample.resetScreens();
@@ -2115,13 +2122,30 @@ struct GameUiBackendProbe
 		auto &device = *engine.vkContext;
 		const auto errorsBefore = device.validationErrorCount();
 		const auto rtssBefore = device.rtssValidationErrorCount();
-		const auto record = engine.m_savesRoot / kPlayerSettingsPath;
+		auto record = engine.m_savesRoot / kPlayerSettingsPath;
 		const auto legacy = engine.m_savesRoot / kLegacyPlayerSettingsPath;
+		engine.loadPlayerUiPreferences();
+		CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && !engine.m_playerUiDirty &&
+				!fs::exists(record), "missing current and legacy files use defaults silently");
 		fs::create_directories(legacy.parent_path());
-		std::ofstream(legacy) << kLegacyPlayerUiSettingsHeader << "\nscale fixed 1.00\n";
+		std::ofstream(legacy, std::ios::binary) << kLegacyPlayerUiSettingsHeader << "\nscale fixed 1.00\n";
+		const auto legacyBytes = readText(legacy);
 		engine.loadPlayerUiPreferences();
 		CHECK(engine.m_playerUiSettings.scale == (ScalePolicy{ScaleMode::Fixed, 1.f}) && !fs::exists(record),
 			"the legacy player scale loads without a migration write");
+		fs::create_directories(record.parent_path());
+		std::ofstream(record, std::ios::binary) << legacyBytes;
+		engine.loadPlayerUiPreferences();
+		CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && engine.m_playerUiDirty &&
+				readText(record) == legacyBytes && readText(legacy) == legacyBytes,
+			"a legacy record at the current path is corrupt and blocks legacy fallback without a write");
+		fs::remove(record);
+		std::ofstream(legacy) << "broken legacy record\n";
+		engine.loadPlayerUiPreferences();
+		CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && engine.m_playerUiDirty && !fs::exists(record),
+			"a corrupt legacy record is reported without creating a current record");
+		std::ofstream(legacy, std::ios::binary) << legacyBytes;
+		engine.loadPlayerUiPreferences();
 		engine.imgui->requestUiScale(1.5f);
 		resize(960, 540);
 		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
@@ -2162,6 +2186,20 @@ struct GameUiBackendProbe
 			SDL_SyncWindow(engine.window);
 			present();
 		};
+		const auto minimize = [&] {
+			checked(SDL_MinimizeWindow(engine.window) && SDL_SyncWindow(engine.window), "minimize Settings window");
+			windowEvent(SDL_EVENT_WINDOW_MINIMIZED);
+			present();
+			checked(engine.playerFramebufferSize() == WindowSize{}, "framebuffer unavailable while minimized");
+		};
+		const auto restore = [&] {
+			checked(SDL_RestoreWindow(engine.window) && SDL_SyncWindow(engine.window), "restore Settings window");
+			windowEvent(SDL_EVENT_WINDOW_RESTORED);
+			windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+			present();
+			SDL_SyncWindow(engine.window);
+			frames(2);
+		};
 		tap(SDLK_TAB);
 		tap(SDLK_TAB);
 		tap(SDLK_RETURN);
@@ -2188,16 +2226,96 @@ struct GameUiBackendProbe
 		CHECK(sample.screens().top() == Screen::Settings && !sample.m_settingsView.display &&
 				sample.m_settingsView.window == (WindowSize{960, 540}) && sample.playerUiScale() == 1.f &&
 				!fs::exists(record), "Escape restores both settings without a disk edit");
-		stageDisplay();
-		checked(engine.m_playerDisplayPreview.has_value(), "start the display timeout test");
-		engine.m_playerDisplayPreview->deadline = std::chrono::steady_clock::time_point{};
+
+		click("Window size");
+		click("UI scale");
+		auto beforeFailure = engine.frameNumber;
+		{
+			SwapchainCreationFailure refusal(VK_ERROR_INITIALIZATION_FAILED);
+			click("Preview display changes");
+			if (refusal.calls == 0)
+			{
+				SDL_SyncWindow(engine.window);
+				beforeFailure = engine.frameNumber;
+				present();
+			}
+			CHECK(refusal.calls == 1 && !engine.swapchain->getSwapchain() &&
+					engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->recoveringSwapchain &&
+					engine.frameNumber == beforeFailure && !fs::exists(record),
+				"a rejected resize after WSI retirement skips acquisition and enters rollback");
+		}
 		present();
 		SDL_SyncWindow(engine.window);
+		frames(2);
+		CHECK(!sample.m_settingsView.display && sample.m_settingsView.window == (WindowSize{960, 540}) &&
+				sample.playerUiScale() == 1.f && engine.swapchain->isVSync() && engine.frameNumber > beforeFailure &&
+				!fs::exists(record) && sample.m_settingsView.notice.find("Previous display settings restored") != std::string::npos,
+			"recovery refreshes swapchain consumers and verifies a successful rollback before reporting it");
+
+		engine.beginPlayerDisplayPreview(WindowSize{1280, 720}, std::nullopt);
+		SDL_SyncWindow(engine.window);
+		const auto fatalExtent = extent();
+		{
+			SwapchainCreationFailure fatal(VK_ERROR_DEVICE_LOST);
+			bool propagated = false;
+			try
+			{
+				engine.recreateSwapchainIfNeeded(fatalExtent.width, fatalExtent.height);
+			}
+			catch (const SwapchainConfigurationError &)
+			{
+			}
+			catch (const std::runtime_error &)
+			{
+				propagated = true;
+			}
+			CHECK(fatal.calls == 1 && propagated && !engine.swapchain->getSwapchain(),
+				"a fatal creation error propagates without retrying as a configuration refusal");
+		}
+		// The injected device loss never reached the driver. Reset the fixture.
+		engine.revertPlayerDisplayPreview();
 		present();
+		SDL_SyncWindow(engine.window);
+		frames(2);
+
+		stageDisplay();
+		checked(engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->view.phase == DisplayPhase::Confirming,
+			"start the minimized confirmation timeout test");
+		const auto confirmationDeadline = engine.m_playerDisplayPreview->deadline;
+		minimize();
+		checked(engine.m_playerDisplayPreview.has_value(), "minimized confirmation stays in flight");
+		CHECK(engine.m_playerDisplayPreview->deadline == confirmationDeadline && !fs::exists(record),
+			"minimizing does not extend confirmation or write preferences");
+		engine.m_playerDisplayPreview->deadline = {};
+		present();
+		checked(engine.m_playerDisplayPreview.has_value(), "expired confirmation keeps the rollback transaction");
+		CHECK(engine.m_playerDisplayPreview->view.phase == DisplayPhase::Restoring &&
+				!engine.m_playerDisplayPreview->restoreCheck && !fs::exists(record) &&
+				engine.m_playerSettingsNotice.find("restored") == std::string::npos,
+			"confirmation expires while minimized and postpones verification");
+		restore();
 		CHECK(!sample.m_settingsView.display && sample.m_settingsView.window == (WindowSize{960, 540}) &&
 				sample.playerUiScale() == 1.f && !fs::exists(record) &&
 				sample.m_settingsView.notice.find("expired") != std::string::npos,
-			"an expired preview restores the old settings and reports why");
+			"restoring the window verifies the expired preview was rolled back");
+		stageDisplay();
+		tap(SDLK_ESCAPE);
+		present();
+		checked(engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->view.phase == DisplayPhase::Restoring,
+			"rollback waits for the previous scale frame");
+		engine.m_playerDisplayPreview->restoreCheck = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+		minimize();
+		CHECK(engine.m_playerDisplayPreview && !engine.m_playerDisplayPreview->restoreCheck && !fs::exists(record),
+			"an interrupted rollback stays live and pauses the visible verification clock");
+		sample.m_settingsRequest = PreviewDisplay{WindowSize{1600, 900}, std::nullopt};
+		present();
+		CHECK(engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->view.phase == DisplayPhase::Restoring &&
+				engine.m_playerDisplayPreview->view.window == (WindowSize{960, 540}),
+			"a pending rollback rejects a second display transaction");
+		restore();
+		CHECK(!sample.m_settingsView.display && sample.m_settingsView.window == (WindowSize{960, 540}) &&
+				sample.playerUiScale() == 1.f && !fs::exists(record) && sample.m_settingsView.notice.empty(),
+			"the interrupted rollback verifies on restore without reporting a false failure");
 		stageDisplay();
 		tap(SDLK_TAB, SDL_KMOD_SHIFT);
 		tap(SDLK_RETURN);
@@ -2220,6 +2338,42 @@ struct GameUiBackendProbe
 		CHECK(saved.load(record) == LoadStatus::Ok && !saved.fxaa && saved.sensitivity == 125 &&
 				saved.invertY && saved.vsync == !immediate, "all changes are persisted through the native controls");
 		shot("settings-applied.png");
+		const auto savedBytes = readText(record);
+		// Leave the original record in its original location for the next client
+		// process. Use a separate copy for the destructive retry and reset cases.
+		const auto restartRecord = record;
+		engine.setSavesRootForTests(out / "continued" / "saves");
+		record = engine.m_savesRoot / kPlayerSettingsPath;
+		fs::create_directories(record.parent_path());
+		fs::copy_file(restartRecord, record);
+
+		const auto backup = record.parent_path() / "previous-record.txt";
+		fs::rename(record, backup);
+		fs::create_directory(record);
+		click("Invert vertical");
+		CHECK(engine.m_playerUiDirty && !engine.m_playerUiSettings.invertY && readText(backup) == savedBytes,
+			"a blocked save leaves the new value active and preserves the previous record");
+		fs::remove(record);
+		fs::rename(backup, record);
+		click("Retry saving preferences");
+		PlayerUiSettings retried;
+		CHECK(!engine.m_playerUiDirty && retried.load(record) == LoadStatus::Ok && !retried.invertY,
+			"an explicit retry persists the pending value after the destination recovers");
+		click("Invert vertical");
+		CHECK(readText(record) == savedBytes, "return to the original preferences before testing reset");
+
+		click("Reset to defaults");
+		SDL_SyncWindow(engine.window);
+		frames(2);
+		checked(sample.m_settingsView.display && sample.m_settingsView.display->phase == DisplayPhase::Confirming,
+			"multi-preference reset previews both display settings");
+		tap(SDLK_ESCAPE);
+		present();
+		SDL_SyncWindow(engine.window);
+		frames(2);
+		CHECK(!sample.m_settingsView.display && readText(record) == savedBytes &&
+				engine.m_playerUiSettings == saved && sample.m_settingsView.window == saved.window &&
+				sample.scalePolicyApplied(saved.scale), "cancelling reset keeps every existing preference");
 
 		// Exercise the actual startup loader against the on-disk record after changing the runtime values.
 		resize(960, 540);
@@ -2242,14 +2396,33 @@ struct GameUiBackendProbe
 		CHECK(sample.m_settingsView.vsync && sample.m_settingsView.fxaa && sample.m_settingsView.vsyncOverridden &&
 				sample.m_settingsView.fxaaOverridden && afterOverrides.load(record) == LoadStatus::Ok &&
 				afterOverrides == saved, "CLI overrides win for the session and do not rewrite the preferences");
+		checked(SDL_MaximizeWindow(engine.window) && SDL_SyncWindow(engine.window), "maximize Settings window");
+		frames(2);
+		checked(!sample.m_settingsView.canResize, "a maximized window cannot be resized by Settings");
+		click("Reset to defaults");
+		frames(2);
+		checked(sample.m_settingsView.display && !sample.m_settingsView.display->window,
+			"maximized reset previews scale only");
+		click("Keep changes");
+		PlayerUiSettings partialReset;
+		CHECK(partialReset.load(record) == LoadStatus::Ok && partialReset.window == saved.window &&
+				partialReset.scale == ScalePolicy{} && partialReset.sensitivity == kDefaultSensitivity &&
+				!partialReset.invertY && partialReset.vsync == saved.vsync && partialReset.fxaa == saved.fxaa &&
+				sample.m_settingsView.vsync && sample.m_settingsView.fxaa &&
+				sample.m_settingsView.notice.find("Restore the window") != std::string::npos &&
+				sample.m_settingsView.notice.find("command-line overrides") != std::string::npos,
+			"maximized reset keeps the saved window and CLI-locked preferences while resetting eligible values");
+		restore();
 		engine.setPlayerSettingsOverrides(false, false);
+		engine.loadPlayerUiPreferences();
+		present();
+		CHECK(sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa,
+			"normal startup application restores the saved VSync and FXAA choices");
 		click("Reset to defaults");
 		SDL_SyncWindow(engine.window);
-		present();
+		frames(2);
 		checked(sample.m_settingsView.display.has_value(), "reset previews the default display settings");
-		tap(SDLK_TAB, SDL_KMOD_SHIFT);
-		tap(SDLK_RETURN);
-		present();
+		click("Keep changes");
 		PlayerUiSettings defaults;
 		CHECK(defaults.load(record) == LoadStatus::Ok && defaults == PlayerUiSettings{},
 			"confirming reset restores every default");
@@ -2259,6 +2432,26 @@ struct GameUiBackendProbe
 		auto *solo = engine.sim.get();
 		sim::InventorySnapshot inventory;
 		solo->inventorySnapshot(inventory);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		frames(2);
+		checked(engine.setMouseCaptured(true), "capture the camera for vertical look checks");
+		const auto pitch = [&](bool inverted) {
+			engine.handlePlayerSettingsRequest(SetInvertY{inverted});
+			engine.camera.setYawPitch(-90.f, 0.f);
+			SDL_PumpEvents();
+			SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
+			SDL_Event event{};
+			event.type = SDL_EVENT_MOUSE_MOTION;
+			event.motion.windowID = SDL_GetWindowID(engine.window);
+			event.motion.yrel = 12.f;
+			checked(SDL_PushEvent(&event), "queue vertical mouse motion");
+			engine.handleEvents();
+			return engine.camera.getPitch();
+		};
+		const auto normalPitch = pitch(false);
+		const auto invertedPitch = pitch(true);
+		CHECK(std::abs(normalPitch + 1.2f) < 0.001f && std::abs(invertedPitch - 1.2f) < 0.001f,
+			"inversion reverses real SDL mouse motion on the camera pitch");
 		sample.openPause();
 		engine.syncUiInput();
 		present();
@@ -2285,6 +2478,34 @@ struct GameUiBackendProbe
 		device.waitIdle();
 		CHECK(device.validationErrorCount() - errorsBefore == device.rtssValidationErrorCount() - rtssBefore,
 			"the Settings proof has no unexpected Vulkan validation errors");
+	}
+
+	void playerSettingsRestartProof(const std::filesystem::path &out)
+	{
+		using namespace gameui;
+		ImGui::GetIO().IniFilename = nullptr;
+		engine.setSavesRootForTests(out / "saves");
+		const auto record = engine.m_savesRoot / kPlayerSettingsPath;
+		const auto bytes = readText(record);
+		PlayerUiSettings saved;
+		checked(saved.load(record) == LoadStatus::Ok, "load the previous process's Settings proof fixture");
+		engine.loadPlayerUiPreferences();
+		engine.enableGameUi(false, false);
+		engine.setShowDeveloperUi(false);
+		engine.running = true;
+		engine.showMainMenu();
+		auto &sample = *engine.m_playerUi;
+		sample.openScreen(Screen::Settings);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		frames(2);
+		CHECK(saved.window == (WindowSize{1280, 720}) && saved.scale == (ScalePolicy{ScaleMode::Fixed, 1.25f}) &&
+				saved.sensitivity == 125 && saved.invertY && !saved.fxaa,
+			"restart fixture contains preferences changed in the previous process");
+		CHECK(sample.m_settingsView.window == saved.window && sample.scalePolicyApplied(saved.scale) &&
+				sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa &&
+				engine.camera.getMouseSensitivity() == cameraSensitivity(saved.sensitivity) &&
+				sample.m_settingsView.invertY == saved.invertY && readText(record) == bytes,
+			"a fresh client process applies the persisted values without rewriting the record");
 	}
 
 	void playerInventoryProof()
@@ -3196,5 +3417,13 @@ int runPlayerSettingsProof(Engine &engine, const std::filesystem::path &output)
 	GameUiBackendProbe(engine).playerSettingsProof(output);
 	if (testmain::fails == 0)
 		std::cout << "PASS: native player Settings (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runPlayerSettingsRestartProof(Engine &engine, const std::filesystem::path &output)
+{
+	GameUiBackendProbe(engine).playerSettingsRestartProof(output);
+	if (testmain::fails == 0)
+		std::cout << "PASS: native player Settings restart (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }

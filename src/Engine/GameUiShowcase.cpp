@@ -44,6 +44,11 @@ NavKey navKey(SDL_Keycode code)
 
 void GameUiSample::invalidateLayout()
 {
+	if (m_galleryPreviousScale && m_screens.top() != Screen::Gallery)
+	{
+		m_scale.setPolicy(*m_galleryPreviousScale);
+		m_galleryPreviousScale.reset();
+	}
 	// Geometry only (issue #302 F16): a scale or resolution change rebuilds the
 	// layout but keeps focus, selection, notifications, field values and the
 	// scroll offset. Screen entry is detected separately by m_screenRevision and
@@ -54,10 +59,10 @@ void GameUiSample::invalidateLayout()
 
 void GameUiSample::resetScreens(Screen root)
 {
-	invalidateLayout();
 	setInventoryView({});
 	cancelInventoryGesture();
 	m_screens.reset(root);
+	invalidateLayout();
 	m_sessionRequest.reset();
 	m_settingsRequest.reset();
 	m_displayChoice = {};

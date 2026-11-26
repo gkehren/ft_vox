@@ -36,6 +36,7 @@ int runGameUiPerformance(Engine &engine);
 int runPlayerHudProof(Engine &engine);
 int runPlayerInventoryProof(Engine &engine);
 int runPlayerSettingsProof(Engine &engine, const std::filesystem::path &output);
+int runPlayerSettingsRestartProof(Engine &engine, const std::filesystem::path &output);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
 	const std::filesystem::path &evidence, bool restoring);
 
@@ -104,6 +105,8 @@ int main(int argc, char **argv)
 			return runPlayerInventoryProof(*engine);
 		if (argc == 3 && std::string_view(argv[1]) == "--player-settings-proof")
 			return runPlayerSettingsProof(*engine, argv[2]);
+		if (argc == 3 && std::string_view(argv[1]) == "--player-settings-restart-proof")
+			return runPlayerSettingsRestartProof(*engine, argv[2]);
 		if (argc == 5 && std::string_view(argv[1]) == "--join-smoke")
 		{
 			engine->setSavesRootForTests(argv[4]);

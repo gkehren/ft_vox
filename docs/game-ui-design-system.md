@@ -157,9 +157,9 @@ Details:
 
 The Engine loads the scale policy from `<saves-root>/.client-settings/player-settings.txt`
 and passes it to the scale controller. **Settings** previews the scale before
-saving it. The design gallery continues to send direct scale requests through
-the same preference store and shows its read or write errors under the scale
-selector. See [Player settings](game-ui-migration.md#player-settings-307) for
+saving it. The gallery's scale selector changes the presentation for that visit.
+Going back or resetting the screen stack restores the prior player scale policy.
+See [Player settings](game-ui-migration.md#player-settings-307) for
 validation, legacy scale migration, and precedence.
 
 ## 4. Components
@@ -342,7 +342,7 @@ correction.
 | S01 | `clipGlyph` intersects one glyph quad with its component rect and remaps the UV rectangle proportionally; `FontView::paint` takes an optional bound and skips fully clipped glyphs. `label`, `labelAligned` and `fittedLabel` all funnel into the clipped path, the field editor clips to `editorClip`, the surface scissor is unchanged (no extra batches), and the advance still moves so alignment, ellipsis and framebuffer compensation are untouched. | `PlayerUiText.hpp`, `PlayerUiWidgets.*`, `PlayerUiComponents.cpp` | `GameUiComponents`: 60/75/90% of a line height × 100/150/200% → every glyph quad inside the rect, valid non-inverted UVs, ≤ 2 batches |
 | S02 | Composite decorations clamp or skip: `statusIndicator` shrinks its marker and text band, `toast` clamps the accent strip and body, `slot` clamps the icon inset, progress/durability band and badge (and paints no bar when there is no room), the toggle clamps its switch and label, the slider clamps label/value height and track. Empty and inverted rects return early. | `PlayerUiComponents.cpp`, `PlayerUiWidgets.cpp` | `GameUiComponents::degenerateGeometry` (empty, inverted, fractional, narrow, flat) plus a toggle and a slider at 90×40, 24×40, 90×14 and 12×12 |
 | S03 | `GameUiSample::refreshFaceForDensity` is the explicit density seam (`setFaceDensityOverride` lets a host or a proof pick the target); the GPU proof refuses an invalid replacement (zero extent, mismatched coverage), keeps rendering on the working atlas, then performs a real 2× replacement, asserts the published CPU metrics match the GPU image, round-trips three times and restores the original footprint. | `GameUiSample.*`, `GameUiBackendProof.cpp` | `--game-ui-design-system`: `fontBytes`, `descriptorSets`, `m_face.width·height`, `m_fontScale`, `dropped == 0`, validation counters |
-| S04 | The Engine preference seam is proven end to end on an isolated temporary directory: missing record → Auto defaults, no warning, no write; corrupt record → warning + dirty, file untouched while the player does nothing; explicit Auto selection → record repaired and warning cleared; failed write (a directory in place of the record) → in-memory value kept, still dirty; the same selection after recovery → persisted, warning cleared. | `EngineUiInput.cpp`, `GameUiBackendProof.cpp` | `--game-ui-design-system` (six checks on `loadPlayerUiPreferences`, `applyPlayerUiScaleRequests`, `m_playerUiDirty` and `m_playerUiError`) |
+| S04 | The gallery scale preview restores the previous policy on Back and screen-stack reset. Settings handles preference loading, repair and explicit save retry. | `GameUiGallery.cpp`, `EnginePlayerSettings.cpp` | `--game-ui-design-system` and `--player-settings-proof` |
 
 The only visible capture difference is a handful of ±1 pixels at label edges:
 glyphs that used to extend a pixel past their component are now cut by the same

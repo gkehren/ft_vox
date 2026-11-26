@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <cstdlib>
 #include <cstring>
 
@@ -46,9 +47,7 @@ SwapchainSupportDetails VkSwapchain::querySupport(VkPhysicalDevice device, VkSur
 void VkSwapchain::init(VkContext &context, uint32_t width, uint32_t height, bool vsync)
 {
 	m_context = &context;
-	m_vsync = vsync;
-	createSwapchain(width, height);
-	createImageViews();
+	createSwapchain(width, height, vsync, false);
 }
 
 void VkSwapchain::shutdown()
@@ -62,22 +61,12 @@ void VkSwapchain::recreate(uint32_t width, uint32_t height)
 	recreate(width, height, m_vsync);
 }
 
-void VkSwapchain::recreate(uint32_t width, uint32_t height, bool vsync)
+void VkSwapchain::recreate(uint32_t width, uint32_t height, bool vsync, bool requireExactExtent)
 {
 	if (!m_context || width == 0 || height == 0)
 		return;
 
-	// Reject an unavailable strict present mode before destroying the working
-	// swapchain. The Engine invokes this only at a pre-acquire frame boundary.
-	const auto support =
-		querySupport(m_context->getPhysicalDevice(), m_context->getSurface());
-	selectPresentMode(support.presentModes, vsync);
-
-	m_context->waitIdle();
-	cleanupSwapchain();
-	m_vsync = vsync;
-	createSwapchain(width, height);
-	createImageViews();
+	createSwapchain(width, height, vsync, requireExactExtent);
 }
 
 void VkSwapchain::cleanupSwapchain()
@@ -117,7 +106,7 @@ VkSurfaceFormatKHR VkSwapchain::chooseSurfaceFormat(const std::vector<VkSurfaceF
 			format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 			return format;
 	}
-	throw std::runtime_error(
+	throw SwapchainConfigurationError(
 		"Surface exposes no SDR sRGB-compatible format {B8G8R8A8/R8G8B8A8 + SRGB_NONLINEAR}; "
 		"HDR/wide-gamut swapchains are not supported by the current color pipeline");
 }
@@ -132,11 +121,11 @@ VkPresentModeKHR VkSwapchain::selectPresentMode(
 
 	if (!vsync)
 	{
-		throw std::runtime_error(
+		throw SwapchainConfigurationError(
 			"VSync off requires VK_PRESENT_MODE_IMMEDIATE_KHR, but the "
 			"surface does not expose it; refusing a synchronized fallback");
 	}
-	throw std::runtime_error(
+	throw SwapchainConfigurationError(
 		"VSync on requires VK_PRESENT_MODE_FIFO_KHR, but the surface does not "
 		"expose the Vulkan-mandated FIFO mode");
 }
@@ -169,16 +158,18 @@ VkExtent2D VkSwapchain::chooseExtent(const VkSurfaceCapabilitiesKHR &caps, uint3
 	return extent;
 }
 
-void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
+void VkSwapchain::createSwapchain(uint32_t width, uint32_t height, bool vsync, bool requireExactExtent)
 {
 	auto support = querySupport(m_context->getPhysicalDevice(), m_context->getSurface());
 	if (support.formats.empty() || support.presentModes.empty())
-		throw std::runtime_error("Swapchain support incomplete");
+		throw SwapchainConfigurationError("Swapchain support incomplete");
 
 	VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(support.formats);
 	VkPresentModeKHR presentMode =
-		selectPresentMode(support.presentModes, m_vsync);
+		selectPresentMode(support.presentModes, vsync);
 	VkExtent2D extent = chooseExtent(support.capabilities, width, height);
+	if (requireExactExtent && (extent.width != width || extent.height != height))
+		throw SwapchainConfigurationError("The Vulkan surface refused the requested framebuffer extent");
 
 	uint32_t imageCount = support.capabilities.minImageCount + 1;
 	if (support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount)
@@ -199,7 +190,7 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	if ((support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0)
 		createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	if ((support.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage)
-		throw std::runtime_error("Surface does not support the required swapchain image usage");
+		throw SwapchainConfigurationError("Surface does not support the required swapchain image usage");
 
 	const uint32_t graphicsFamily = m_context->getGraphicsQueueFamily();
 	const uint32_t presentFamily = m_context->getPresentQueueFamily();
@@ -225,8 +216,23 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 		std::cerr << "[Vulkan] Swapchain request before dispatch: format=" << createInfo.imageFormat
 			<< " imageUsage=" << createInfo.imageUsage << " (COLOR_ATTACHMENT | TRANSFER_DST)\n";
 
-	if (vkCreateSwapchainKHR(m_context->getDevice(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS)
-		throw std::runtime_error("Failed to create swapchain");
+	// Validate the proposed configuration before retiring the working images.
+	const auto device = m_context->getDevice();
+	if (m_swapchain)
+	{
+		const VkResult idle = vkDeviceWaitIdle(device);
+		if (idle != VK_SUCCESS)
+			throw std::runtime_error("Failed to wait for swapchain retirement (VkResult " + std::to_string(idle) + ')');
+		cleanupSwapchain();
+	}
+	VkSwapchainKHR replacement = VK_NULL_HANDLE;
+	const VkResult created = vkCreateSwapchainKHR(device, &createInfo, nullptr, &replacement);
+	if (created == VK_ERROR_INITIALIZATION_FAILED || created == VK_ERROR_OUT_OF_DATE_KHR)
+		throw SwapchainConfigurationError("The Vulkan surface rejected swapchain creation (VkResult " +
+			std::to_string(created) + ')');
+	if (created != VK_SUCCESS)
+		throw std::runtime_error("Failed to create swapchain (VkResult " + std::to_string(created) + ')');
+	m_swapchain = replacement;
 
 	if (vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, nullptr) != VK_SUCCESS)
 		throw std::runtime_error("Failed to query swapchain image count");
@@ -239,6 +245,8 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	m_extent = extent;
 	m_minImageCount = createInfo.minImageCount;
 	m_presentMode = presentMode;
+	createImageViews();
+	m_vsync = vsync;
 
 	std::cout << "Swapchain present mode: " << presentModeName(m_presentMode)
 			  << " (VSync " << (m_vsync ? "on" : "off")

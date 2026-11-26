@@ -205,35 +205,41 @@ bool PlayerUiSettings::parse(std::string_view record)
 {
 	if (record.empty() || record.size() > kMaxPlayerUiSettingsBytes)
 		return false;
-	const auto header = takeLine(record);
 	PlayerUiSettings next;
-	if (header != kPlayerUiSettingsHeader && header != kLegacyPlayerUiSettingsHeader)
+	if (takeLine(record) != kPlayerUiSettingsHeader || !parseScale(takeLine(record), next.scale))
 		return false;
-	if (!parseScale(takeLine(record), next.scale))
+	const auto windowLine = takeLine(record);
+	const auto separator = windowLine.find(' ', 7);
+	if (!windowLine.starts_with("window ") || separator == std::string_view::npos ||
+		!parseInt(windowLine.substr(7, separator - 7), next.window.width) ||
+		!parseInt(windowLine.substr(separator + 1), next.window.height) ||
+		!parseBool(takeLine(record), "vsync ", next.vsync) ||
+		!parseBool(takeLine(record), "fxaa ", next.fxaa))
 		return false;
-	if (header == kPlayerUiSettingsHeader)
-	{
-		const auto windowLine = takeLine(record);
-		const auto separator = windowLine.find(' ', 7);
-		if (!windowLine.starts_with("window ") || separator == std::string_view::npos ||
-			!parseInt(windowLine.substr(7, separator - 7), next.window.width) ||
-			!parseInt(windowLine.substr(separator + 1), next.window.height) ||
-			!parseBool(takeLine(record), "vsync ", next.vsync) ||
-			!parseBool(takeLine(record), "fxaa ", next.fxaa))
-			return false;
-		const auto sensitivityLine = takeLine(record);
-		if (!sensitivityLine.starts_with("sensitivity ") ||
-			!parseInt(sensitivityLine.substr(12), next.sensitivity) ||
-			!parseBool(takeLine(record), "invert-y ", next.invertY))
-			return false;
-	}
+	const auto sensitivityLine = takeLine(record);
+	if (!sensitivityLine.starts_with("sensitivity ") ||
+		!parseInt(sensitivityLine.substr(12), next.sensitivity) ||
+		!parseBool(takeLine(record), "invert-y ", next.invertY))
+		return false;
 	if (!record.empty() || !next.valid())
 		return false;
 	*this = next;
 	return true;
 }
 
-LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
+bool parseLegacyPlayerScale(std::string_view record, ScalePolicy &scale)
+{
+	ScalePolicy next;
+	if (record.size() > kMaxPlayerUiSettingsBytes || takeLine(record) != kLegacyPlayerUiSettingsHeader ||
+		!parseScale(takeLine(record), next) || !record.empty())
+		return false;
+	scale = next;
+	return true;
+}
+
+namespace
+{
+LoadStatus readRecord(const std::filesystem::path &path, auto decode)
 {
 	if (path.empty())
 		return LoadStatus::Missing;
@@ -251,7 +257,7 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 			DWORD bytesRead = 0;
 			const bool read = ReadFile(file, record, static_cast<DWORD>(sizeof(record)), &bytesRead, nullptr) != 0;
 			CloseHandle(file);
-			return read && parse(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
+			return read && decode(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
 		}
 		const auto error = GetLastError();
 		if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
@@ -298,8 +304,19 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 	}
 	if (in.bad() || record.size() > kMaxPlayerUiSettingsBytes)
 		return LoadStatus::Corrupt;
-	return parse(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
+	return decode(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
 #endif
+}
+} // namespace
+
+LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
+{
+	return readRecord(path, [this](std::string_view record) { return parse(record); });
+}
+
+LoadStatus loadLegacyPlayerScale(const std::filesystem::path &path, ScalePolicy &scale)
+{
+	return readRecord(path, [&scale](std::string_view record) { return parseLegacyPlayerScale(record, scale); });
 }
 
 bool PlayerUiSettings::save(const std::filesystem::path &path) const

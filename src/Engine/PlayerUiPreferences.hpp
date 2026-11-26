@@ -73,4 +73,6 @@ struct PlayerUiSettings
 
 /// `scale auto` / `scale fixed <step>` line, exposed for tests and logs.
 std::string formatScalePolicy(ScalePolicy policy);
+bool parseLegacyPlayerScale(std::string_view record, ScalePolicy &scale);
+LoadStatus loadLegacyPlayerScale(const std::filesystem::path &path, ScalePolicy &scale);
 } // namespace gameui

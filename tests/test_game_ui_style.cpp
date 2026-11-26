@@ -365,49 +365,62 @@ void preferences()
 			"window 1920 1080\nvsync on\nfxaa on\nsensitivity 100\ninvert-y off\n",
 		"the record format is stable and readable");
 
-	PlayerUiSettings parsed;
-	CHECK(!parsed.parse("scale auto\n"), "a record without its version header is corrupt");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\n"), "a record without a key is corrupt");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\nscale auto\nscale auto\n"),
-		"a duplicated key is corrupt");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\nmotion off\n"),
-		"an unknown key is corrupt");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\nscale fixed 0.75\n"),
-		"an auto-only step cannot be persisted as an override");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\nscale fixed 1.40\n"),
-		"a non-step override is rejected instead of silently re-snapped");
-	CHECK(!parsed.parse(std::string(kPlayerUiSettingsHeader) + "\nscale fixed 3\n"),
-		"an out-of-range override is rejected");
-	CHECK(parsed.parse(std::string(kLegacyPlayerUiSettingsHeader) + "\nscale fixed 2.00\n") &&
-			parsed.scale.value == 2.f && parsed.window == kDefaultWindowSize && parsed.vsync &&
-			parsed.fxaa && parsed.sensitivity == kDefaultSensitivity && !parsed.invertY,
-		"legacy scale migrates with defaults for the new fields");
-	CHECK(parsed.parse(std::string(kLegacyPlayerUiSettingsHeader) + "\r\nscale fixed 1.25\r\n") &&
-			parsed.scale.value == 1.25f,
-		"a CRLF record parses (a Windows editor round-trip stays valid)");
-	CHECK(parsed.parse(std::string(kLegacyPlayerUiSettingsHeader) + "\nscale auto") &&
-			parsed.scale.mode == ScaleMode::Auto,
-		"a record saved without its trailing newline still parses");
-
 	const PlayerUiSettings custom{{ScaleMode::Fixed, 1.75f}, {1280, 720}, false, false, 250, true};
 	CHECK(custom.save(path) && reloaded.load(path) == LoadStatus::Ok && reloaded == custom,
 		"all client preferences round-trip together");
 	const auto rejects = [&](std::string_view from, std::string_view to) {
 		auto malformed = custom.serialize();
 		malformed.replace(malformed.find(from), from.size(), to);
-		return !reloaded.parse(malformed) && reloaded == custom;
+		const PlayerUiSettings witness{{ScaleMode::Fixed, 2.f}, {960, 540}, true, false, 125, true};
+		auto destination = witness;
+		return !destination.parse(malformed) && destination == witness;
 	};
-	CHECK(rejects("1280 720", "1280 721") && rejects("1280 720", "0 0") &&
-			rejects("1280 720", "2147483648 720"),
-		"invalid resolutions and integer overflow leave all preferences unchanged");
-	CHECK(rejects("sensitivity 250", "sensitivity 275") && rejects("sensitivity 250", "sensitivity 301") &&
-			rejects("vsync off", "vsync yes") && rejects("fxaa off", "vsync off") &&
-			rejects("invert-y on", "") && rejects("scale fixed 1.75", "scale fixed 2.50"),
-		"the current version validates every field and rejects duplicate or missing keys");
+	CHECK(rejects("scale fixed 1.75", "scale manual 1.75"), "reject unknown scale mode");
+	CHECK(rejects("scale fixed 1.75", "scale fixed 0.75"), "reject auto-only fixed scale");
+	CHECK(rejects("scale fixed 1.75", "scale fixed 1.40"), "reject unsupported fixed scale step");
+	CHECK(rejects("scale fixed 1.75", "scale fixed 2.50"), "reject out-of-range fixed scale");
+	CHECK(rejects("scale fixed 1.75", "scale fixed 1,75"), "reject locale-dependent decimal separator");
+	CHECK(rejects("1280 720", "1280 721"), "reject unsupported window height");
+	CHECK(rejects("1280 720", "0 720"), "reject out-of-range window width");
+	CHECK(rejects("1280 720", "2147483648 720"), "reject overflow in window width");
+	CHECK(rejects("1280 720", "1280x 720"), "reject trailing junk in window width");
+	CHECK(rejects("sensitivity 250", "sensitivity 275"), "reject unsupported sensitivity step");
+	CHECK(rejects("sensitivity 250", "sensitivity 301"), "reject out-of-range sensitivity");
+	CHECK(rejects("sensitivity 250", "sensitivity 2.50"), "reject malformed sensitivity integer");
+	CHECK(rejects("vsync off", "vsync yes"), "reject invalid VSync boolean");
+	CHECK(rejects("fxaa off", "fxaa yes"), "reject invalid FXAA boolean");
+	CHECK(rejects("invert-y on", "invert-y yes"), "reject invalid inversion boolean");
+	CHECK(rejects("fxaa off\n", "fxaa off\nfxaa off\n"), "reject duplicate field");
+	CHECK(rejects("invert-y on\n", ""), "reject missing field");
+	CHECK(rejects("invert-y on", "motion on"), "reject unknown field");
+	CHECK(rejects(kPlayerUiSettingsHeader, "ftvox-player-settings 2"), "reject unknown version");
+	CHECK(rejects("ftvox-player-settings 1\n", ""), "reject missing header");
+
+	const std::string legacyHeader(kLegacyPlayerUiSettingsHeader);
+	ScalePolicy legacyScale;
+	CHECK(parseLegacyPlayerScale(legacyHeader + "\nscale fixed 2.00\n", legacyScale) &&
+			legacyScale == (ScalePolicy{ScaleMode::Fixed, 2.f}), "legacy scale parses independently");
+	CHECK(parseLegacyPlayerScale(legacyHeader + "\r\nscale fixed 1.25\r\n", legacyScale) &&
+			legacyScale == (ScalePolicy{ScaleMode::Fixed, 1.25f}), "legacy parser handles CRLF");
+	const auto oldScale = legacyScale;
+	CHECK(!parseLegacyPlayerScale(legacyHeader + "\nscale fixed 1,25\n", legacyScale) &&
+			legacyScale == oldScale, "legacy parser rejects comma decimals without changing the destination");
+	CHECK(!parseLegacyPlayerScale(legacyHeader + "\nscale auto\nscale auto\n", legacyScale) &&
+			legacyScale == oldScale, "legacy parser rejects duplicate scale lines");
+	CHECK(!parseLegacyPlayerScale(custom.serialize(), legacyScale) && legacyScale == oldScale,
+		"migration reads only the legacy schema");
+	CHECK(!reloaded.parse(legacyHeader + "\nscale auto\n") && reloaded == custom,
+		"the current parser rejects a valid legacy record without changing its destination");
+	CHECK(parseLegacyPlayerScale(legacyHeader + "\nscale auto", legacyScale) &&
+			legacyScale == ScalePolicy{}, "legacy parser accepts a missing trailing newline");
 	auto invalid = custom;
 	invalid.window.height = 0;
 	CHECK(!invalid.save(path) && reloaded.load(path) == LoadStatus::Ok && reloaded == custom,
 		"an invalid in-memory record cannot replace good preferences");
+	invalid = custom;
+	invalid.scale.mode = static_cast<ScaleMode>(99);
+	CHECK(!invalid.save(path) && reloaded.load(path) == LoadStatus::Ok && reloaded == custom,
+		"an invalid scale mode cannot replace good preferences");
 
 	{
 		std::filesystem::create_directories(path.parent_path(), ec);
@@ -583,11 +596,10 @@ void preferences()
 	const auto serialized = localeIndependent.serialize();
 	CHECK(serialized.find("1.50") != std::string::npos && serialized.find(',') == std::string::npos,
 		"the record always uses a dot decimal separator");
+	auto shortDecimal = serialized;
+	shortDecimal.replace(shortDecimal.find("1.50"), 4, "1.5");
 	PlayerUiSettings strict;
-	CHECK(!strict.parse(std::string(kLegacyPlayerUiSettingsHeader) + "\nscale fixed 1,50\n"),
-		"a comma decimal separator is rejected, never misread");
-	CHECK(strict.parse(std::string(kLegacyPlayerUiSettingsHeader) + "\nscale fixed 1.5\n") &&
-			strict.scale.value == 1.5f,
+	CHECK(strict.parse(shortDecimal) && strict == localeIndependent,
 		"a short decimal parses without a locale-dependent conversion");
 
 	std::filesystem::remove_all(dir, ec);
