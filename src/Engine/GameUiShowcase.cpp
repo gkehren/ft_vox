@@ -62,6 +62,11 @@ void GameUiSample::resetScreens(Screen root)
 	m_multiplayerRequest.reset();
 	m_multiplayerConfirm.reset();
 	m_mpError.clear();
+	m_mpErrorOnHost = false;
+	// The explicit administration target and the clipboard note belong to the
+	// multiplayer visit being left (corrections F01/F08).
+	m_mpAdminTarget = {};
+	m_mpClipboard.clear();
 	m_sessionStatus.clear();
 	m_worldName = {};
 	m_worldSeed = {};

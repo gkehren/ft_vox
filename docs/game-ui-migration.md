@@ -506,3 +506,54 @@ server, drives the native controls through SDL and writes PNG evidence.
 $env:FT_VOX_VALIDATION = '1'
 python tests/test_hosted_closure_native.py --menu --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/native-multiplayer-evidence
 ```
+
+The historical hosted-closure phases (persistent identities and inventories
+across a checkpoint restart, without the native menu) stay on the same runner:
+
+```powershell
+python tests/test_hosted_closure_native.py --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/hosted-closure-evidence
+```
+
+### Review corrections (#306 round 2)
+
+- **Identity-stable administration targeting.** The registered-player list
+  selection is a `sim::PlayerId`, never a row index: roster reorderings keep
+  the target, a disappearing target clears the selection into an explicit
+  unselected state (no row highlighted, targeted actions hidden until a
+  player is chosen again), and a press armed when the target changed is
+  cancelled. No destructive operation can implicitly fall back onto another
+  player.
+- **Kick semantics are explicit.** A kick intentionally targets the persistent
+  player identity: the server stores a 60-second `kickedUntil` lockout on the
+  persistent access record, actively closes the session and refuses rejoin
+  while the lockout runs. The confirmation says so, and both the client
+  revalidation and the server refuse to kick a target that is not online with
+  a fresh monitor sample. A role revocation also demotes by disconnecting the
+  target so it re-enters as a plain player.
+- **Refused requests produce typed feedback.** Every drained multiplayer
+  request is evaluated before dispatch (`gameui::evaluateMultiplayerRequest`):
+  `StaleSession`, `ServerChanged`, `Busy`, `InvalidState`,
+  `PermissionChanged` or `ActionUnavailable` surface on the screen that owns
+  the action, scoped to the session generation so an old refusal can never
+  mask a newer session. Navigating away before the pump runs is an intentional
+  cancellation and stays silent. The Engine adapters remain authoritative.
+- **Draft lifecycle.** The join endpoint follows the session context (the
+  connected endpoint or the most recent saved one) only while the player has
+  not edited it; an edited draft survives navigation and session changes.
+  Operation-specific errors clear when their screen family is left.
+- **Clipboard copy reports success or failure**, roster rows rebuild only when
+  the monitor sample or verified roles change, and the multiplayer state in
+  `GameUiSample` stays grouped for a future `MultiplayerScreenController`
+  extraction.
+
+The `--menu` proof covers: profile creation and selection, host start with
+auto-join, invalid endpoint and wrong-seed rejections, favorites, live roster
+and independent ping, grant admin with confirmation, an obsolete-epoch
+refusal, delegated control refused across the credential boundary, an
+end-to-end kick (the guest observes the disconnect and the refused rejoin),
+ban and unban of the offline target, allowlist enable, membership and
+disable, a cancelled stop with no side effect, stale epoch, stale launch and
+vanished-target confirmations refused through the real execution pipeline,
+single-execution audit evidence, stop-and-save with checkpoint, and the
+occupied-port bind failure. CPU-side, `test_multiplayer_intents` pins the
+eligibility and outcome rules for every operation without a GPU.

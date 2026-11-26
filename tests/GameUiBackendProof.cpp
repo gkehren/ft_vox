@@ -592,12 +592,23 @@ struct GameUiBackendProbe
 			const auto other = std::ranges::find(rows, liveGuest->id, &localcontrol::Player::id);
 			checked(other != rows.end(), "host sees registered guest");
 			const auto guest = other->id;
+			// Correction F01: before an explicit selection no destructive
+			// action exists at all, and the selection is a stable identity.
+			{
+				const auto widgets = sample.m_widgets.widgets();
+				CHECK(std::ranges::none_of(widgets, [](const gameui::Widget &widget) {
+					return widget.label == "Kick for 60 seconds...";
+				}), "no destructive action exists before an explicit target");
+			}
 			press("Registered players", static_cast<int>(other - rows.begin()));
+			CHECK(sample.m_mpAdminTarget == guest, "the row press selects the target identity");
+			const auto targetRow = std::ranges::find(sample.m_multiplayer.administration->players,
+				sample.m_mpAdminTarget, &localcontrol::Player::id);
+			checked(targetRow != sample.m_multiplayer.administration->players.end(),
+				"the selected identity resolves to a live row");
 			auto kick = gameui::AdministrationIntent{sample.m_multiplayer.launch,
 				sample.m_multiplayer.administration->world, sample.m_multiplayer.administration->epoch,
-				localcontrol::Role::Owner, localcontrol::Operation::Kick,
-				sample.m_multiplayer.administration->players[static_cast<size_t>(sample.m_mpList.selection.selected)],
-				false, {}};
+				localcontrol::Role::Owner, localcontrol::Operation::Kick, *targetRow, false, {}};
 			CHECK(!gameui::eligibleAdministration(kick, sample.m_multiplayer.launch,
 				*sample.m_multiplayer.administration, nullptr), "stale monitoring prevents online moderation");
 			press("Grant admin role...");
@@ -616,7 +627,132 @@ struct GameUiBackendProbe
 				});
 			}, "native confirm did not grant the role only");
 			publish("role-granted", "yes");
+			// Correction F01: the grant refreshed the roster rows while the
+			// target row content changed; the identity selection survived.
+			CHECK(sample.m_mpAdminTarget == guest, "a roster refresh preserves the selected identity");
 			until([&] { return fs::exists(evidence / "guest-reconnected"); }, "guest did not reconnect");
+			// Delegated control honors the credential boundary: a profile the
+			// target does not own is refused by the server (correction F04).
+			press("Authorize local control...");
+			CHECK(sample.m_multiplayerConfirm->administration->profile == "owner-native",
+				"the delegation confirm carries the selected local profile");
+			press("Confirm");
+			until([&] {
+				return sample.m_multiplayer.adminResult == localcontrol::Result::InvalidCredential;
+			}, "delegating a profile that is not the target's own credential is refused");
+			// Kick end-to-end (corrections F02/F04): destructive moderation of
+			// a live target through the confirmation pipeline.
+			press("Kick for 60 seconds...");
+			CHECK(sample.m_multiplayerConfirm->administration->operation == localcontrol::Operation::Kick &&
+				sample.m_multiplayerConfirm->administration->subject &&
+				sample.m_multiplayerConfirm->administration->subject->id == guest,
+				"the kick confirmation captures the operation and identity");
+			shot("owner-kick-confirmation.png");
+			press("Confirm");
+			until([&] { return fs::exists(evidence / "guest-kicked"); }, "the kicked guest did not observe it");
+			until([&] { return fs::exists(evidence / "guest-kick-refused"); },
+				"the kicked profile was not refused reconnection");
+			// Ban and unban the now-offline target (correction F04).
+			press("Ban...");
+			press("Confirm");
+			until([&] {
+				const auto &admin = sample.m_multiplayer.administration;
+				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
+					return row.id == guest && row.banned;
+				});
+			}, "native confirm did not ban the player");
+			press("Unban...");
+			press("Confirm");
+			until([&] {
+				const auto &admin = sample.m_multiplayer.administration;
+				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
+					return row.id == guest && !row.banned;
+				});
+			}, "native confirm did not unban the player");
+			// Allowlist enable, membership and disable (correction F04).
+			press("Enable allowlist...");
+			press("Confirm");
+			until([&] {
+				return sample.m_multiplayer.administration && sample.m_multiplayer.administration->allowlist;
+			}, "native confirm did not enable the allowlist");
+			press("Add to allowlist...");
+			press("Confirm");
+			until([&] {
+				const auto &admin = sample.m_multiplayer.administration;
+				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
+					return row.id == guest && row.allowed;
+				});
+			}, "native confirm did not add the allowlist member");
+			press("Disable allowlist...");
+			press("Confirm");
+			until([&] {
+				return sample.m_multiplayer.administration && !sample.m_multiplayer.administration->allowlist;
+			}, "native confirm did not disable the allowlist");
+			// A cancelled confirmation has no side effect (correction F04).
+			press("Stop and save server...");
+			CHECK(sample.screens().top() == Screen::MultiplayerConfirm, "stop opens the confirmation");
+			press("Cancel");
+			CHECK(sample.m_multiplayer.hostState == hosting::State::Ready && !sample.m_multiplayerConfirm,
+				"a cancelled confirmation does not stop the server");
+			// Stale confirmations are refused through the real execution
+			// pipeline with typed feedback (corrections F03/F04): the requests
+			// below are enqueued directly so the pump evaluates them exactly
+			// as a late or duplicated submission would arrive.
+			press("Enable allowlist...");
+			auto staleEpoch = *sample.m_multiplayerConfirm;
+			++staleEpoch.administration->epoch;
+			sample.m_multiplayerRequest = std::move(staleEpoch);
+			frame();
+			CHECK(sample.m_multiplayer.notice &&
+				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::PermissionChanged,
+				"an obsolete permission epoch is refused with typed feedback");
+			CHECK(!engine.m_hostSnapshot.adminPending, "the refused confirmation never reached the server");
+			auto staleLaunch = *sample.m_multiplayerConfirm;
+			staleLaunch.launch += 12345;
+			sample.m_multiplayerRequest = std::move(staleLaunch);
+			frame();
+			CHECK(sample.m_multiplayer.notice &&
+				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::ServerChanged,
+				"a confirmation from a previous server launch is refused");
+			auto staleTarget = *sample.m_multiplayerConfirm;
+			staleTarget.administration->subject = localcontrol::Player{sim::PlayerId{99},
+				localcontrol::Role::Player, false, false, false, 0};
+			sample.m_multiplayerRequest = std::move(staleTarget);
+			frame();
+			CHECK(sample.m_multiplayer.notice &&
+				sample.m_multiplayer.notice->outcome == gameui::MultiplayerOutcome::PermissionChanged,
+				"a confirmation whose target vanished is refused");
+			press("Cancel");
+			// The reviewed action finally applies, proving the refusals above
+			// did not consume or corrupt the real intent.
+			press("Enable allowlist...");
+			press("Confirm");
+			until([&] {
+				return sample.m_multiplayer.administration && sample.m_multiplayer.administration->allowlist;
+			}, "the reviewed enable allowlist was applied");
+			press("Disable allowlist...");
+			press("Confirm");
+			until([&] {
+				return sample.m_multiplayer.administration && !sample.m_multiplayer.administration->allowlist;
+			}, "the allowlist was disabled again");
+			// Revoke the granted role on the offline target (correction F04):
+			// the demotion is the final committed role change.
+			press("Revoke admin...");
+			press("Confirm");
+			until([&] {
+				const auto &admin = sample.m_multiplayer.administration;
+				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
+					return row.id == guest && row.role == localcontrol::Role::Player;
+				});
+			}, "native confirm did not revoke the role");
+			// The audit history proves single execution end-to-end (F04).
+			press("Recent audit history");
+			CHECK(std::ranges::count_if(sample.m_multiplayer.administration->audit,
+				[&](const localcontrol::Audit &row) {
+					return row.operation == localcontrol::Operation::Kick && row.target == guest;
+				}) == 1, "exactly one committed kick reached the audit history");
+			tap(SDLK_ESCAPE);
+			frame();
 			tap(SDLK_ESCAPE);
 			frame();
 			press("Stop and save server...");
@@ -642,6 +778,22 @@ struct GameUiBackendProbe
 			until([&] { return sample.m_multiplayer.playable; }, "native reconnect did not finish");
 			CHECK(sample.m_multiplayer.self == self, "reconnect restored the original player identity");
 			publish("guest-reconnected", "yes");
+			// The kick is destructive moderation observed end-to-end
+			// (correction F02): the server actively closes the session and the
+			// persistent identity is then refused reconnection.
+			until([&] {
+				return sample.m_multiplayer.connection &&
+					sample.m_multiplayer.connection->state == ui::MultiplayerState::Disconnected;
+			}, "the kicked guest did not observe the disconnect");
+			publish("guest-kicked", "yes");
+			press("Reconnect");
+			until([&] {
+				return sample.m_multiplayer.connection &&
+					sample.m_multiplayer.connection->state == ui::MultiplayerState::Rejected &&
+					sample.m_multiplayer.connection->detail &&
+					std::string_view(sample.m_multiplayer.connection->detail) == "Server refused the connection";
+			}, "the kicked profile was not refused reconnection");
+			publish("guest-kick-refused", "yes");
 		}
 		CHECK(!engine.developerWorkspaceVisible(), "all actions use the native workspace");
 		CHECK(device.validationErrorCount() - device.rtssValidationErrorCount() == errors,

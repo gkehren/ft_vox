@@ -1566,6 +1566,16 @@ add_executable(test_multiplayer_join test_multiplayer_join.cpp
 target_link_libraries(test_multiplayer_join PRIVATE ft_vox_udp ft_vox_core)
 add_test(NAME MultiplayerJoin COMMAND test_multiplayer_join)
 
+# CPU-only native multiplayer intent validation (issue #306, corrections
+# F02/F03/F04): the pure PlayerMultiplayer translation unit — the
+# administration re-validation contract and the typed request outcome — with
+# no SDL, Vulkan, ImGui or Engine host.
+add_executable(test_multiplayer_intents test_multiplayer_intents.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerMultiplayer.cpp)
+target_include_directories(test_multiplayer_intents PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_multiplayer_intents PRIVATE ft_vox_local_control ft_vox_udp ft_vox_core)
+add_test(NAME MultiplayerIntents COMMAND test_multiplayer_intents)
+
 add_executable(test_server_supervisor test_server_supervisor.cpp ${CMAKE_SOURCE_DIR}/src/Server/MonitorWriter.cpp)
 target_link_libraries(test_server_supervisor PRIVATE ft_vox_hosting ft_vox_udp ft_vox_core)
 add_dependencies(test_server_supervisor ft_vox_server)
@@ -1622,7 +1632,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
-    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_server_supervisor test_server_roles
+    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_multiplayer_intents test_server_supervisor test_server_roles
     test_game_ui_draw_list test_game_ui_interaction test_game_ui_components bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

@@ -39,96 +39,103 @@ std::string playerHostMessage(const hosting::Snapshot &host)
 }
 }
 
-bool gameui::eligibleAdministration(const AdministrationIntent &intent, uint64_t launch,
-	const localcontrol::Reply &state, const monitoring::Status *monitor)
-{
-	using enum localcontrol::Operation;
-	if (launch != intent.launch || state.world != intent.world || state.epoch != intent.epoch ||
-		state.role != intent.role || !localcontrol::permitted(state.role, intent.operation) ||
-		(localcontrol::targeted(intent.operation) != intent.subject.has_value()) ||
-		(!intent.profile.empty() && intent.operation != GrantAdmin))
-		return false;
-	if (intent.operation == EnableAllowlist || intent.operation == DisableAllowlist)
-		return state.allowlist == intent.allowlist &&
-			state.allowlist == (intent.operation == DisableAllowlist);
-	if (!intent.subject)
-		return true;
-	const auto &expected = *intent.subject;
-	const auto row = std::ranges::lower_bound(state.players, expected.id.value, {}, [](const auto &p) { return p.id.value; });
-	if (row == state.players.end() || row->id != expected.id || row->role != expected.role ||
-		row->banned != expected.banned || row->allowed != expected.allowed ||
-		row->localAdmin != expected.localAdmin || row->kickedUntil != expected.kickedUntil ||
-		!localcontrol::permitted(state.role, intent.operation, row->role))
-		return false;
-	return intent.operation != Kick || (monitor && std::ranges::any_of(monitor->transport.roster(), [&](const auto &p) {
-		return p.id == row->id && p.state == monitoring::SessionState::Connected;
-	}));
-}
-
 void Engine::pumpPlayerMultiplayer()
 {
 	if (!m_playerUi)
 		return;
 	auto intent = m_playerUi->takeMultiplayerRequest();
-	if (!gameui::multiplayerScreen(m_playerUi->screens().top()))
-		return;
+	// Intentional navigation cancellation (correction F03): the player left
+	// the multiplayer screens before the pump ran. The request is consumed
+	// without feedback — leaving a screen is never an error.
+	if (intent && !gameui::multiplayerScreen(m_playerUi->screens().top()))
+		intent.reset();
+	// Feedback is scoped to its session generation (correction F03): a
+	// refusal from an old epoch can never mask a newer session.
+	if (m_multiplayerNotice && m_multiplayerNotice->sessionEpoch != m_playerMultiplayerEpoch)
+		m_multiplayerNotice.reset();
 
 	GameUIFrame frame{};
 	populateJoinUi(frame);
 	if (m_remote)
 		populateRemoteUi(frame);
-	if (intent && intent->sessionEpoch == m_playerMultiplayerEpoch &&
-		!frame.switchingSession && !m_joinRequest && frame.joinPreferences)
+	if (intent)
 	{
-		using enum gameui::MultiplayerAction;
+		// A newly evaluated request supersedes the previous feedback (F08).
+		m_multiplayerNotice.reset();
 		const auto host = m_hostServer.snapshot();
-		const auto sameLaunch = intent->launch == host.launch;
-		switch (intent->action)
-		{
-		case Connect:
-			if (!gameui::joinTransitionInProgress(frame.multiplayerStatus))
-				frame.connectServer(std::move(intent->join));
-			break;
-		case Reconnect: if (frame.joinServer) frame.joinServer(); break;
-		case Disconnect: if (frame.leaveServer) frame.leaveServer(); break;
-		case ReturnToSolo: if (frame.returnToSolo) frame.returnToSolo(); break;
-		case SelectProfile: frame.selectJoinProfile(intent->profile); break;
-		case CreateProfile: frame.createJoinProfile(intent->profile); break;
-		case Favorite: frame.toggleFavorite(intent->join.endpoint); break;
-		case StartHost:
-			if (sameLaunch && !host.active())
+		gameui::MultiplayerContext context;
+		context.sessionEpoch = m_playerMultiplayerEpoch;
+		context.switchingSession = frame.switchingSession;
+		context.joinPending = m_joinRequest.has_value();
+		context.joinPreferencesLoaded = frame.joinPreferences != nullptr;
+		context.joinTransitionInProgress = gameui::joinTransitionInProgress(frame.multiplayerStatus);
+		auto outcome = gameui::evaluateMultiplayerRequest(*intent, context, host);
+		// The Engine adapters stay authoritative: a missing adapter means the
+		// action cannot run in this state at all (correction F03).
+		const auto hasAdapter = [this, &frame](gameui::MultiplayerAction action) {
+			switch (action)
 			{
+			case gameui::MultiplayerAction::Connect: return bool(frame.connectServer);
+			case gameui::MultiplayerAction::Reconnect: return bool(frame.joinServer);
+			case gameui::MultiplayerAction::Disconnect: return bool(frame.leaveServer);
+			case gameui::MultiplayerAction::ReturnToSolo: return bool(frame.returnToSolo);
+			case gameui::MultiplayerAction::SelectProfile: return bool(frame.selectJoinProfile);
+			case gameui::MultiplayerAction::CreateProfile: return bool(frame.createJoinProfile);
+			case gameui::MultiplayerAction::Favorite: return bool(frame.toggleFavorite);
+			case gameui::MultiplayerAction::StartHost: return bool(frame.startHostedServer);
+			case gameui::MultiplayerAction::JoinHost: return bool(frame.joinHostedServer);
+			case gameui::MultiplayerAction::StopHost: return bool(frame.stopHostedServer);
+			case gameui::MultiplayerAction::ForceStop: return bool(frame.forceStopHostedServer);
+			case gameui::MultiplayerAction::Administer: return bool(frame.administerHostedServer);
+			}
+			return false;
+		};
+		if (outcome == gameui::MultiplayerOutcome::Submitted && !hasAdapter(intent->action))
+			outcome = gameui::MultiplayerOutcome::ActionUnavailable;
+		// An administration intent captured at confirmation time is re-checked
+		// against the live verified reply before dispatch (corrections
+		// F02/F03): a roster change, a role loss or a permission epoch bump
+		// fails the action instead of acting on stale state.
+		if (outcome == gameui::MultiplayerOutcome::Submitted && intent->action == gameui::MultiplayerAction::Administer &&
+			(!intent->administration || !host.administration ||
+				!gameui::eligibleAdministration(*intent->administration, host.launch,
+					*host.administration, freshMonitor(host))))
+			outcome = gameui::MultiplayerOutcome::PermissionChanged;
+		if (outcome == gameui::MultiplayerOutcome::Submitted)
+		{
+			using enum gameui::MultiplayerAction;
+			switch (intent->action)
+			{
+			case Connect: frame.connectServer(std::move(intent->join)); break;
+			case Reconnect: frame.joinServer(); break;
+			case Disconnect: frame.leaveServer(); break;
+			case ReturnToSolo: frame.returnToSolo(); break;
+			case SelectProfile: frame.selectJoinProfile(intent->profile); break;
+			case CreateProfile: frame.createJoinProfile(intent->profile); break;
+			case Favorite: frame.toggleFavorite(intent->join.endpoint); break;
+			case StartHost:
+				// A hosting validation failure keeps its precise option-level
+				// message on m_hostError (the Host screen shows it); the typed
+				// notice is reserved for refused intents.
 				m_hostError = hosting::validate(intent->options);
 				if (m_hostError.empty())
 					frame.startHostedServer(std::move(intent->options), intent->autoJoin, intent->profile);
-			}
-			break;
-		case JoinHost:
-			if (sameLaunch && host.state == hosting::State::Ready &&
-				!gameui::joinTransitionInProgress(frame.multiplayerStatus))
-				frame.joinHostedServer(intent->profile);
-			break;
-		case StopHost:
-			if (sameLaunch && (host.state == hosting::State::Starting || host.state == hosting::State::Ready))
-				frame.stopHostedServer();
-			break;
-		case ForceStop:
-			if (sameLaunch && host.state == hosting::State::Stopping && host.delayed)
-				frame.forceStopHostedServer();
-			break;
-		case Administer:
-			if (!intent->administration || host.state != hosting::State::Ready || host.adminPending ||
-				host.adminChannelFailed || !host.administration || !gameui::eligibleAdministration(
-					*intent->administration, host.launch, *host.administration, freshMonitor(host)))
-				m_hostError = "Permissions, player state or server changed. Refresh and review the action again.";
-			else
+				break;
+			case JoinHost: frame.joinHostedServer(intent->profile); break;
+			case StopHost: frame.stopHostedServer(); break;
+			case ForceStop: frame.forceStopHostedServer(); break;
+			case Administer:
 			{
-				const auto &request = *intent->administration;
-				m_hostError = frame.administerHostedServer(request.launch, request.operation,
-					request.subject ? request.subject->id : sim::PlayerId{}, request.profile);
+				const auto &action = *intent->administration;
+				m_hostError = frame.administerHostedServer(action.launch, action.operation,
+					action.subject ? action.subject->id : sim::PlayerId{}, action.profile);
+				break;
 			}
-			break;
+			}
 		}
+		else
+			m_multiplayerNotice = gameui::MultiplayerFeedback{outcome, intent->action,
+				intent->launch, m_playerMultiplayerEpoch};
 	}
 
 	gameui::MultiplayerView view;
@@ -166,6 +173,7 @@ void Engine::pumpPlayerMultiplayer()
 		view.monitor = latest.status;
 	if (latest.state == hosting::State::Ready && !latest.adminChannelFailed)
 		view.administration = latest.administration;
+	view.notice = m_multiplayerNotice;
 
 	if (m_remote && m_remote->scope && m_remote->players.fresh(RemoteSession::Clock::now()))
 	{

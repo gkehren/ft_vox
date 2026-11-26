@@ -99,6 +99,52 @@ bool readInt(const TextField &field, int &value)
 constexpr std::array<std::string_view, 4> workerLabels{"Synchronous", "2 workers", "4 workers", "8 workers"};
 constexpr std::array<int, 4> workerCounts{0, 2, 4, 8};
 constexpr std::array<std::string_view, 3> presets{"Low", "Balanced", "High"};
+
+// --- Typed request feedback (corrections F03/F08) --------------------------
+
+std::string_view feedbackMessage(MultiplayerOutcome outcome)
+{
+	switch (outcome)
+	{
+	case MultiplayerOutcome::StaleSession:
+		return "The session changed before the action ran. Review and try again.";
+	case MultiplayerOutcome::ServerChanged:
+		return "The hosted server changed. Review the action against the current server.";
+	case MultiplayerOutcome::Busy:
+		return "Another session action is still finishing. Try again in a moment.";
+	case MultiplayerOutcome::InvalidState:
+		return "The server is not in a state where that action applies right now.";
+	case MultiplayerOutcome::PermissionChanged:
+		return "Permissions, player state or the server changed. Refresh and review the action again.";
+	case MultiplayerOutcome::ActionUnavailable:
+		return "That action is not available right now.";
+	case MultiplayerOutcome::Submitted: case MultiplayerOutcome::Cancelled: break;
+	}
+	return {};
+}
+
+enum class FeedbackGroup { Join, Host, Admin, Profiles };
+
+/// Refusal message for the notice belonging to this screen's actions, empty
+/// when the notice targets another screen or was not a refusal (F03/F08).
+std::string_view noticeText(const MultiplayerView &view, FeedbackGroup group)
+{
+	if (!view.notice || view.notice->outcome == MultiplayerOutcome::Cancelled ||
+		view.notice->outcome == MultiplayerOutcome::Submitted)
+		return {};
+	const auto action = view.notice->action;
+	const bool match = group == FeedbackGroup::Join
+		? (action == MultiplayerAction::Connect || action == MultiplayerAction::Reconnect ||
+			action == MultiplayerAction::Disconnect || action == MultiplayerAction::ReturnToSolo ||
+			action == MultiplayerAction::Favorite)
+		: group == FeedbackGroup::Host
+			? (action == MultiplayerAction::StartHost || action == MultiplayerAction::JoinHost ||
+				action == MultiplayerAction::StopHost || action == MultiplayerAction::ForceStop)
+			: group == FeedbackGroup::Admin
+				? action == MultiplayerAction::Administer
+				: (action == MultiplayerAction::SelectProfile || action == MultiplayerAction::CreateProfile);
+	return match ? feedbackMessage(view.notice->outcome) : std::string_view{};
+}
 }
 
 void GameUiSample::setMultiplayerView(MultiplayerView view)
@@ -107,14 +153,23 @@ void GameUiSample::setMultiplayerView(MultiplayerView view)
 	{
 		cancelPointerPress();
 		m_mpError.clear();
+		m_mpErrorOnHost = false;
 	}
+	// Draft lifecycle (correction F06): while the player has not edited the
+	// join endpoint, a session context change re-syncs the field to the
+	// connected endpoint (or the most recent saved one); an edited draft
+	// survives navigation and session changes untouched.
+	const std::string endpointAuto = !view.endpoint.empty() ? view.endpoint :
+		(view.preferences.recent.empty() ? "127.0.0.1:7777" : client::formatEndpoint(view.preferences.recent.front()));
+	const std::string previousAuto = std::move(m_joinEndpointAuto);
+	m_joinEndpointAuto = endpointAuto;
+	if (m_joinEndpoint.value() == previousAuto)
+		setText(m_joinEndpoint, endpointAuto);
 	m_multiplayer = std::move(view);
 	if (m_mpInitialized)
 		return;
 	m_mpInitialized = true;
-	const auto &prefs = m_multiplayer.preferences;
-	setText(m_joinEndpoint, !m_multiplayer.endpoint.empty() ? m_multiplayer.endpoint :
-		(prefs.recent.empty() ? "127.0.0.1:7777" : client::formatEndpoint(prefs.recent.front())));
+	setText(m_joinEndpoint, endpointAuto);
 	setText(m_hostPort, "7777");
 	setText(m_hostSlots, std::to_string(hosting::Options{}.playerSlots));
 	setText(m_hostRadius, std::to_string(hosting::Options{}.interestRadius));
@@ -161,10 +216,10 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		for (const auto address : addresses)
 			rows.push_back(client::formatEndpoint(address));
 	};
-	const auto detail = [&](std::string message, float height = 64.f) {
+	const auto detail = [&](std::string_view message, float height = 64.f) {
 		if (!message.empty())
 		{
-			m_mpDetail = std::move(message);
+			m_mpDetail.assign(message);
 			m_mpMessage = slot(height);
 		}
 	};
@@ -193,6 +248,14 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		m_mpThirdList.selection = {};
 		m_mpListRevision = m_screens.revision();
 	}
+	// Operation-specific errors never outlive their screen family (correction
+	// F06): the Start validation message is dropped once the player leaves the
+	// host screens entirely.
+	if (m_mpErrorOnHost && screen != Screen::HostServer && screen != Screen::HostOptions)
+	{
+		m_mpError.clear();
+		m_mpErrorOnHost = false;
+	}
 	switch (screen)
 	{
 	case Screen::Multiplayer:
@@ -207,11 +270,24 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		button(DiagnosticsPage, "Connection details");
 		break;
 	case Screen::JoinServer:
+	{
 		text("Join server", 32.f);
 		connection();
-		detail(!view.joinError.empty() ? view.joinError :
-			(view.pending ? "Finishing the previous session..." :
-				(view.connection && view.connection->detail ? view.connection->detail : view.preferencesError)), 50.f);
+		// Ordered feedback (corrections F03/F08): a typed refusal first, then
+		// the join error, the clipboard result, the transition status and the
+		// preferences error — the newest relevant message wins.
+		std::string message{noticeText(view, FeedbackGroup::Join)};
+		if (message.empty() && !view.joinError.empty())
+			message = view.joinError;
+		if (message.empty() && !m_mpClipboard.empty())
+			message = m_mpClipboard;
+		if (message.empty() && view.pending)
+			message = "Finishing the previous session...";
+		if (message.empty() && view.connection && view.connection->detail)
+			message = view.connection->detail;
+		if (message.empty())
+			message = view.preferencesError;
+		detail(message, 50.f);
 		button(Play, "Play", view.playable && available);
 		if (view.disconnect)
 			button(Disconnect, view.playable ? "Disconnect" : "Cancel connection", available);
@@ -241,6 +317,7 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 			button(UseRecent, "Use recent endpoint");
 		}
 		break;
+	}
 	case Screen::MultiplayerProfiles:
 		text("Local profiles", 32.f);
 		text(view.preferences.selectedProfile.empty() ? "No profile selected" :
@@ -251,11 +328,13 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		button(SelectProfile, "Use selected profile", available && !view.profiles.empty());
 		field(ProfileName, "New profile name", m_profileName);
 		button(CreateProfile, "Create profile", available && !m_profileName.value().empty());
-		detail(!view.joinError.empty() ? view.joinError : view.preferencesError);
+		detail(!noticeText(view, FeedbackGroup::Profiles).empty() ? std::string(noticeText(view, FeedbackGroup::Profiles)) :
+			(!view.joinError.empty() ? view.joinError : view.preferencesError));
 		break;
 	case Screen::HostServer:
 		text("Host server", 32.f);
-		detail(!m_mpError.empty() ? m_mpError : (!view.hostError.empty() ? view.hostError : view.hostMessage), 56.f);
+		detail(!noticeText(view, FeedbackGroup::Host).empty() ? std::string(noticeText(view, FeedbackGroup::Host)) :
+			(!m_mpError.empty() ? m_mpError : (!view.hostError.empty() ? view.hostError : view.hostMessage)), 56.f);
 		if (active(view.hostState))
 		{
 			text(view.hostWorld);
@@ -315,41 +394,47 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 	case Screen::MultiplayerRoster:
 		text("Players", 32.f);
 		text(pingText(view.network));
-		m_mpRows.clear();
-		m_mpSecondRows.clear();
+		// The roster rows rebuild only when the supervisor published a new
+		// monitor sample or the verified roles changed (correction F07); the
+		// headers and nearby players stay live.
+		if (view.monitor != m_mpMonitorDisplayed || view.administration != m_mpRosterAdminDisplayed)
+		{
+			m_mpMonitorDisplayed = view.monitor;
+			m_mpRosterAdminDisplayed = view.administration;
+			m_mpRosterRows.clear();
+			if (view.monitor)
+				for (const auto &row : view.monitor->transport.roster())
+				{
+					auto label = playerLabel(row.id) + "  |  " + presence(row.state);
+					if (admin)
+					{
+						const auto role = std::ranges::lower_bound(admin->players, row.id.value, {},
+							[](const auto &p) { return p.id.value; });
+						if (role != admin->players.end() && role->id == row.id)
+							label += "  |  " + std::string(localcontrol::label(role->role));
+					}
+					m_mpRosterRows.push_back(std::move(label));
+				}
+			refs(m_mpRosterLabels, m_mpRosterRows);
+		}
 		if (view.monitor)
 		{
 			text("Hosted sessions  |  " + std::to_string(view.monitor->transport.count) + " / " +
 				std::to_string(view.monitor->transport.capacity));
 			text("Offline registered profiles  |  " + std::to_string(view.monitor->offlineProfiles));
-			for (const auto &row : view.monitor->transport.roster())
-			{
-				auto label = playerLabel(row.id) + "  |  " + presence(row.state);
-				if (admin)
-				{
-					const auto role = std::ranges::lower_bound(admin->players, row.id.value, {},
-						[](const auto &p) { return p.id.value; });
-					if (role != admin->players.end() && role->id == row.id)
-						label += "  |  " + std::string(localcontrol::label(role->role));
-				}
-				m_mpRows.push_back(std::move(label));
-			}
+			if (m_mpRosterRows.empty())
+				text("No admitted sessions");
+			else
+				list(AdminPlayers, "Live hosted roster", m_mpList, m_mpRosterLabels, 4);
 		}
 		else if (view.hostState == hosting::State::Ready)
 			text("Waiting for a fresh hosted roster");
 		else
 			text("Full roster and roles are available on the local host.");
+		m_mpSecondRows.clear();
 		for (const auto id : view.nearby)
 			m_mpSecondRows.push_back(playerLabel(id) + (id == view.self ? "  |  You" : ""));
-		refs(m_mpLabels, m_mpRows);
 		refs(m_mpSecondLabels, m_mpSecondRows);
-		if (view.monitor)
-		{
-			if (m_mpRows.empty())
-				text("No admitted sessions");
-			else
-				list(AdminPlayers, "Live hosted roster", m_mpList, m_mpLabels, 4);
-		}
 		if (m_mpSecondRows.empty())
 			text("Nearby player snapshots unavailable");
 		else
@@ -392,11 +477,11 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		const bool canAct = available && !view.adminPending;
 		button(Refresh, "Refresh players and audit", canAct);
 		button(AuditPage, "Recent audit history");
-		const auto oldIndex = static_cast<size_t>(selection(m_mpList));
-		const auto oldSubject = m_mpAdminDisplayed && oldIndex < m_mpAdminDisplayed->players.size() ?
-			m_mpAdminDisplayed->players[oldIndex].id : sim::PlayerId{};
 		if (m_mpAdminDisplayed != view.administration)
 		{
+			// A roster refresh never retargets an action (correction F01):
+			// the rows rebuild, an armed press against the old rows is
+			// cancelled, and the explicit target identity is re-resolved below.
 			cancelPointerPress();
 			m_mpAdminDisplayed = view.administration;
 			m_mpAdminRows.clear();
@@ -404,16 +489,31 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 				m_mpAdminRows.push_back(playerLabel(row.id) + "  |  " + std::string(localcontrol::label(row.role)) +
 					(row.banned ? "  |  Banned" : "") + (row.localAdmin ? "  |  Local control" : ""));
 			refs(m_mpAdminLabels, m_mpAdminRows);
-			const auto found = std::ranges::find(admin->players, oldSubject, &localcontrol::Player::id);
-			m_mpList.selection = {};
-			if (found != admin->players.end())
-				m_mpList.selection.selected = static_cast<int>(found - admin->players.begin());
 		}
-		list(AdminPlayers, "Registered players", m_mpList, m_mpAdminLabels, 4);
-		const auto index = static_cast<size_t>(selection(m_mpList));
-		if (index < admin->players.size())
+		// The target is a stable identity, never a row index (correction F01):
+		// reorderings keep it and a disappearing target clears the selection —
+		// the list then renders the explicit unselected state and every
+		// targeted action stays disabled until a player is chosen.
+		const auto target = std::ranges::find(admin->players, m_mpAdminTarget, &localcontrol::Player::id);
+		if (target == admin->players.end())
 		{
-			const auto &row = admin->players[index];
+			if (m_mpAdminTarget.valid())
+				cancelPointerPress();
+			m_mpAdminTarget = {};
+			m_mpList.selection.clear();
+		}
+		else
+			m_mpList.selection.select(static_cast<int>(target - admin->players.begin()),
+				static_cast<int>(m_mpAdminLabels.size()), 4);
+		// The admin list owns its selection state: the shared list() helper
+		// clamps to a valid row, which would implicitly select a player.
+		m_mpList.visibleRows = 4;
+		m_mpList.items = m_mpAdminLabels;
+		m_widgets.add({AdminPlayers, slot(22.f + 23.f * 4.f), "Registered players", {}, &m_mpList,
+			!m_mpAdminLabels.empty()});
+		if (target != admin->players.end())
+		{
+			const auto &row = *target;
 			const bool online = view.monitor && std::ranges::any_of(view.monitor->transport.roster(), [&](const auto &p) {
 				return p.id == row.id && p.state == monitoring::SessionState::Connected;
 			});
@@ -430,12 +530,15 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 				button(Delegate, "Authorize local control...", canAct && !view.profiles.empty());
 			}
 		}
+		else if (!m_mpAdminLabels.empty())
+			text("Select a player to moderate.");
 		if (admin->role == localcontrol::Role::Owner)
 		{
 			button(Allowlist, admin->allowlist ? "Disable allowlist..." : "Enable allowlist...", canAct);
 			button(AdminStop, "Stop and save server...", canAct);
 		}
-		detail(!m_mpError.empty() ? m_mpError : view.hostError);
+		detail(!noticeText(view, FeedbackGroup::Admin).empty() ? std::string(noticeText(view, FeedbackGroup::Admin)) :
+			(!m_mpError.empty() ? m_mpError : view.hostError));
 		break;
 	}
 	case Screen::MultiplayerAudit:
@@ -464,6 +567,12 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 					text(playerLabel(action.subject->id) + "  |  " + std::string(localcontrol::label(action.subject->role)));
 				if (!action.profile.empty())
 					text("Authorize profile " + action.profile);
+				if (action.operation == Operation::Kick)
+					// A kick targets the persistent identity (correction F02):
+					// the server stores a 60-second kickedUntil lockout on the
+					// persistent access record, so the wording describes the
+					// reconnection refusal, not just the disconnect.
+					text("Disconnects the player and refuses reconnection for 60 seconds.");
 				eligible &= admin && !view.adminPending && eligibleAdministration(action, view.launch, *admin, view.monitor.get());
 			}
 			else if (intent.action == MultiplayerAction::ForceStop)
@@ -491,12 +600,28 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 
 void GameUiSample::changeMultiplayerControl(ControlId id)
 {
-	if (m_screens.top() != Screen::HostOptions)
+	if (m_screens.top() == Screen::HostOptions)
+	{
+		if (id == Workers)
+			m_mpWorkerChoice = selection(m_mpSecondList);
+		if (id == Streaming)
+			m_mpStreamingChoice = selection(m_mpThirdList);
 		return;
-	if (id == Workers)
-		m_mpWorkerChoice = selection(m_mpSecondList);
-	if (id == Streaming)
-		m_mpStreamingChoice = selection(m_mpThirdList);
+	}
+	// The administrative target follows the row selection as an identity
+	// (correction F01). A press armed against the previous target belongs to
+	// it: it is cancelled so a late release can never act on the new target.
+	if (id == AdminPlayers && m_screens.top() == Screen::MultiplayerAdmin && m_mpAdminDisplayed)
+	{
+		const auto index = static_cast<size_t>(selection(m_mpList));
+		const auto next = index < m_mpAdminDisplayed->players.size()
+			? m_mpAdminDisplayed->players[index].id : sim::PlayerId{};
+		if (next != m_mpAdminTarget)
+		{
+			m_mpAdminTarget = next;
+			cancelPointerPress();
+		}
+	}
 }
 
 bool GameUiSample::activateMultiplayerControl(ControlId id)
@@ -541,9 +666,14 @@ bool GameUiSample::activateMultiplayerControl(ControlId id)
 	case Reconnect: enqueue(base(A::Reconnect)); return true;
 	case Disconnect: enqueue(base(A::Disconnect)); return true;
 	case Solo: enqueue(base(A::ReturnToSolo)); return true;
-	case CopyEndpoint: SDL_SetClipboardText(view.endpoint.c_str()); return true;
-	case UseFavorite: setText(m_joinEndpoint, selected(m_mpList)); return true;
-	case UseRecent: setText(m_joinEndpoint, selected(m_mpSecondList)); return true;
+	case CopyEndpoint:
+		// The clipboard result is real feedback (correction F08): a failed
+		// copy must not look like a silent no-op.
+		m_mpClipboard = SDL_SetClipboardText(view.endpoint.c_str())
+			? "Endpoint copied to the clipboard." : "Could not copy the endpoint.";
+		return true;
+	case UseFavorite: m_mpClipboard.clear(); setText(m_joinEndpoint, selected(m_mpList)); return true;
+	case UseRecent: m_mpClipboard.clear(); setText(m_joinEndpoint, selected(m_mpSecondList)); return true;
 	case UseWorld: setText(m_hostWorld, selected(m_mpList)); return true;
 	case SelectProfile: chooseProfile(A::SelectProfile, std::string(selected(m_mpList))); return true;
 	case CreateProfile: chooseProfile(A::CreateProfile, m_profileName.value()); return true;
@@ -557,6 +687,7 @@ bool GameUiSample::activateMultiplayerControl(ControlId id)
 		return true;
 	case Connect: case Favorite:
 	{
+		m_mpClipboard.clear();
 		auto request = base(id == Connect ? A::Connect : A::Favorite);
 		request.join = {m_joinEndpoint.value(), view.preferences.selectedProfile, m_joinSeed.value()};
 		enqueue(std::move(request));
@@ -567,10 +698,12 @@ bool GameUiSample::activateMultiplayerControl(ControlId id)
 		auto request = base(A::StartHost);
 		auto &options = request.options;
 		m_mpError.clear();
+		m_mpErrorOnHost = false;
 		if (!readInt(m_hostPort, options.port) || !readInt(m_hostSlots, options.playerSlots) ||
 			!readInt(m_hostRadius, options.interestRadius))
 		{
 			m_mpError = "Use whole numbers for port, player slots and interest radius.";
+			m_mpErrorOnHost = true;
 			return true;
 		}
 		options.world = m_hostWorld.value();
@@ -598,7 +731,10 @@ bool GameUiSample::activateMultiplayerControl(ControlId id)
 	action.epoch = displayed.epoch;
 	action.role = displayed.role;
 	action.allowlist = displayed.allowlist;
-	const auto index = static_cast<size_t>(selection(m_mpList));
+	// Targeted actions address the EXPLICIT identity selection (correction
+	// F01): with no target chosen nothing is addressed and no request is
+	// built — the buttons are disabled; this is the defensive guard.
+	const auto target = std::ranges::find(displayed.players, m_mpAdminTarget, &localcontrol::Player::id);
 	if (id == Refresh)
 		action.operation = Op::List;
 	else if (id == Allowlist)
@@ -607,9 +743,9 @@ bool GameUiSample::activateMultiplayerControl(ControlId id)
 		action.operation = Op::Stop;
 	else
 	{
-		if (index >= displayed.players.size())
+		if (target == displayed.players.end())
 			return true;
-		action.subject = displayed.players[index];
+		action.subject = *target;
 		switch (id)
 		{
 		case Kick: action.operation = Op::Kick; break;
