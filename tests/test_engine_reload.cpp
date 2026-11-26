@@ -26,6 +26,7 @@
 int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
 int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
 int runUiSpikeSmoke(Engine &engine);
+int runMultiplayerMenuProof(Engine &engine, const std::filesystem::path &out, const std::filesystem::path &server);
 int runSessionMenuProof(Engine &engine, const std::filesystem::path &output);
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output);
 int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
@@ -78,6 +79,12 @@ int main(int argc, char **argv)
 	{
 		if (argc == 2 && std::string_view(argv[1]) == "--ui-spike-smoke")
 			return runUiSpikeSmoke(*engine);
+		if (argc == 5 && std::string_view(argv[1]) == "--multiplayer-menu-proof")
+		{
+			engine->setSavesRootForTests(argv[4]);
+			return runMultiplayerMenuProof(*engine, argv[3], std::string_view(argv[2]) == "guest" ?
+				std::filesystem::path{} : std::filesystem::path(argv[2]));
+		}
 		if (argc == 3 && std::string_view(argv[1]) == "--session-menu-proof")
 			return runSessionMenuProof(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-screenshot")

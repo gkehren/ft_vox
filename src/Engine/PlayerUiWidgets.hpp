@@ -213,6 +213,11 @@ public:
 	void setEnabled(ControlId id, bool enabled, ControlId &focus);
 	std::span<const Widget> widgets() const { return {m_items.data(), m_count}; }
 	const ScrollViewport &viewport() const { return m_viewport; }
+	void fitContent(float height)
+	{
+		m_viewport.contentHeight = height;
+		m_viewport.setOffset(m_viewport.offset);
+	}
 	Clip bounds(const Widget &widget) const { return m_viewport.place(widget.bounds); }
 	const Widget *find(ControlId id) const;
 	const Widget *at(glm::vec2 point) const;

@@ -194,6 +194,8 @@ private:
 	void queueHostedJoin(const hosting::Snapshot &server, const std::string &profile);
 	void requestExit();
 	void pumpPlayerSession();
+	void pumpPlayerMultiplayer();
+	uint64_t m_playerMultiplayerEpoch{};
 	void showMainMenu();
 	void queuePlayerSession(gameui::SessionRequest request);
 	bool acceptsPlayerSession(gameui::SessionAction action) const;

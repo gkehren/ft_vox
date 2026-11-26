@@ -2,6 +2,7 @@
 
 #include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerSessionUi.hpp>
+#include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiFonts.hpp>
@@ -12,6 +13,7 @@
 #include <SDL3/SDL.h>
 
 #include <chrono>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +46,8 @@ public:
 	std::optional<gameui::SessionRequest> takeSessionRequest();
 	bool holdingForSession() const;
 	void finishSessionScreen();
+	void setMultiplayerView(gameui::MultiplayerView view);
+	std::optional<gameui::MultiplayerRequest> takeMultiplayerRequest();
 	void invalidateLayout();
 	void back();
 	void openPause();
@@ -135,6 +139,26 @@ private:
 	InputResult applyGalleryActivate(gameui::ControlId id);
 
 	bool buildSessionScreen(gameui::Screen screen, gameui::StackLayout &column);
+	void buildMultiplayerScreen(gameui::Screen screen, gameui::StackLayout &column);
+	bool activateMultiplayerControl(gameui::ControlId id);
+	void changeMultiplayerControl(gameui::ControlId id);
+	gameui::MultiplayerView m_multiplayer;
+	std::optional<gameui::MultiplayerRequest> m_multiplayerRequest, m_multiplayerConfirm;
+	gameui::TextField m_joinEndpoint, m_joinSeed, m_profileName, m_hostWorld, m_hostPort, m_hostBind,
+		m_hostSlots, m_hostRadius;
+	gameui::Toggle m_hostLan, m_autoJoin{true};
+	gameui::ListBox m_mpList, m_mpSecondList, m_mpThirdList;
+	std::vector<std::string> m_mpRows, m_mpSecondRows;
+	std::vector<std::string_view> m_mpLabels, m_mpSecondLabels;
+	std::deque<std::string> m_mpText;
+	std::shared_ptr<const localcontrol::Reply> m_mpAdminDisplayed;
+	std::vector<std::string> m_mpAdminRows;
+	std::vector<std::string_view> m_mpAdminLabels;
+	int m_mpWorkerChoice{1}, m_mpStreamingChoice{1};
+	std::string m_mpError, m_mpDetail;
+	gameui::Clip m_mpMessage{};
+	uint64_t m_mpListRevision{UINT64_MAX};
+	bool m_mpInitialized{};
 	bool activateSessionControl(gameui::ControlId id);
 	gameui::WorldCatalog m_worldCatalog;
 	std::vector<std::string_view> m_worldNames;

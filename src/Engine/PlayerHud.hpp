@@ -58,18 +58,12 @@ struct HudSession
 	bool showHotbar{};
 	/// Gameplay is synchronized: aiming is permitted.
 	bool allowAim{};
-	/// The session ended. The host fills `recovery` with the instruction that
-	/// matches the current presentation state (`recoveryInstruction`), because
-	/// only it knows whether the developer menu is reachable.
+	/// The session ended. The host fills `recovery` with the native Join path.
 	bool blocked{};
 };
 
-/// Recovery instruction for a session that ended (issue #303 F03). It only names
-/// actions that exist: the developer menu bar owns `Multiplayer > Reconnect`,
-/// and reaching it needs the workspace visible and the mouse released. The
-/// wording follows the current state, so a player is never told to toggle
-/// something that is already in the right position.
-std::string_view recoveryInstruction(bool workspaceVisible, bool mouseCaptured);
+/// Native recovery is reachable from Pause in either workspace mode.
+std::string_view recoveryInstruction();
 
 /// Session presentation policy (issue #303 F03/F07). `label` and `detail` come
 /// from the host's transport status (stable storage); every other string is a

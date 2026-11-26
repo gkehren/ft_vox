@@ -224,17 +224,13 @@ void Engine::pumpPlayerSession()
 				m_worldCatalog = std::async(std::launch::async, listLocalWorlds, m_savesRoot);
 			}
 			break;
-		case Multiplayer: case Settings:
+		case Settings:
 			// Native navigation already happened on activation. A stale panel
 			// request must not reopen a screen the player has left.
-			if (!gameUi || m_playerUi->screens().top() !=
-				(request->action == Multiplayer ? Screen::Multiplayer : Screen::Settings))
+			if (!gameUi || m_playerUi->screens().top() != Screen::Settings)
 				break;
 			setDeveloperWorkspaceVisible(true);
-			if (request->action == Multiplayer)
-				gameUi->showHostPanel();
-			else
-				gameUi->showGraphicsPanel();
+			gameUi->showGraphicsPanel();
 			break;
 		case Retry: case Cancel: case ConfirmFailedQuit:
 		{

@@ -665,7 +665,7 @@ gameui::InventoryView Engine::playerInventoryView() const
 			view.availability = InventoryAvailability::Disconnected;
 			view.feedback = connection.label;
 			view.feedbackKind = Status::Error;
-			view.recovery = gameui::recoveryInstruction(m_showDeveloperUi, mouseCaptured);
+			view.recovery = gameui::recoveryInstruction();
 			break;
 		}
 		return view;

@@ -1601,7 +1601,7 @@ struct EngineJoinProbe
 		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
 			"leaving or switching replaces the old HUD with session feedback");
 		CHECK(hud.statusKind == gameui::style::Status::Pending ||
-			hud.recovery == gameui::recoveryInstruction(engine.m_showDeveloperUi, engine.mouseCaptured),
+			hud.recovery == gameui::recoveryInstruction(),
 			"an ended session publishes the reconnect steps reachable from this workspace/capture state");
 	}
 
@@ -1730,7 +1730,7 @@ struct EngineJoinProbe
 		const bool captured = engine.mouseCaptured;
 		const auto blockedHud = engine.playerHudView();
 		CHECK(blockedHud.statusKind == gameui::style::Status::Error && !blockedHud.hotbar.available &&
-			blockedHud.recovery == gameui::recoveryInstruction(false, captured),
+			blockedHud.recovery == gameui::recoveryInstruction(),
 			"the blocked HUD publishes the reconnect steps for the hidden workspace and the actual mouse state");
 		CHECK(captured, "the recovery scenario starts from a captured mouse");
 		tap(SDLK_E);
@@ -1748,7 +1748,7 @@ struct EngineJoinProbe
 		tap(SDLK_C);
 		CHECK(!engine.mouseCaptured, "C releases the captured mouse while the session is blocked");
 		const auto reachableHud = engine.playerHudView();
-		CHECK(reachableHud.recovery == gameui::recoveryInstruction(true, false),
+		CHECK(reachableHud.recovery == gameui::recoveryInstruction(),
 			"the recovery line follows the state the player just reached");
 		CHECK(static_cast<bool>(frame().joinServer),
 			"the Multiplayer Reconnect action is reachable after the recovery steps");

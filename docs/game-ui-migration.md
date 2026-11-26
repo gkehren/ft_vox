@@ -460,3 +460,49 @@ callbacks during the corrected session proof matched that known signature.
 [Loading](images/session-menu-305/loading.png) ·
 [Pause](images/session-menu-305/pause.png) ·
 [Recoverable error](images/session-menu-305/recoverable-error.png)
+
+## Native multiplayer (#306)
+
+Open **Multiplayer** from the main menu or Pause. **Join server** accepts a
+private IPv4 endpoint and optional expected seed. Use **Profiles** to create
+or select the local identity, and save endpoints as favorites or reuse recent
+connections. A reconnect uses the active session's original profile. Use
+**Switch server or profile** to submit a different draft. **Play** becomes
+available when the confirmed player, inventory and terrain are ready.
+
+**Host server** starts the existing supervised dedicated process. Choose a
+server world and local profile, select a port or use 0 for an ephemeral port,
+and choose whether to join when ready. The hosting options page controls
+loopback versus an explicit trusted LAN or VPN address, player slots, interest
+radius, terrain workers and streaming budget. Cancel a connection separately
+from stopping a server. A confirmed stop waits for the checkpoint. The
+force-stop action appears only after a delayed shutdown and warns about
+uncommitted changes.
+
+**Players** shows fresh full monitoring data on the local host and the nearby
+players included in a connected client's snapshots. The wire protocol provides
+nearby actor IDs to remote clients. Full roles come from the locally verified
+administration reply. **Connection details** shows each client's own RTT
+estimate, sample age and missing snapshots when available. Transport and
+prediction counters remain in Developer UI.
+
+**Administration** uses the launcher's verified local control channel. Refresh
+the registered player list and audit before acting on newly registered players.
+A confirmation captures the server launch, permission epoch, operation and
+selected player. The Engine rechecks those values against the supervisor before
+dispatch. Kicking also requires a fresh live roster entry. A role-only remote
+profile has no local control channel. Owner recovery remains the documented
+offline dedicated-server operation. [Dedicated server guide](dedicated-server.md)
+
+The original Developer UI panel remains available during migration. The native
+player flow uses the same Engine adapters for profiles, preferences, join,
+hosting and administration. No credentials or child logs enter its view model.
+
+Run the opt-in proof from a Windows Release graphics build. It launches two
+graphical clients with isolated profile directories and an ephemeral loopback
+server, drives the native controls through SDL and writes PNG evidence.
+
+```powershell
+$env:FT_VOX_VALIDATION = '1'
+python tests/test_hosted_closure_native.py --menu --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe --output build/native-multiplayer-evidence
+```

@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <Engine/EngineMultiplayer.hpp>
 #include <Engine/GameUiSample.hpp>
 #include <Engine/Profiler.hpp>
 #include <Renderer/ColorSpace.hpp>
@@ -181,7 +182,19 @@ struct GameUiBackendProbe
 		join.connectServer({"invalid-endpoint", "", {}});
 		engine.applySessionRequests();
 		CHECK(!engine.m_joinError.empty() && !engine.viewWorld(), "Join validation works from the empty menu");
-		repeatPanel(Screen::Multiplayer, "reopening Multiplayer keeps screen revision and focus");
+		engine.pumpPlayerMultiplayer();
+		present();
+		CHECK(engine.suppressDeveloperUi(), "native multiplayer works independently of the developer workspace");
+		clickControl("Join server");
+		engine.handleEvents();
+		engine.pumpPlayerMultiplayer();
+		present();
+		CHECK(sample.screens().top() == Screen::JoinServer, "multiplayer opens native Join");
+		tap(SDLK_ESCAPE);
+		present();
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(sample.screens().top() == Screen::MainMenu, "Back restores the previous screen");
 
 		constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
 		engine.worldRenderer->resizeOutput(extent, format, kColorSpace);
@@ -373,6 +386,266 @@ struct GameUiBackendProbe
 		const auto validationErrors = device.validationErrorCount() - errors;
 		CHECK(validationErrors == rtssErrors, "session proof has no new application Vulkan validation errors");
 		std::cout << "Session menu validation errors=" << validationErrors << " known_rtss_errors=" << rtssErrors << '\n';
+	}
+
+
+	void multiplayerMenuProof(const std::filesystem::path &evidence, const std::filesystem::path &server)
+	{
+		namespace fs = std::filesystem;
+		using gameui::Screen;
+		using namespace std::chrono_literals;
+		const bool host = !server.empty();
+		ImGui::GetIO().IniFilename = nullptr;
+		engine.setShowDeveloperUi(false);
+		engine.loadJoinPreferences();
+		engine.loadHosting();
+		if (host)
+		{
+			engine.m_hostExecutable = server;
+			engine.m_hostSavesRoot = engine.m_savesRoot / "dedicated";
+		}
+		engine.renderSettings.maxRenderDistance = 128;
+		engine.worldRenderer->postSettings().applyPreset(GraphicsQualityPreset::Low);
+		engine.enableGameUi(false, false);
+		engine.running = true;
+		engine.showMainMenu();
+		constexpr VkExtent2D size{960, 540};
+		resize(int(size.width), int(size.height));
+		auto &sample = *engine.m_playerUi;
+		auto &device = *engine.vkContext;
+		const auto errors = device.validationErrorCount() - device.rtssValidationErrorCount();
+		const auto frame = [&] {
+			windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+			engine.handleEvents();
+			engine.tickHosting();
+			engine.pumpPlayerSession();
+			engine.pumpPlayerMultiplayer();
+			engine.applySessionRequests();
+			if (engine.m_remote)
+			{
+				engine.pollRemote();
+				engine.processInput(1. / 60.);
+				engine.tickStreaming(1. / 60.);
+				engine.updateRemoteEntities();
+			}
+			present();
+		};
+		const auto until = [&](auto done, const char *error) {
+			const auto deadline = std::chrono::steady_clock::now() + 25s;
+			while (!done() && std::chrono::steady_clock::now() < deadline)
+			{
+				frame();
+				SDL_Delay(4);
+			}
+			checked(done(), error);
+		};
+		const auto widget = [&](std::string_view label) -> const gameui::Widget & {
+			const auto widgets = sample.m_widgets.widgets();
+			const auto found = std::ranges::find(widgets, label, &gameui::Widget::label);
+			if (found == widgets.end())
+				throw std::runtime_error("missing multiplayer control: " + std::string(label));
+			return *found;
+		};
+		const auto press = [&](std::string_view label, int row = -1) {
+			if (!widget(label).enabled)
+				throw std::runtime_error("disabled multiplayer control: " + std::string(label));
+			for (size_t i = 0; i < gameui::WidgetSet::kMaxWidgets &&
+				sample.m_widgets.bounds(widget(label)).intersect(sample.m_widgets.viewport().clip).empty(); ++i)
+			{
+				tap(SDLK_TAB);
+				frame();
+			}
+			const auto &control = widget(label);
+			auto bounds = sample.m_widgets.bounds(control);
+			if (row >= 0)
+			{
+				const auto *list = std::get<gameui::ListBox *>(control.control);
+				bounds = gameui::listRowRect(gameui::listGeometry(bounds, *list,
+					gameui::style::baseline(), sample.m_screenScale), row);
+			}
+			const auto clipped = bounds.intersect(sample.m_widgets.viewport().clip);
+			if (clipped.empty())
+				throw std::runtime_error("multiplayer control outside the native viewport: " + std::string(label));
+			const auto r = clipped.rect;
+			button(SDL_EVENT_MOUSE_BUTTON_DOWN, (r.x + r.z) * .5f, (r.y + r.w) * .5f);
+			button(SDL_EVENT_MOUSE_BUTTON_UP, (r.x + r.z) * .5f, (r.y + r.w) * .5f);
+			frame();
+		};
+		const auto type = [&](std::string_view label, const std::string &value) {
+			press(label);
+			tap(SDLK_A, SDL_KMOD_CTRL);
+			commitText(value.c_str());
+			frame();
+		};
+		const auto publish = [&](const char *name, std::string_view value) {
+			const auto path = evidence / name;
+			auto pending = path;
+			pending += ".pending";
+			{
+				std::ofstream output(pending);
+				output << value;
+				checked(bool(output), "write multiplayer proof rendezvous");
+			}
+			fs::rename(pending, path);
+		};
+		const auto shot = [&](const char *name) {
+			device.waitIdle();
+			constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
+			auto &world = *engine.worldRenderer;
+			world.resizeOutput(size, format, kColorSpace);
+			sample.renderer().setOutput(format, kColorSpace);
+			Readback target{device};
+			const auto allocator = device.getAllocator();
+			target.output = createImage2D(allocator, device.getDevice(), size.width, size.height, format,
+				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+			target.buffer = createBuffer(allocator, size.width * size.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VMA_MEMORY_USAGE_AUTO, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+			sample.prepare(engine.window, 0, size, {}, world.getTextureManager(), engine.m_atlasVersion);
+			checked(visual::writePng((evidence / name).string(), capture(target, &sample.renderer())),
+				"write multiplayer proof screenshot");
+			world.resizeOutput(engine.swapchain->getExtent(), engine.swapchain->getImageFormat(), engine.swapchain->getColorSpace());
+			sample.renderer().setOutput(engine.swapchain->getImageFormat(), engine.swapchain->getColorSpace());
+		};
+
+		frame();
+		press("Multiplayer");
+		press(host ? "Host server" : "Join server");
+		press("Profiles");
+		type("New profile name", host ? "owner-native" : "guest-native");
+		press("Create profile");
+		CHECK(engine.m_joinPreferences.selectedProfile == (host ? "owner-native" : "guest-native"),
+			"native profile creation selects the saved identity");
+		tap(SDLK_ESCAPE);
+		frame();
+
+		if (host)
+		{
+			type("New or existing server world", "native-menu-proof");
+			type("Port (0 assigns a free port)", "0");
+			shot("host.png");
+			press("Private network and streaming options");
+			shot("host-options.png");
+			tap(SDLK_ESCAPE);
+			frame();
+			press("Start server");
+			until([&] { return sample.m_multiplayer.playable && sample.m_multiplayer.administration; },
+				"native Host and auto-join did not become ready");
+			publish("endpoint", sample.m_multiplayer.hostEndpoint);
+		}
+		else
+		{
+			until([&] { return fs::exists(evidence / "endpoint"); }, "native host did not publish an endpoint");
+			std::string endpoint;
+			std::ifstream(evidence / "endpoint") >> endpoint;
+			type("Private IPv4 address and port", "invalid");
+			press("Connect");
+			frame();
+			CHECK(!sample.m_multiplayer.joinError.empty(), "native Join shows an invalid endpoint");
+			type("Private IPv4 address and port", endpoint);
+			press("Toggle favorite");
+			CHECK(engine.m_joinPreferences.favorites.size() == 1, "native Join saves favorites");
+			type("Expected world seed (optional)", "43");
+			press("Connect");
+			until([&] {
+				return sample.m_multiplayer.connection && sample.m_multiplayer.connection->state == ui::MultiplayerState::Rejected;
+			}, "wrong seed did not reach native rejection state");
+			CHECK(std::string_view(sample.m_multiplayer.connection->detail) == "World seed mismatch",
+				"native Join uses the real seed rejection");
+			type("Expected world seed (optional)", "42");
+			shot("join.png");
+			press("Connect");
+			until([&] { return sample.m_multiplayer.playable; }, "native guest did not join");
+		}
+		const int selectedSlot = host ? 2 : 5;
+		engine.selectHotbarSlot(selectedSlot);
+		until([&] { return engine.selectedHotbarSlot() == selectedSlot; }, "live inventory action was not acknowledged");
+		until([&] {
+			return sample.m_multiplayer.nearby.size() >= 2 && sample.m_multiplayer.network.ping &&
+				(!host || (sample.m_multiplayer.monitor && sample.m_multiplayer.monitor->transport.count == 2));
+		}, "two live players and independent ping were not observed");
+		const auto self = sample.m_multiplayer.self;
+		checked(self.valid(), "server assigned a live player");
+		if (host)
+			press("Players");
+		else
+		{
+			tap(SDLK_ESCAPE);
+			frame();
+			press("Players");
+		}
+		shot(host ? "owner-roster.png" : "guest-roster.png");
+		tap(SDLK_ESCAPE);
+		frame();
+
+		if (host)
+		{
+			press("Administration");
+			press("Refresh players and audit");
+			until([&] {
+				return sample.m_multiplayer.administration &&
+					sample.m_multiplayer.monitor && sample.m_multiplayer.administration->players.size() >= 2;
+			}, "native refresh did not return the registered roster");
+			const auto roster = sample.m_multiplayer.monitor->transport.roster();
+			const auto liveGuest = std::ranges::find_if(roster, [&](const auto &row) { return row.id != self; });
+			checked(liveGuest != roster.end(), "host monitor has the live guest");
+			const auto &rows = sample.m_multiplayer.administration->players;
+			const auto other = std::ranges::find(rows, liveGuest->id, &localcontrol::Player::id);
+			checked(other != rows.end(), "host sees registered guest");
+			const auto guest = other->id;
+			press("Registered players", static_cast<int>(other - rows.begin()));
+			auto kick = gameui::AdministrationIntent{sample.m_multiplayer.launch,
+				sample.m_multiplayer.administration->world, sample.m_multiplayer.administration->epoch,
+				localcontrol::Role::Owner, localcontrol::Operation::Kick,
+				sample.m_multiplayer.administration->players[static_cast<size_t>(sample.m_mpList.selection.selected)],
+				false, {}};
+			CHECK(!gameui::eligibleAdministration(kick, sample.m_multiplayer.launch,
+				*sample.m_multiplayer.administration, nullptr), "stale monitoring prevents online moderation");
+			press("Grant admin role...");
+			CHECK(sample.screens().top() == Screen::MultiplayerConfirm && !engine.m_hostSnapshot.adminPending,
+				"first click opens native confirmation without submitting");
+			auto stale = *sample.m_multiplayerConfirm->administration;
+			++stale.epoch;
+			CHECK(!gameui::eligibleAdministration(stale, sample.m_multiplayer.launch,
+				*sample.m_multiplayer.administration, sample.m_multiplayer.monitor.get()), "obsolete permission epoch is refused");
+			shot("owner-confirmation.png");
+			press("Confirm");
+			until([&] {
+				const auto &admin = sample.m_multiplayer.administration;
+				return admin && std::ranges::any_of(admin->players, [&](const auto &row) {
+					return row.id == guest && row.role == localcontrol::Role::Admin && !row.localAdmin;
+				});
+			}, "native confirm did not grant the role only");
+			publish("role-granted", "yes");
+			until([&] { return fs::exists(evidence / "guest-reconnected"); }, "guest did not reconnect");
+			tap(SDLK_ESCAPE);
+			frame();
+			press("Stop and save server...");
+			press("Confirm");
+			until([&] { return sample.m_multiplayer.hostState == hosting::State::Stopped; },
+				"hosted native checkpoint not confirmed");
+			net::udp::Socket occupied({0x7f000001, 0});
+			type("Port (0 assigns a free port)", std::to_string(occupied.address().port));
+			press("Start server");
+			until([&] { return sample.m_multiplayer.hostState == hosting::State::Failed; },
+				"occupied port did not reach native failure");
+			CHECK(sample.m_multiplayer.hostMessage.find("choose another port") != std::string::npos,
+				"the hosted bind failure offers a recovery step");
+		}
+		else
+		{
+			until([&] { return fs::exists(evidence / "role-granted"); }, "owner did not confirm role");
+			CHECK(!sample.m_multiplayer.administration, "remote role grants no local administration channel");
+			press("Join server");
+			press("Disconnect");
+			until([&] { return sample.m_multiplayer.reconnect; }, "native disconnect did not finish");
+			press("Reconnect");
+			until([&] { return sample.m_multiplayer.playable; }, "native reconnect did not finish");
+			CHECK(sample.m_multiplayer.self == self, "reconnect restored the original player identity");
+			publish("guest-reconnected", "yes");
+		}
+		CHECK(!engine.developerWorkspaceVisible(), "all actions use the native workspace");
+		CHECK(device.validationErrorCount() - device.rtssValidationErrorCount() == errors,
+			"native multiplayer produced no new application validation errors");
 	}
 
 
@@ -2282,6 +2555,14 @@ struct GameUiBackendProbe
 			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
 };
+
+int runMultiplayerMenuProof(Engine &engine, const std::filesystem::path &out, const std::filesystem::path &server)
+{
+	GameUiBackendProbe(engine).multiplayerMenuProof(out, server);
+	if (testmain::fails == 0)
+		std::cout << "Native multiplayer menu: " << testmain::checks << " checks\n";
+	return testmain::exitCode();
+}
 
 int runSessionMenuProof(Engine &engine, const std::filesystem::path &output)
 {

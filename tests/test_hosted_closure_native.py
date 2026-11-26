@@ -23,7 +23,10 @@ def run_phase(client: Path, server: Path, root: Path, phase: str) -> None:
                 logs_path = evidence / f"{role}.log"
                 profile_root = root / role / "saves"
                 output = logs.enter_context(logs_path.open("wb"))
-                cmd = [str(client), "--hosted-closure", launcher, str(root), str(profile_root), phase]
+                if phase == "menu":
+                    cmd = [str(client), "--multiplayer-menu-proof", launcher, str(evidence), str(profile_root)]
+                else:
+                    cmd = [str(client), "--hosted-closure", launcher, str(root), str(profile_root), phase]
                 env = os.environ.copy()
                 env.pop("FT_VOX_MOTION_TRACE", None)
                 process = subprocess.Popen(cmd, cwd=profile_root.parent, stdout=output,
@@ -56,7 +59,7 @@ def run_phase(client: Path, server: Path, root: Path, phase: str) -> None:
                 log = path.read_text(encoding="utf-8", errors="replace")
                 for line in log.splitlines():
                     if (line.startswith(("HOSTED ", "SERVER status=stopped ", "Native hosted",
-                                          "Vulkan device:", "Vulkan API:", "FAIL:", "SKIP",
+                                          "Native multiplayer menu", "Vulkan device:", "Vulkan API:", "FAIL:", "SKIP",
                                           "[multiplayer]"))):
                         print(line)
                 for code in sorted(set(re.findall(r"VUID-[\w-]+", log))):
@@ -68,6 +71,7 @@ def main() -> None:
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="new directory for logs and isolated saves")
+    parser.add_argument("--menu", action="store_true", help="drive the native Host/Join and administration screens")
     args = parser.parse_args()
     server, client, root = args.server.resolve(), args.client.resolve(), args.output.resolve()
     resources = server.parent / "ressources"
@@ -78,6 +82,10 @@ def main() -> None:
         work = root / role
         work.mkdir()
         shutil.copytree(resources, work / "ressources")
+    if args.menu:
+        run_phase(client, server, root, "menu")
+        print("Native multiplayer menu passed in both graphical clients.")
+        return
     for phase in ("first", "restart"):
         run_phase(client, server, root, phase)
     print("Hosted closure passed in both native processes across checkpoint restart.")
