@@ -230,6 +230,12 @@ void GameUiSample::paintScreen(glm::vec2 pointer)
 	if (m_screens.suppressDeveloper())
 		paint.backdrop(m_draws.bounds(), theme.palette.scrim);
 	paint.card(m_panel);
+	if (multiplayerScreen(m_screens.top()) && !m_mpStatusMessage.empty())
+	{
+		auto bodyPaint = surface(m_widgets.viewport().clip);
+		bodyPaint.wrappedLabel(m_widgets.viewport().place(m_mpStatusMessage), m_mpStatus,
+			style::TextRole::Body, theme.palette.ink, 5);
+	}
 	if (multiplayerScreen(m_screens.top()) && !m_mpMessage.empty())
 	{
 		auto bodyPaint = surface(m_widgets.viewport().clip);

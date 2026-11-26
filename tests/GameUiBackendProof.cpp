@@ -443,7 +443,8 @@ struct GameUiBackendProbe
 			const auto widgets = sample.m_widgets.widgets();
 			const auto found = std::ranges::find(widgets, label, &gameui::Widget::label);
 			if (found == widgets.end())
-				throw std::runtime_error("missing multiplayer control: " + std::string(label));
+				throw std::runtime_error("missing multiplayer control: " + std::string(label) +
+					" (screen " + std::to_string(int(sample.screens().top())) + ")");
 			return *found;
 		};
 		const auto press = [&](std::string_view label, int row = -1) {
@@ -488,19 +489,21 @@ struct GameUiBackendProbe
 			}
 			fs::rename(pending, path);
 		};
-		const auto shot = [&](const char *name) {
+		const auto shot = [&](const char *name, VkExtent2D extent = {}) {
+			if (extent.width == 0u || extent.height == 0u)
+				extent = size;
 			device.waitIdle();
 			constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
 			auto &world = *engine.worldRenderer;
-			world.resizeOutput(size, format, kColorSpace);
+			world.resizeOutput(extent, format, kColorSpace);
 			sample.renderer().setOutput(format, kColorSpace);
 			Readback target{device};
 			const auto allocator = device.getAllocator();
-			target.output = createImage2D(allocator, device.getDevice(), size.width, size.height, format,
+			target.output = createImage2D(allocator, device.getDevice(), extent.width, extent.height, format,
 				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-			target.buffer = createBuffer(allocator, size.width * size.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			target.buffer = createBuffer(allocator, extent.width * extent.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 				VMA_MEMORY_USAGE_AUTO, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-			sample.prepare(engine.window, 0, size, {}, world.getTextureManager(), engine.m_atlasVersion);
+			sample.prepare(engine.window, 0, extent, {}, world.getTextureManager(), engine.m_atlasVersion);
 			checked(visual::writePng((evidence / name).string(), capture(target, &sample.renderer())),
 				"write multiplayer proof screenshot");
 			world.resizeOutput(engine.swapchain->getExtent(), engine.swapchain->getImageFormat(), engine.swapchain->getColorSpace());
@@ -511,13 +514,99 @@ struct GameUiBackendProbe
 		press("Multiplayer");
 		press(host ? "Host server" : "Join server");
 		if (!host)
+		{
 			CHECK(sample.m_joinEndpoint.value() == "127.0.0.1:7777",
 				"the join draft starts at the automatic default (F10)");
+			// UI scale sweep (manual validation item): the native multiplayer
+			// screens stay reachable at 100%, 150% and 200% on a large
+			// window, with screenshots as evidence.
+			resize(1920, 1080);
+			for (const auto &[scale, name] : std::array<std::pair<float, const char *>, 3>{
+				{{1.f, "join-scale-100.png"}, {1.5f, "join-scale-150.png"}, {2.f, "join-scale-200.png"}}})
+			{
+				sample.setScalePolicy({gameui::ScaleMode::Fixed, scale});
+				frame();
+				frame();
+				// The scaled content can exceed the panel viewport; the
+				// primary action only has to stay reachable through keyboard
+				// navigation, which scrolls it into view.
+				// Reachable, not enabled: no profile is selected yet at
+				// this point in the flow, so the primary action is
+				// legitimately disabled. The sweep verifies that the
+				// scaled layout never makes the control unreachable.
+				const auto connectVisible = [&] {
+					const auto widgets = sample.m_widgets.widgets();
+					const auto found = std::ranges::find(widgets, "Connect", &gameui::Widget::label);
+					return found != widgets.end() &&
+						!sample.m_widgets.bounds(*found).intersect(sample.m_widgets.viewport().clip).empty();
+				};
+				for (size_t i = 0; i < gameui::WidgetSet::kMaxWidgets && !connectVisible(); ++i)
+				{
+					tap(SDLK_TAB);
+					frame();
+				}
+				CHECK(connectVisible(), "the Connect action stays reachable across UI scales (F05)");
+				shot(name, VkExtent2D{1920, 1080});
+			}
+			sample.setScalePolicy({gameui::ScaleMode::Auto, 1.f});
+			frame();
+			resize(960, 540);
+			frame();
+		}
 		press("Profiles");
 		type("New profile name", host ? "owner-native" : "guest-native");
 		press("Create profile");
 		CHECK(engine.m_joinPreferences.selectedProfile == (host ? "owner-native" : "guest-native"),
 			"native profile creation selects the saved identity");
+		if (!host)
+		{
+			// Correction F17 regression: a shared multiplayer list keeps the
+			// wheel's scroll offset across screen reconstructions, and a row
+			// picked outside the initial window drives its action.
+			for (const char *extra : {"profile-a", "profile-b", "profile-c", "profile-d", "profile-e"})
+			{
+				type("New profile name", extra);
+				press("Create profile");
+			}
+			until([&] { return sample.m_multiplayer.profiles.size() >= 6; },
+				"the extra profiles reached the native list");
+			CHECK(sample.m_mpList.selection.first == 0, "the profiles list starts unscrolled");
+			const auto widgets = sample.m_widgets.widgets();
+			const auto list = std::ranges::find(widgets, "Saved profiles", &gameui::Widget::label);
+			checked(list != widgets.end(), "the profiles list is on screen");
+			const auto bounds = sample.m_widgets.bounds(*list);
+			const auto wheel = [&](float y) {
+				SDL_Event event{};
+				event.type = SDL_EVENT_MOUSE_WHEEL;
+				event.wheel.windowID = SDL_GetWindowID(engine.window);
+				event.wheel.y = y;
+				event.wheel.mouse_x = (bounds.rect.x + bounds.rect.z) * .5f;
+				event.wheel.mouse_y = (bounds.rect.y + bounds.rect.w) * .5f;
+				checked(SDL_PushEvent(&event), "queue the profiles wheel");
+				frame();
+			};
+			wheel(-1.f);
+			wheel(-1.f);
+			CHECK(sample.m_mpList.selection.first == 1, "mouse-wheel scrolling moves the profiles list");
+			for (int i = 0; i < 3; ++i)
+				frame();
+			// The regression: the per-frame screen reconstruction must not
+			// snap the offset back to the selected row.
+			CHECK(sample.m_mpList.selection.first == 1,
+				"the scroll offset survives screen reconstruction (F17)");
+			press("Saved profiles", 4);
+			const auto picked = std::string(
+				sample.m_mpLabels[static_cast<size_t>(sample.m_mpList.selection.selected)]);
+			press("Use selected profile");
+			CHECK(engine.m_joinPreferences.selectedProfile == picked && picked != "guest-native",
+				"a row outside the initial window drives the profile action (F17)");
+			wheel(1.f);
+			wheel(1.f);
+			press("Saved profiles", 0);
+			press("Use selected profile");
+			CHECK(engine.m_joinPreferences.selectedProfile == "guest-native",
+				"the original identity is restored for the rest of the flow");
+		}
 		tap(SDLK_ESCAPE);
 		frame();
 
@@ -533,6 +622,8 @@ struct GameUiBackendProbe
 			press("Start server");
 			until([&] { return sample.m_multiplayer.playable && sample.m_multiplayer.administration; },
 				"native Host and auto-join did not become ready");
+			CHECK(sample.m_mpStatus == "Server ready",
+				"the supervisor state stays visible beside earlier hosting errors (F19)");
 			publish("endpoint", sample.m_multiplayer.hostEndpoint);
 		}
 		else
@@ -625,6 +716,27 @@ struct GameUiBackendProbe
 				return sample.m_multiplayer.administration &&
 					sample.m_multiplayer.monitor && sample.m_multiplayer.administration->players.size() >= 2;
 			}, "native refresh did not return the registered roster");
+			// The guest walks the deliberate seed-mismatch rejection before
+			// its final join, so its live session id lands in the registry a
+			// moment after the roster first shows two players. A single
+			// refresh can race that transition: poll with the idempotent
+			// refresh until the registry names the session the monitor
+			// observes, then assert the linkage once.
+			const auto liveGuestRegistered = [&] {
+				if (!sample.m_multiplayer.administration || !sample.m_multiplayer.monitor)
+					return false;
+				const auto roster = sample.m_multiplayer.monitor->transport.roster();
+				const auto live = std::ranges::find_if(roster, [&](const auto &row) { return row.id != self; });
+				return live != roster.end() &&
+					std::ranges::find(sample.m_multiplayer.administration->players, live->id,
+						&localcontrol::Player::id) != sample.m_multiplayer.administration->players.end();
+			};
+			for (int round = 0; round < 6 && !liveGuestRegistered(); ++round)
+			{
+				press("Refresh players and audit");
+				until([&] { return !sample.m_multiplayer.adminPending; },
+					"the administration refresh did not settle");
+			}
 			const auto roster = sample.m_multiplayer.monitor->transport.roster();
 			const auto liveGuest = std::ranges::find_if(roster, [&](const auto &row) { return row.id != self; });
 			checked(liveGuest != roster.end(), "host monitor has the live guest");
@@ -837,8 +949,9 @@ struct GameUiBackendProbe
 			press("Start server");
 			until([&] { return sample.m_multiplayer.hostState == hosting::State::Failed; },
 				"occupied port did not reach native failure");
-			CHECK(sample.m_multiplayer.hostMessage.find("choose another port") != std::string::npos,
-				"the hosted bind failure offers a recovery step");
+			CHECK(sample.m_multiplayer.hostMessage.find("choose another port") != std::string::npos &&
+				sample.m_mpStatus == sample.m_multiplayer.hostMessage,
+				"the hosted bind failure offers a recovery step in the visible status slot (F19)");
 			CHECK(!sample.m_mpAdminTarget.valid(),
 				"a failed relaunch cleared the administrative selection (F12)");
 		}
@@ -862,8 +975,9 @@ struct GameUiBackendProbe
 				"the refused switch shows the endpoint error");
 			CHECK(sample.m_multiplayer.playable, "the refused switch preserved the live session");
 			press("Copy connected endpoint");
-			CHECK(sample.m_mpClipboard == "Endpoint copied to the clipboard.",
-				"the clipboard result is reported despite the connection error (F15)");
+			CHECK(sample.m_mpClipboard == "Endpoint copied to the clipboard." &&
+				sample.m_mpDetail == "Endpoint copied to the clipboard.",
+				"the clipboard result is reported and painted despite the connection error (F15/F19)");
 			if (char *copied = SDL_GetClipboardText())
 			{
 				CHECK(std::string_view(copied) == sample.m_multiplayer.endpoint,
@@ -1044,6 +1158,21 @@ struct GameUiBackendProbe
 
 	void button(Uint32 type, float x, float y, Uint8 which = SDL_BUTTON_LEFT)
 	{
+		// Real pointer input from the desktop interleaves with the synthetic
+		// clicks: a motion or window leave queued between the press and its
+		// release cancels the armed activation, and the click is silently
+		// dropped. The proof drives only synthetic input, so drop any queued
+		// real pointer events before each click pair.
+		if (type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+		{
+			SDL_PumpEvents();
+			SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
+			SDL_FlushEvent(SDL_EVENT_MOUSE_BUTTON_DOWN);
+			SDL_FlushEvent(SDL_EVENT_MOUSE_BUTTON_UP);
+			SDL_FlushEvent(SDL_EVENT_MOUSE_WHEEL);
+			SDL_FlushEvent(SDL_EVENT_WINDOW_MOUSE_ENTER);
+			SDL_FlushEvent(SDL_EVENT_WINDOW_MOUSE_LEAVE);
+		}
 		SDL_Event event{};
 		event.type = type;
 		event.button.windowID = SDL_GetWindowID(engine.window);

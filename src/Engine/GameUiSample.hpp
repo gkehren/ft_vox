@@ -184,6 +184,11 @@ private:
 	std::vector<std::string_view> m_mpAdminLabels;
 	int m_mpWorkerChoice{1}, m_mpStreamingChoice{1};
 	std::string m_mpError, m_mpDetail;
+	/// Persistent status slot (correction F19): the live connection or
+	/// supervisor state, painted beside the transient operation feedback so
+	/// neither can mask the other.
+	std::string m_mpStatus;
+	gameui::Clip m_mpStatusMessage{};
 	/// Short-lived clipboard feedback (correction F08); cleared by the next
 	/// join-screen operation.
 	std::string m_mpClipboard;

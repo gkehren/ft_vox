@@ -813,4 +813,11 @@ void ListSelection::select(int index, int count, int visible)
 		first = selected - visible + 1;
 	scroll(0, count, visible);
 }
+
+void ListSelection::reconcile(int count, int visible)
+{
+	if (selected >= 0)
+		selected = std::min(selected, std::max(0, count - 1));
+	first = std::clamp(first, 0, std::max(0, count - visible));
+}
 } // namespace gameui

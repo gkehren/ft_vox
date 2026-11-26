@@ -558,18 +558,23 @@ single-execution audit evidence, stop-and-save with checkpoint, and the
 occupied-port bind failure. CPU-side, `test_multiplayer_intents` pins the
 eligibility and outcome rules for every operation without a GPU.
 
-### Review corrections (#306 round 3)
+### Review corrections (#306 rounds 3 and 4)
 
 - **Endpoint editing is stable.** The automatic endpoint is re-published only
-  when its value changed and never while a text composition is active: the
-  caret, selection and IME state survive every frame. An untouched draft
-  follows the session context; an edited draft survives navigation and
-  session transitions.
-- **Administrative scrolling is independent.** The registered-player list
-  reconciles the row index of the selected identity without touching the
-  scroll window: wheel browsing works with and without a selection, the
-  offset survives unchanged views, roster shrinkage clamps it, and keyboard
-  steps reveal the newly selected row.
+  when its value changed and never while a text composition or an active
+  text selection is in progress: the caret, selection and IME state survive
+  every frame. A synchronization deferred while editing retries once the
+  field is left, an untouched draft follows the session context, and an
+  edited draft survives navigation and session transitions. Choosing a
+  favorite or recent endpoint counts as an explicit edit.
+- **Every multiplayer list scrolls independently.** The shared list helper
+  reconciles the selected row index and the scroll offset
+  (`ListSelection::reconcile`) without revealing anything: wheel browsing
+  works with and without a selection across favorites, recent endpoints,
+  saved profiles, hosted worlds, the live roster, delegated-control
+  profiles and the audit history, the offset survives unchanged views and
+  clamps on shrinkage, and only an explicit click or a keyboard step
+  reveals a row.
 - **The administrative selection is server-scoped.** It belongs to one hosted
   launch, one verified world identity and a live authorization. A relaunch, a
   world change or a lost channel clears the target and the cached reply, so
@@ -580,15 +585,33 @@ eligibility and outcome rules for every operation without a GPU.
   clears on the next launch change, so an old result never masks the current
   server state. Client connection feedback stays scoped to its session
   generation.
-- **Transient results never mask state.** The clipboard result displays
-  independently of a standing connection error, a supervisor state
-  transition clears the previous hosting error, and an administrative refusal
-  stays visible after the channel itself disappeared.
+- **Transient results never mask state.** A persistent status slot
+  (connection or supervisor state) paints beside the transient operation
+  feedback: the clipboard result displays independently of a standing
+  connection error, the supervisor state stays visible beside a hosting
+  operation error, and an administrative refusal stays visible after the
+  channel itself disappeared.
 - **The gameplay boundary is restored.** `pumpPlayerMultiplayer` returns
   before building any frame or view when no multiplayer screen is active; a
   queued request is consumed as a silent, intentional cancellation. Hosting
   supervision, auto-join and the remote session keep advancing in their own
   ticks, and the first pump after re-entering a screen rebuilds current data.
+
+The final review pass also hardened the proof harness itself. The `--menu`
+proof flushes queued real pointer events before each synthetic click
+(desktop mouse motion or window leaves cancelled armed activations and
+silently dropped navigation clicks), re-issues the idempotent
+administration refresh until the registry names the session the monitor
+observes (the guest's deliberate seed-mismatch rejection re-registers it a
+moment after the roster first shows two players), and drives a UI scale
+sweep: the Join screen stays reachable at 100%, 150% and 200% on a
+1920x1080 window with keyboard navigation revealing the primary action,
+with `join-scale-100.png`, `join-scale-150.png` and `join-scale-200.png` as
+evidence. The F17 regression lives in the proof as well: a six-row saved
+profiles list keeps its wheel scroll offset across screen reconstructions
+and a row picked outside the initial window drives the profile action. CPU
+tests pin `ListSelection::reconcile` (selection clamp, offset clamp, `-1`
+preserved) and the deferred endpoint synchronization retry.
 
 ### Validation record (#306)
 
@@ -608,13 +631,25 @@ Covered by existing suites (verified, not duplicated here):
   freshness).
 - CPU intent rules: `test_multiplayer_intents` (eligibility, typed outcomes,
   notice lifetime, cross-world selection scope) and the `ListSelection`
-  scrolling cases in `test_game_ui_interaction`.
+  scrolling and reconcile cases in `test_game_ui_interaction`.
+
+Executed graphical validation (Windows, RTX 4070 Ti, validation layers on):
+
+- `python tests/test_hosted_closure_native.py --menu ...`: two consecutive
+  clean runs (25 owner checks, 27 guest checks), including the scale sweep
+  screenshots at 1920x1080.
+- `python tests/test_hosted_closure_native.py ...` (first and restart
+  phases): host and guest across checkpoint restart, 71/29/13/15 checks.
+- Full `ctest -C Release`: 76/76. CPU-only configure
+  (`FT_VOX_GRAPHICS=OFF`): 54/54.
 
 Remaining manual validation before closing #306 (NOT executed here):
 
 - A positive delegated local-control authorization with a correctly enrolled
   local profile on the launcher machine — the isolated two-process proof can
   only verify the credential-boundary refusal.
-- Interactive GPU validation of the native screens: keyboard and mouse
-  navigation, large administrative roster scrolling (10+ players), endpoint
-  editing and text selection, and UI scaling at 100%, 150% and 200%.
+- Human inspection of the native screens on the GPU machine: administrative
+  roster scrolling with 10+ registered players, scrolling in favorites,
+  profiles and hosted worlds, endpoint editing with caret and text
+  selection, and a visual check of the three scale screenshots for clipping
+  or inaccessible controls.

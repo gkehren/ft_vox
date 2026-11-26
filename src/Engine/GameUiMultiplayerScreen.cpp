@@ -175,18 +175,23 @@ void GameUiSample::setMultiplayerView(MultiplayerView view)
 		m_mpAdminContextWorld = adminWorld;
 		m_mpAdminContextAuthorized = adminAuthorized;
 	}
-	// Draft lifecycle (corrections F06/F10): the automatic endpoint is adopted
-	// ONLY when its value changed and the player has not edited the draft. An
-	// unchanged view never reconstructs the field, so the caret, selection and
-	// IME composition survive every frame; an edited draft (its value no longer
-	// matches the last automatic one) survives navigation and session changes.
-	// An active composition is never interrupted (F10).
+	// Draft lifecycle (corrections F06/F10/F18): `m_joinEndpointAuto` is the
+	// last AUTOMATICALLY applied endpoint. A draft whose value no longer
+	// matches it was explicitly modified (a keyboard edit or a favorites or
+	// recent pick) and is never overwritten. While the field is actively
+	// edited — an IME composition or an active selection — the automatic
+	// synchronization is DEFERRED, not dropped: it retries once editing ends
+	// and the draft is still untouched, so the caret, the selection and the
+	// composition survive every frame.
 	const std::string endpointAuto = !view.endpoint.empty() ? view.endpoint :
 		(view.preferences.recent.empty() ? "127.0.0.1:7777" : client::formatEndpoint(view.preferences.recent.front()));
-	if (endpointAuto != m_joinEndpointAuto)
+	const bool editingEndpoint = !m_joinEndpoint.composition().empty() ||
+		(m_sdlEditor == &m_joinEndpoint &&
+			m_joinEndpoint.selectionStart() != m_joinEndpoint.selectionEnd());
+	if (m_joinEndpoint.value() == m_joinEndpointAuto && !editingEndpoint &&
+		m_joinEndpoint.value() != endpointAuto)
 	{
-		if (m_joinEndpoint.value() == m_joinEndpointAuto && m_joinEndpoint.composition().empty())
-			setText(m_joinEndpoint, endpointAuto);
+		setText(m_joinEndpoint, endpointAuto);
 		m_joinEndpointAuto = endpointAuto;
 	}
 	m_multiplayer = std::move(view);
@@ -194,6 +199,7 @@ void GameUiSample::setMultiplayerView(MultiplayerView view)
 		return;
 	m_mpInitialized = true;
 	setText(m_joinEndpoint, endpointAuto);
+	m_joinEndpointAuto = endpointAuto;
 	setText(m_hostPort, "7777");
 	setText(m_hostSlots, std::to_string(hosting::Options{}.playerSlots));
 	setText(m_hostRadius, std::to_string(hosting::Options{}.interestRadius));
@@ -227,7 +233,13 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		std::span<const std::string_view> labels, int rows) {
 		box.visibleRows = rows;
 		box.items = labels;
-		box.selection.select(box.selection.selected, static_cast<int>(labels.size()), rows);
+		// Correction F17: reconcile the selection and scroll bounds WITHOUT
+		// the per-frame reveal of select() — the offset keeps what the wheel
+		// left, the selected index only clamps when the collection changed,
+		// and a fresh list keeps its default first-row selection. select()
+		// stays reserved for explicit click and keyboard interaction, which
+		// reveal the chosen row.
+		box.selection.reconcile(static_cast<int>(labels.size()), rows);
 		m_widgets.add({id, slot(22.f + 23.f * static_cast<float>(rows)), label, {}, &box, !labels.empty()});
 	};
 	const auto refs = [](std::vector<std::string_view> &output, const auto &input) {
@@ -247,6 +259,17 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 			m_mpMessage = slot(height);
 		}
 	};
+	// Persistent status slot (correction F19): the live connection or
+	// supervisor state, painted BESIDE the transient operation feedback so an
+	// old error never masks the current state and a transient result never
+	// hides the status.
+	const auto status = [&](std::string_view message, float height = 50.f) {
+		if (!message.empty())
+		{
+			m_mpStatus.assign(message);
+			m_mpStatusMessage = slot(height);
+		}
+	};
 	const auto profile = [&] {
 		text(view.preferences.selectedProfile.empty() ? "Choose or create a profile" :
 			"Local profile  |  " + view.preferences.selectedProfile);
@@ -264,6 +287,8 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 	const bool canJoin = available && !view.preferences.selectedProfile.empty() && !joinTransitionInProgress(view.connection);
 	m_mpMessage = {};
 	m_mpDetail.clear();
+	m_mpStatusMessage = {};
+	m_mpStatus.clear();
 	m_mpText.clear();
 	if (m_mpListRevision != m_screens.revision())
 	{
@@ -289,7 +314,7 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 	case Screen::Multiplayer:
 		text("Multiplayer", 32.f);
 		connection();
-		detail(view.pending ? "Finishing the previous session..." :
+		status(view.pending ? "Finishing the previous session..." :
 			(view.connection && view.connection->detail ? view.connection->detail : ""));
 		button(Play, "Play", view.playable && available, style::ButtonVariant::Primary);
 		button(JoinPage, "Join server");
@@ -301,21 +326,23 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 	{
 		text("Join server", 32.f);
 		connection();
-		// Ordered feedback (corrections F03/F08/F15): a typed refusal, then
-		// the transient clipboard result — displayed independently of a
-		// historical connection error — then the join error, the transition
-		// status and the preferences error.
+		// Persistent status (correction F19): the live connection state stays
+		// visible; the transient feedback below cannot mask it.
+		std::string state;
+		if (view.pending)
+			state = "Finishing the previous session...";
+		else if (view.connection && view.connection->detail)
+			state = view.connection->detail;
+		else
+			state = view.preferencesError;
+		status(state, 50.f);
+		// Transient operation feedback: a typed refusal, the newer clipboard
+		// result, then an older join error (corrections F03/F15/F19).
 		std::string message{noticeText(view, FeedbackGroup::Join)};
 		if (message.empty() && !m_mpClipboard.empty())
 			message = m_mpClipboard;
 		if (message.empty() && !view.joinError.empty())
 			message = view.joinError;
-		if (message.empty() && view.pending)
-			message = "Finishing the previous session...";
-		if (message.empty() && view.connection && view.connection->detail)
-			message = view.connection->detail;
-		if (message.empty())
-			message = view.preferencesError;
 		detail(message, 50.f);
 		button(Play, "Play", view.playable && available);
 		if (view.disconnect)
@@ -358,12 +385,16 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		field(ProfileName, "New profile name", m_profileName);
 		button(CreateProfile, "Create profile", available && !m_profileName.value().empty());
 		detail(!noticeText(view, FeedbackGroup::Profiles).empty() ? std::string(noticeText(view, FeedbackGroup::Profiles)) :
-			(!view.joinError.empty() ? view.joinError : view.preferencesError));
+			view.joinError);
+		status(view.preferencesError);
 		break;
 	case Screen::HostServer:
 		text("Host server", 32.f);
+		// The supervisor state is always visible (correction F19); hosting
+		// operation errors render in their own slot below it.
+		status(view.hostMessage, 50.f);
 		detail(!noticeText(view, FeedbackGroup::Host).empty() ? std::string(noticeText(view, FeedbackGroup::Host)) :
-			(!m_mpError.empty() ? m_mpError : (!view.hostError.empty() ? view.hostError : view.hostMessage)), 56.f);
+			(!m_mpError.empty() ? m_mpError : view.hostError), 56.f);
 		if (active(view.hostState))
 		{
 			text(view.hostWorld);
@@ -493,15 +524,11 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 		text("Local administration", 32.f);
 		if (!authorized)
 		{
-			// A refusal produced while the channel was still verified stays
-			// visible after the authorization disappeared (correction F15):
-			// the player learns WHY the action failed, not just that the
-			// channel is gone.
-			const auto refusal = noticeText(view, FeedbackGroup::Admin);
-			detail(refusal.empty() ? std::string_view(view.adminChannelFailed ?
-				"Local administration channel unavailable." :
-				"Waiting for verified local permissions. Remote roles do not grant local control.") :
-				refusal);
+			// The channel state stays visible; the refusal produced before the
+			// authorization disappeared renders beside it (correction F19).
+			status(view.adminChannelFailed ? "Local administration channel unavailable." :
+				"Waiting for verified local permissions. Remote roles do not grant local control.");
+			detail(noticeText(view, FeedbackGroup::Admin));
 			break;
 		}
 		text("Local permission  |  " + std::string(localcontrol::label(admin->role)));

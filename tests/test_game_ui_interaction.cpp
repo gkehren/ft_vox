@@ -316,6 +316,26 @@ void layoutAndWidgets()
 	CHECK(!roster.any() && roster.first == 2, "clearing the selection preserves the scroll window");
 	roster.select(roster.selected + 1, 10, 4);
 	CHECK(roster.selected == 0 && roster.first == 0, "keyboard navigation starts from the first row and reveals it");
+	// Correction F17: bounds reconciliation keeps the wheel offset — the
+	// shared list helper no longer reveals the selected row every frame, and
+	// select() stays reserved for explicit interaction.
+	ListSelection shared;
+	shared.select(4, 6, 5);
+	shared.scroll(1, 6, 5);
+	CHECK(shared.first == 1 && shared.selected == 4, "the wheel browses beyond the selected row");
+	shared.reconcile(6, 5);
+	CHECK(shared.first == 1 && shared.selected == 4, "reconciliation preserves the offset and selection");
+	shared.reconcile(3, 5);
+	CHECK(shared.first == 0 && shared.selected == 2, "shrinkage clamps the offset and the selection");
+	shared.reconcile(0, 5);
+	CHECK(shared.first == 0 && shared.selected == 0, "an empty collection is safe");
+	ListSelection fresh;
+	fresh.reconcile(4, 3);
+	CHECK(fresh.selected == 0 && fresh.first == 0, "a fresh list keeps its default first-row selection");
+	ListSelection unselected;
+	unselected.clear();
+	unselected.reconcile(4, 3);
+	CHECK(!unselected.any(), "the explicit unselected state survives reconciliation");
 }
 
 void reusableBindings()

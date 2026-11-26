@@ -97,6 +97,13 @@ struct ListSelection
 	int first{}, selected{};
 	void scroll(int rows, int count, int visible);
 	void select(int index, int count, int visible);
+	/// Bounds reconciliation WITHOUT reveal (correction F17): keeps the
+	/// scroll offset, clamps the selected index to the rows that still exist
+	/// (a fresh list keeps its default first-row selection and an explicit
+	/// unselected state stays unselected) and clamps the offset to the valid
+	/// window. `select` stays reserved for explicit click and keyboard
+	/// interaction, which reveal the chosen row.
+	void reconcile(int count, int visible);
 	/// Explicit unselected state (corrections F01/F11): no row is highlighted
 	/// and the scroll window is PRESERVED so wheel browsing keeps working;
 	/// keyboard navigation starts from the first row. `select`/`scroll` keep
