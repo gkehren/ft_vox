@@ -88,6 +88,7 @@ public:
 private:
 	friend struct UiSpikeProbe;
 	friend struct GameUiBackendProbe;
+	friend struct EngineJoinProbe;
 
 	void handleWindowEvent(Uint32 type);
 	/// Re-bakes the face when the framebuffer density changed (issue #302 F11)

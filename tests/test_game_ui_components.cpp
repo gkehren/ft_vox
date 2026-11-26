@@ -189,12 +189,34 @@ void heldStackPlacementTest()
 	CHECK(dockedRect == glm::vec4(650, 410, 680, 440),
 		"clamping respects the docked game-view rectangle");
 
-	// Compact views: a view narrower than the cell collapses onto its edge
-	// without producing a negative or outside rectangle.
+	// Compact views: a view narrower than the cell shrinks the square instead
+	// of producing a negative or outside rectangle (PR #316 F10).
 	const Clip tiny{{10.f, 10.f, 40.f, 50.f}};
 	const auto tinyRect = rect(heldStackPlacement({25.f, 25.f}, cell, offset, tiny));
 	CHECK(tinyRect.x == 10.f && tinyRect.y >= 10.f && tinyRect.z <= 40.f && tinyRect.w <= 50.f,
 		"a view smaller than the cell keeps the stack at its clamped edge");
+
+	// F10: a viewport strictly smaller than the requested cell on both axes
+	// shrinks the square; the aspect ratio stays 1:1 and nothing leaves the view.
+	const Clip smaller{{10.f, 10.f, 35.f, 30.f}};
+	const auto smallerRect = rect(heldStackPlacement({22.f, 20.f}, cell, offset, smaller));
+	CHECK(smallerRect.z - smallerRect.x == 20.f && smallerRect.w - smallerRect.y == 20.f &&
+		smallerRect.x >= 10.f && smallerRect.y >= 10.f &&
+		smallerRect.z <= 35.f && smallerRect.w <= 30.f,
+		"a viewport strictly smaller than the cell shrinks the square and stays inside");
+
+	// F10: narrow and short viewports size the square to the missing axis and
+	// keep the other axis at the preferred anchor.
+	const Clip narrow{{0.f, 0.f, 20.f, 200.f}};
+	const auto narrowRect = rect(heldStackPlacement({10.f, 100.f}, cell, offset, narrow));
+	CHECK(narrowRect.z - narrowRect.x == 20.f && narrowRect.w - narrowRect.y == 20.f &&
+		narrowRect.x == 0.f && narrowRect.z <= 20.f && narrowRect.w <= 200.f,
+		"a narrow viewport shrinks the held stack to its width");
+	const Clip shortView{{0.f, 0.f, 200.f, 15.f}};
+	const auto shortRect = rect(heldStackPlacement({100.f, 8.f}, cell, offset, shortView));
+	CHECK(shortRect.z - shortRect.x == 15.f && shortRect.w - shortRect.y == 15.f &&
+		shortRect.y == 0.f && shortRect.z <= 200.f && shortRect.w == 15.f,
+		"a short viewport shrinks the held stack to its height");
 
 	CHECK(heldStackPlacement({0, 0}, 0.f, offset, view).empty() &&
 		heldStackPlacement({0, 0}, cell, offset, Clip{{10.f, 10.f, 5.f, 50.f}}).empty(),

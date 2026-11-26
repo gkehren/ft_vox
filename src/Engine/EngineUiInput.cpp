@@ -35,7 +35,12 @@ void Engine::cancelDeveloperInput()
 {
 	m_inputRouter.cancelDeveloper();
 	if (imgui)
+	{
 		imgui->cancelInput();
+		// F01 (round 2): the release path of a workspace, capture or session
+		// change also resets persistent keyboard ownership.
+		imgui->releaseKeyboardOwnership();
+	}
 }
 
 void Engine::cancelGameUiPointer()
@@ -112,6 +117,11 @@ void Engine::setInventoryOpen(bool open)
 {
 	if (m_playerUi)
 		m_playerUi->setInventoryOpen(open);
+	// F01 (round 2): a freshly opened native screen owns the keyboard —
+	// opening E clears the Developer UI latch (a real Developer UI owner —
+	// an editing field or a popup — re-latches itself next frame).
+	if (open && imgui)
+		imgui->releaseKeyboardOwnership();
 	m_inventoryResult.reset();
 	syncUiInput();
 }
@@ -184,13 +194,14 @@ void Engine::syncUiInput()
 		m_developerSuppressed = suppressed;
 		cancelDeveloperInput();
 	}
-	// F01 (#316): Developer UI ACTIVE input ownership (an open editor, an
-	// armed widget or a popup) forfeits an armed inventory gesture without
-	// waiting for the next event edge. Passive wantCaptureKeyboard — retained
-	// by mere hover focus — must not cancel a gesture the player is typing
-	// into the native screen, so only ownsActiveInput() gates here.
+	// F01 (#316): Developer UI keyboard ownership (an open editor, an
+	// armed widget, a popup or a latched navigation focus) forfeits an
+	// armed inventory gesture without waiting for the next event edge.
+	// Passive wantCaptureKeyboard — retained by mere hover focus — never
+	// latches ownership (round 2), so it cannot cancel a gesture the
+	// player is making in the native screen.
 	if (m_playerUi && inventoryPanelOpen() && developerUiAvailable() && !suppressed &&
-		imgui && imgui->ownsActiveInput())
+		imgui && imgui->ownsKeyboard())
 		m_playerUi->cancelInventoryGesture();
 	auto policy = inputContext();
 	const bool movement = policy.allowsMovement() && (!m_remote || mouseCaptured);
@@ -235,6 +246,11 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		case SDL_EVENT_WINDOW_MINIMIZED:
 			if (m_playerUi)
 				m_playerUi->cancelInventoryGesture();
+			// F01 (round 2): focus loss, hiding and minimization release
+			// keyboard ownership — the next focus owner gets a clean slate
+			// instead of a stale Developer UI latch.
+			if (imgui)
+				imgui->releaseKeyboardOwnership();
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
 		case SDL_EVENT_WINDOW_RESIZED:
@@ -274,17 +290,13 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		// transition so the captured mouse can be freed before Multiplayer >
 		// Reconnect (issue #303 F03). It changes only the host's cursor capture.
 		const bool captureShortcut = key == SDLK_C;
-		const bool closesInventory = back || (inventoryShortcut && policy.inventory);
-		// Passive Developer UI focus (WantCaptureKeyboard retained after the
-		// last click or editor closed) is neutralized for the keys of an open
-		// native screen — including its navigation — the contextual
-		// back/shortcut keys that open or close one — E in either direction,
-		// so a passively focused host panel can never swallow the inventory
-		// toggle — a real owner — an editing field, an active control or a
-		// popup — keeps them away (PR #316 F01).
-		if ((closesInventory || inventoryShortcut || policy.nativeScreen) && m_playerUi &&
-			!policy.devText && developerUiAvailable())
-			policy.devKeyboard = imgui->ownsActiveInput();
+		// F01 (#316, round 2): no special case here — inputContext()'s
+		// persistent ownership model already separates meaningful Developer
+		// UI signals (an active widget, a popup, an editing field or a
+		// visible navigation highlight) from a passively retained focus,
+		// so the contextual keys of an open native screen reach the player
+		// UI unless the Developer UI really owns them. InputContext
+		// (PlayerUiInteraction) keeps the modal and text-input priorities.
 		const auto candidate = policy.choose(InputKind::Key, global, back, inventoryShortcut, captureShortcut);
 		auto scan = event.key.scancode;
 		if (scan == SDL_SCANCODE_UNKNOWN)
@@ -350,6 +362,10 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		{
 			m_inputRouter.cancelKeyboard(DeveloperUi);
 			imgui->yieldKeyboard();
+			// F01 (round 2): the press is a meaningful move toward the
+			// native screen — clicking an inventory slot restores native
+			// keyboard navigation.
+			imgui->releaseKeyboardOwnership();
 		}
 		if (owner == PlayerUi && m_playerUi && !policy.nativeScreen)
 		{
@@ -391,6 +407,8 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		if (policy.inventory && (press || (event.type == SDL_EVENT_KEY_DOWN && (policy.devKeyboard || policy.devText)) ||
 			policy.devDialog || policy.devText))
 			m_playerUi->cancelInventoryGesture();
+		if (press)
+			imgui->retainKeyboardOwnership();
 		const bool takingTextInput = press && m_playerUi && m_playerUi->yieldTextInput(window);
 		if (takingTextInput)
 			m_inputRouter.cancelKeyboard(PlayerUi);

@@ -316,11 +316,24 @@ wire::ActionResult ServerHost::applyAction(sim::PlayerId player, const wire::Act
 	using Code = wire::ActionCode;
 	wire::ActionResult result{action.actionId, m_ticks, m_sim->world()->nextEditId(),
 		0, action.operation, Code::Unavailable};
+	const auto finishInventory = [&](wire::ActionResult reply, sim::PlayerId actor, size_t sessions) {
+		// The dedicated server audits anomalous inventory actions: a
+		// Forbidden here means the acting session's simulation record
+		// vanished while the transport session still lives (a resync or
+		// roster-restoration gap), which no client can diagnose alone.
+		if (reply.code == Code::Forbidden)
+			std::cerr << "[server] inventory action audit: forbidden kind="
+				<< unsigned(action.operation) << " slot=" << unsigned(action.slot)
+				<< " otherSlot=" << unsigned(action.otherSlot)
+				<< " actor=" << actor.value
+				<< " remoteSessions=" << sessions << '\n';
+		return reply;
+	};
 	switch (action.operation)
 	{
 	case Kind::Select:
 		result.code = actionCode(m_sim->selectHotbarSlot(player, action.slot));
-		return result;
+		return finishInventory(std::move(result), player, m_remotePlayers.size());
 	case Kind::DropOne:
 	case Kind::DropStack:
 	{
@@ -329,17 +342,17 @@ wire::ActionResult ServerHost::applyAction(sim::PlayerId player, const wire::Act
 		// Slot intents carry no aim. Use a fixed server-owned toss direction.
 		result.code = count == 0 ? Code::InventoryRejected
 			: actionCode(m_sim->dropFromSlot(player, action.slot, count, {0, 0, 1}));
-		return result;
+		return finishInventory(std::move(result), player, m_remotePlayers.size());
 	}
 	case Kind::Move:
 		result.code = actionCode(m_sim->moveStack(player, action.slot, action.otherSlot));
-		return result;
+		return finishInventory(std::move(result), player, m_remotePlayers.size());
 	case Kind::Swap:
 		result.code = actionCode(m_sim->swapStacks(player, action.slot, action.otherSlot));
-		return result;
+		return finishInventory(std::move(result), player, m_remotePlayers.size());
 	case Kind::SplitHalf:
 		result.code = actionCode(m_sim->splitStack(player, action.slot, action.otherSlot));
-		return result;
+		return finishInventory(std::move(result), player, m_remotePlayers.size());
 	case Kind::Break:
 	case Kind::Place:
 		break;

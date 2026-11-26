@@ -89,13 +89,13 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 	{
-		// F05 (#316): a real pointer press is the only pointer edge that pulls
-		// the presentation back to the pointer. Passive motion can still route
-		// here but never reaches this branch, so it cannot cause visual jumps.
-		m_inventoryModality = InventoryModality::Pointer;
 		const auto button = event.button.button;
+		// F11 (#316): only a supported pointer press is a meaningful pointer
+		// interaction — unsupported buttons never move the preview, and
+		// passive motion can still route here but never reaches this branch.
 		if (button != SDL_BUTTON_LEFT && button != SDL_BUTTON_RIGHT)
 			return {};
+		m_inventoryModality = InventoryModality::Pointer;
 		const auto control = inventoryControlAt({event.button.x, event.button.y});
 		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
@@ -119,6 +119,9 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 	{
 		if (!enabled || !selected.valid() || event.wheel.y == 0.f)
 			return {};
+		// F11 (#316): the wheel is a supported pointer interaction — it
+		// restores pointer anchoring.
+		m_inventoryModality = InventoryModality::Pointer;
 		const bool previous = (event.wheel.y > 0.f) != (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED);
 		const int delta = previous ? -1 : 1;
 		return {Command::Select, {(selected.index + delta + items::kHotbarSize) % items::kHotbarSize}};
@@ -131,20 +134,31 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 
 	auto focus = m_screens.focus();
 	const auto key = event.key.key;
-	// F05 (#316): a key delivered to the screen switches the presentation to
-	// keyboard anchoring. Switching DOES NOT reactivate or cancel an armed
-	// gesture — the drag cursor only changes its anchor point.
-	m_inventoryModality = InventoryModality::Keyboard;
 	const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 	const bool modified = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI | SDL_KMOD_ALT)) != 0;
-	if (modified)
+	// F11 (#316): an unsupported or inert keyboard event never moves the
+	// preview — modifier-only keys, chords and keys the screen does not
+	// consume leave the presentation on its current modality.
+	const auto modifierKey = key == SDLK_LSHIFT || key == SDLK_RSHIFT ||
+		key == SDLK_LCTRL || key == SDLK_RCTRL || key == SDLK_LALT || key == SDLK_RALT ||
+		key == SDLK_LGUI || key == SDLK_RGUI || key == SDLK_CAPSLOCK ||
+		key == SDLK_NUMLOCKCLEAR || key == SDLK_SCROLLLOCK;
+	if (modified || modifierKey)
 		return {};
 	if (enabled)
 	{
+		// F11: a supported activation key is a meaningful keyboard
+		// interaction — it also anchors the held stack to the focus.
 		if (!event.key.repeat && key >= SDLK_1 && key <= SDLK_9)
+		{
+			m_inventoryModality = InventoryModality::Keyboard;
 			return {Command::Select, {int(key - SDLK_1)}};
+		}
 		if (!event.key.repeat && key == SDLK_Q && m_inventoryView.canDrop && selected.valid())
+		{
+			m_inventoryModality = InventoryModality::Keyboard;
 			return {Command::DropOne, selected};
+		}
 	}
 	const bool dropEnabled = canDropStack(m_inventoryView);
 	if (key == SDLK_TAB)
@@ -161,6 +175,7 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 	else if (enabled && controlSlot(focus).valid())
 	{
 		const int col = (focus - 1) % kColumns;
+		const int previous = focus;
 		if (key == SDLK_LEFT && col > 0)
 			--focus;
 		if (key == SDLK_RIGHT && col < kColumns - 1)
@@ -169,11 +184,18 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 			focus -= kColumns;
 		if (key == SDLK_DOWN && focus <= kSlotCount - kColumns)
 			focus += kColumns;
+		// F11 (#316): an arrow that actually moves the focus is the
+		// navigation interaction that anchors the held stack; an arrow at a
+		// grid edge changes nothing and does not move the preview.
+		if (focus != previous || key == SDLK_TAB)
+			m_inventoryModality = InventoryModality::Keyboard;
 	}
 	m_screens.focus(focus);
 	if (!event.key.repeat && (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE))
 	{
 		m_inventoryPress.reset();
+		// F11: activation is a meaningful keyboard interaction.
+		m_inventoryModality = InventoryModality::Keyboard;
 		return activate(focus, shift);
 	}
 	return {};

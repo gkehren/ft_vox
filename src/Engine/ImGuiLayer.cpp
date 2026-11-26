@@ -394,6 +394,13 @@ void ImGuiLayer::beginFrame()
 		queue.resize(queue.Size - count);
 	}
 	ImGui::NewFrame();
+	// F01 (#316, round 2): latch persistent keyboard ownership from the
+	// signals of the previous frame — an active widget, a popup, or a
+	// visible keyboard-navigation highlight. A passively retained focus
+	// (an ImGui window merely stayed focused) shows none of these and
+	// never latches, so the native player screens keep their keys.
+	if (ownsActiveInput() || ImGui::GetIO().NavVisible)
+		m_devKeyboardOwner = true;
 	if (!nextOwner.empty())
 	{
 		const int offset = queue.Size;
@@ -469,10 +476,25 @@ bool ImGuiLayer::ownsActiveInput() const
 
 bool ImGuiLayer::ownsKeyboard() const
 {
-	// Both halves already respect the keyboard-yield boundary: a yield marks
-	// the release frame in wantCaptureKeyboard and gates ActiveId in
+	// F01 (#316, round 2): persistent ownership, not passive focus. The
+	// latch is set by meaningful signals at frame boundaries (see
+	// beginFrame) and by Developer UI presses; a bare WantCaptureKeyboard —
+	// kept after the last interaction was handed away — never owns by
+	// itself. Both halves respect the keyboard-yield boundary: a yield
+	// marks the release frame in wantCaptureKeyboard and gates ActiveId in
 	// ownsActiveInput, so neither reports ownership across the handoff.
-	return wantCaptureKeyboard() || ownsActiveInput();
+	return m_devKeyboardOwner || ownsActiveInput();
+}
+
+void ImGuiLayer::retainKeyboardOwnership()
+{
+	if (m_initialized)
+		m_devKeyboardOwner = true;
+}
+
+void ImGuiLayer::releaseKeyboardOwnership()
+{
+	m_devKeyboardOwner = false;
 }
 
 bool ImGuiLayer::pendingKeyboard() const

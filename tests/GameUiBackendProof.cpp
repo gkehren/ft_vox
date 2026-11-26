@@ -1399,6 +1399,20 @@ struct GameUiBackendProbe
 		present();
 		CHECK(held() && holdsHeldIcon({keyboardRect}) && int(sample.screens().focus()) == focusNext,
 			"passive pointer motion cannot jump the keyboard-anchored held stack");
+		// F11 (#316): inert keyboard events never move the preview. A
+		// modifier-only key is delivered but consumes nothing: focus pos,
+		// keyboard anchoring and the held stack stay exactly where they are.
+		tap(SDLK_LSHIFT);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) && int(sample.screens().focus()) == focusNext &&
+			sample.m_inventoryModality == gameui::InventoryModality::Keyboard,
+			"a modifier-only key leaves the keyboard anchoring untouched");
+		// F11: an unsupported pointer button never re-anchors the preview.
+		clickAt(middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))), SDL_BUTTON_X1);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) &&
+			sample.m_inventoryModality == gameui::InventoryModality::Keyboard,
+			"an unsupported mouse button leaves the keyboard anchoring untouched");
 		// F05: a completed click outside the grid is an invalid drop target: the
 		// armed gesture cancels without a command and the presentation returns
 		// to pointer anchoring.

@@ -2,14 +2,19 @@
 #include <Engine/GameUiSample.hpp>
 #include <Hosting/RoleCredentials.hpp>
 #include <Items/ItemRegistry.hpp>
+#include <World/MultiplayerSave.hpp>
+#include <World/WorldCheckpoint.hpp>
 #include <World/WorldCollisionView.hpp>
 
 #include "TestMain.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <optional>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -69,11 +74,12 @@ struct EngineJoinProbe
 		engine.applySessionRequests();
 		if (engine.m_remote)
 		{
-			// The closure runs two live windows side by side on a real
-			// desktop; whichever one the OS foregrounds must not gate the
-			// other's synthetic input. The session-lived window is held
-			// "focused" for the routing policy while it is pumping.
-			engine.windowFocused = true;
+			// F09 (#316): the scenario never overrides the host's focus
+			// bookkeeping. When the operator's desktop owns the focus, a
+			// controlled SDL focus event re-asserts it through the real
+			// input path instead of writing the flag behind SDL's back.
+			if (!engine.windowFocused)
+				assertWindowFocus();
 			if (const auto &trace = engine.m_remote->motionTrace; trace && trace->frames == 0)
 			{
 				CHECK(trace->sent == 0 && trace->failed == 0 && trace->lastInputSequence == 0 &&
@@ -88,18 +94,15 @@ struct EngineJoinProbe
 		// The closure spends minutes inside until() pumps; keep presenting
 		// through the real swapchain so the client window stays live (an
 		// unpumped WSI reads as frozen and its close/interaction exits the
-		// phase prematurely). Throttled to display cadence and guarded:
-		// before the join lands there is no remote projection to present.
-		if (engine.m_remote && Clock::now() - m_lastLivePresent >= std::chrono::milliseconds(16))
+		// phase prematurely). Throttled to display cadence, skipped while the
+		// window cannot show anything (minimized/hidden) — the game loop's
+		// own frame-skip policy for an unusable swapchain: F09 removed the
+		// silent catch, so any unexpected rendering error now surfaces.
+		if (engine.m_remote && !engine.m_windowHidden && !engine.m_windowMinimized &&
+			Clock::now() - m_lastLivePresent >= std::chrono::milliseconds(16))
 		{
 			m_lastLivePresent = Clock::now();
-			try
-			{
-				presentClosureFrame();
-			}
-			catch (const std::exception &)
-			{
-			}
+			presentClosureFrame();
 		}
 	}
 
@@ -229,18 +232,26 @@ struct EngineJoinProbe
 			"game exits after the final hosted checkpoint was committed");
 	}
 
-	void presentClosureFrame()
+	bool presentClosureFrame()
 	{
 		// Render through the same swapchain, mesh upload and ImGui paths as
-		// the game while the rendezvous drives the panel callbacks.
+		// the game while the rendezvous drives the panel callbacks. A frame
+		// the WSI cannot deliver (no viewport yet, or a failed acquire or
+		// present — minimized, occluded, desk-op out-of-date) is a skip, not
+		// an error: the game loop requests the swapchain recreation and
+		// continues; F09 removed the silent catch so unexpected rendering
+		// errors propagate.
 		int width = 0, height = 0;
 		SDL_GetWindowSizeInPixels(engine.window, &width, &height);
 		if (width <= 0 || height <= 0)
-			throw std::runtime_error("native smoke window has no Vulkan viewport");
+			return false;
 		engine.recreateSwapchainIfNeeded(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 		uint32_t image = 0;
 		if (!engine.frameCtx->beginFrame(*engine.swapchain, image))
-			throw std::runtime_error("native smoke could not acquire a swapchain image");
+		{
+			engine.requestSwapchainRecreate();
+			return false;
+		}
 		const auto frameIndex = engine.frameCtx->frameIndex();
 		if (engine.m_remote->projection)
 			engine.updateRemoteCamera();
@@ -257,16 +268,32 @@ struct EngineJoinProbe
 		engine.updateFrameUniforms(frameIndex, width, height, seconds);
 		engine.recordFrame(frameIndex, image, engine.uploadBudgetThisFrame);
 		if (!engine.frameCtx->submitAndPresent(*engine.swapchain, image))
-			throw std::runtime_error("native smoke could not present the frame");
+		{
+			engine.requestSwapchainRecreate();
+			return false;
+		}
 		++engine.frameNumber;
+		return true;
 	}
 
 	ActorWitness witness() const
 	{
+		// F07 (#316): transport.inventory() returns the optional BY VALUE.
+		// Binding a reference into the returned temporary (and range-for over
+		// its slots) reads destroyed storage — the 0xC0000005 this round
+		// chases. Every access takes an owned copy and reports liveness
+		// failures with their own diagnostic.
 		const auto &remote = *engine.m_remote;
-		const auto &inventory = *remote.transport.inventory();
+		if (!remote.welcome)
+			throw std::runtime_error("witness: the session has no welcome identity yet");
+		const auto inventory = remote.transport.inventory();
+		if (!inventory)
+			throw std::runtime_error("witness: the authoritative inventory is unavailable (session resync or departure)");
+		const auto *actor = remote.localPlayer();
+		if (!actor)
+			throw std::runtime_error("witness: the authoritative player is missing from the player snapshot");
 		return {remote.welcome->worldId, remote.welcome->player.value,
-			net::udp::playerFeet(*remote.localPlayer()), inventory.selected, inventory.slots};
+			net::udp::playerFeet(*actor), inventory->selected, inventory->slots};
 	}
 
 	void checkWitness(const fs::path &first, const fs::path &current, bool restoring)
@@ -339,8 +366,8 @@ struct EngineJoinProbe
 		}, "player did not walk in the authoritative snapshot");
 		engine.sendRemoteInput({});
 		until([&] {
-			const auto &velocity = engine.m_remote->localPlayer()->velocity;
-			return std::hypot(velocity[0], velocity[2]) < 0.1;
+			const auto *actor = engine.m_remote ? engine.m_remote->localPlayer() : nullptr;
+			return actor && std::hypot(actor->velocity[0], actor->velocity[2]) < 0.1;
 		}, "player did not settle after walking");
 		CHECK(true, "player moved and settled in authoritative snapshots");
 	}
@@ -359,11 +386,13 @@ struct EngineJoinProbe
 	}
 
 	/// One acknowledged break through the ordinary remote action path.
-	void breakRemoteAction(const char *what)
+	/// Returns the authoritative block that was mined.
+	glm::ivec3 breakRemoteAction(const char *what)
 	{
 		const auto hit = engine.remoteTarget();
 		if (!mineableAim(hit))
 			throw std::runtime_error(std::string(what) + ": no mineable target");
+		const auto mined = hit.block;
 		const auto inventoryBefore = witness().slots;
 		engine.sendRemoteVoxelAction(false);
 		CHECK(engine.playerHudView().activity == "Action pending" && witness().slots == inventoryBefore,
@@ -373,250 +402,210 @@ struct EngineJoinProbe
 		if (!feedback || std::string_view(feedback) != "Action accepted")
 			throw std::runtime_error(std::string(what) + ": owner break refused: " +
 				(feedback ? feedback : "no action feedback"));
-		until([&] { return materialAt(hit.block) == TextureType::AIR; },
+		until([&] { return materialAt(mined) == TextureType::AIR; },
 			"owner break did not publish through the graphical client");
+		return mined;
 	}
 
-	/// F02 (#316): the dedicated server has no item-grant admin seam, so the
-	/// matrix mines its budget with ordinary break actions. The player swims
-	/// to the bank like the single-block flow, then sweeps the bank floor
-	/// one station at a time: each station breaks every intact mineable
-	/// floor cell that rings the support under its feet and lies inside the
-	/// shared 1.5-block auto-pickup radius of the standing player, and the
-	/// miner walk-hops two cells along a serpentine row to the next one.
-	/// The support cell itself is never broken, so the sweep needs no
-	/// descent — the authoritative body parks on the bank floor and every
-	/// broken cell stays within its pickup radius. The sweep stops once the
-	/// confirmed totals hold `goal` units of one kind — the exact-1
-	/// increments pin the capped pile plus its 1-unit remainder — while the
-	/// bank topsoil always yields a second material for the swap row along
-	/// the way.
-	glm::ivec3 mineForMatrix(uint32_t goal, const std::function<void(const glm::ivec3 &)> &announce = {})
+	// -------------------------------------------------------------------------
+	// Deterministic inventory fixture (PR #316 F09). The dedicated server has no
+	// item-grant seam, so the known inventories are prepared through the
+	// ordinary persistence path: a graceful stop commits the player roster, the
+	// committed players.state is rewritten with the fixture stacks using the
+	// worldsave encoders (the exact records the restart validator reads) and
+	// the restart restores them as ordinary saved players. No debug messages,
+	// no server-authority bypass, no mined budget.
+	static constexpr char kFixtureWorld[] = "Closure loopback";
+	static constexpr items::ItemId kMaterialA = items::ItemId::Cobblestone;
+	static constexpr items::ItemId kMaterialB = items::ItemId::OakPlanks;
+	static constexpr items::ItemId kGuestItem = items::ItemId::Dirt;
+
+	static constexpr items::ItemStack stackOf(items::ItemId item, uint16_t count)
 	{
-		engine.camera.setYawPitch(0.f, -35.f);
-		until([&] {
-			if (mineableAim(engine.remoteTarget()))
-				return true;
-			engine.sendRemoteInput({.move = {1, 0}, .swimUp = true});
-			return false;
-		}, "matrix mining did not reach the bank topsoil");
-		engine.sendRemoteInput({});
-		until([&] {
-			const auto &actor = *engine.m_remote->localPlayer();
-			return (actor.flags & net::wire::PlayerState::grounded) &&
-				std::hypot(actor.velocity[0], actor.velocity[2]) < 0.1;
-		}, "matrix miner did not settle at the bank");
-		glm::ivec3 firstCell{};
-		bool done = false;
-		std::vector<glm::ivec3> deadCells;
-		const auto kindTotal = [&](items::ItemId item) {
-			uint32_t total = 0;
-			for (const auto &stack : engine.m_remote->transport.inventory()->slots)
-				if (stack.item == item)
-					total += stack.count;
-			return total;
-		};
-		const auto totalUnits = [&] {
-			uint32_t total = 0;
-			for (const auto &stack : engine.m_remote->transport.inventory()->slots)
-				total += stack.count;
-			return total;
-		};
-		// Neighborhood shaft (PR #316 F02): the miner breaks the 3x3 cells
-		// around its feet at each level — every one of them lies inside the
-		// shared 1.5-block auto-pickup radius — takes the cell below last and
-		// falls one level. ~8-14 levels assemble goal units above bedrock
-		// whatever the spawn's column depth; the topsoil levels supply the
-		// second material the swap row needs.
-		const auto feetOf = [&] {
-			const auto &f = engine.m_remote->localPlayer()->feet;
-			return glm::ivec3(int(std::floor(f[0])), int(std::floor(f[1] + 0.05)),
-				int(std::floor(f[2])));
-		};
-		const auto withinPickup = [&](const glm::ivec3 &cell) {
-			const auto &f = engine.m_remote->localPlayer()->feet;
-			const glm::dvec3 center = glm::dvec3{cell} + glm::dvec3{0.5, 0.5, 0.5};
-			return glm::length(center - glm::dvec3{f[0], f[1], f[2]}) <= 1.45;
-		};
-		const auto skip = [&](const glm::ivec3 &, char) {
-		};
-		const auto mineCell = [&](const glm::ivec3 &target) {
-			if (done)
-				return;
-			if (!withinPickup(target))
-				return skip(target, 'w');
-			if (std::find(deadCells.begin(), deadCells.end(), target) != deadCells.end())
-				return skip(target, 'd');
-			const auto material = materialAt(target);
-			if (!material || *material == TextureType::AIR ||
-				items::dropForBlock(*material).isEmpty())
-				return skip(target, 'm');
-			// Aim at the cell centre; the ray may first clip a neighbouring
-			// cell, which is broken instead only while it stays inside the
-			// shared pickup radius.
-			const glm::dvec3 eye = glm::dvec3{engine.camera.getPosition()};
-			const glm::dvec3 d = glm::dvec3{target} + glm::dvec3{0.5, 0.5, 0.5} - eye;
-			const float horizontal = float(std::hypot(d.x, d.z));
-			engine.camera.setYawPitch(float(glm::degrees(std::atan2(d.z, d.x))),
-				float(glm::degrees(std::atan2(d.y, horizontal))));
-			auto hit = engine.remoteTarget();
-			const glm::ivec3 mine = (hit.hit && withinPickup(hit.block) &&
-				(hit.block == target || mineableAim(hit))) ? hit.block : target;
-			if (firstCell == glm::ivec3{})
-				firstCell = mine;
-			const auto inventoryBefore = witness().slots;
-			engine.sendRemoteVoxelAction(false);
-			CHECK(engine.playerHudView().activity == "Action pending" && witness().slots == inventoryBefore,
-				"submitted remote break exposes pending feedback without a predicted stack");
-			until([&] { return !engine.m_remote->actionPending; },
-				"matrix break was not acknowledged");
-			const auto *feedback = engine.m_remote->feedback;
-			// The authoritative trace can disagree with the client view on
-			// fluid/deco cells; a refused cell is written off and the rest
-			// of the neighbourhood keeps the budget flowing.
-			if (!feedback || std::string_view(feedback) != "Action accepted")
-			{
-				deadCells.push_back(target);
-				return;
-			}
-			until([&] { return materialAt(mine) == TextureType::AIR; },
-				"owner break did not publish through the graphical client");
-			if (announce)
-				announce(firstCell);
-			// Resync, pickup and settle serialize before the next break. The
-			// pickup wait is bounded and not fatal: a drop can fall through
-			// a previously mined cell of the sweep and land outside the
-			// shared pickup radius; the budget just keeps mining.
-			until([&] { return engine.m_remote->ready(); },
-				"player terrain did not resynchronize after a matrix break",
-				std::chrono::seconds(90));
-			{
-				const auto before = totalUnits();
-				const auto pickupDeadline = Clock::now() + std::chrono::seconds(8);
-				while (totalUnits() <= before && Clock::now() < pickupDeadline)
-				{
-					pump();
-					std::this_thread::sleep_for(4ms);
-				}
-			}
-			until([&] {
-				const auto &actor = *engine.m_remote->localPlayer();
-				return (actor.flags & net::wire::PlayerState::grounded) &&
-					std::hypot(actor.velocity[0], actor.velocity[2]) < 0.1;
-			}, "matrix miner did not settle");
-			uint32_t largest = 0;
-			for (const auto &stack : engine.m_remote->transport.inventory()->slots)
-			{
-				if (stack.isEmpty())
-					continue;
-				const auto total = kindTotal(stack.item);
-				if (total > largest)
-					largest = total;
-			}
-			// Every accepted break adds exactly one unit, so the largest
-			// kind crosses the goal without overshooting it and the matrix
-			// always finds its capped pile plus 1-unit remainder. Lost drops
-			// (see the pickup note above) only postpone the crossing.
-			if (largest >= goal)
-				done = true;
-		};
-		// Neighborhood sweep (PR #316 F02): the miner breaks the floor cells
-		// ringing its support — every one of them lies inside the shared
-		// 1.5-block auto-pickup radius — then walk-hops two cells along a
-		// serpentine row. ~18 stations assemble the goal units above the
-		// bank floor; the floor topsoil supplies the second material the
-		// swap row needs.
-		static constexpr glm::ivec3 ring[] = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1},
-			{1, 0, 1}, {1, 0, -1}, {-1, 0, 1}, {-1, 0, -1}};
-		bool eastward = true;
-		for (int station = 0; !done && station < 60; ++station)
-		{
-			const auto base = feetOf() + glm::ivec3{0, -1, 0};
-			for (const auto &side : ring)
-				mineCell(base + side);
-			if (done)
-				break;
-			bool advanced = false;
-			try
-			{
-				// Jump-walk: the sweep drifts down into its own mined
-				// trenches, so hops clear the one-block steps a plain walk
-				// would grind against.
-				walk(eastward ? glm::dvec2{2, 0} : glm::dvec2{-2, 0}, true);
-				advanced = true;
-			}
-			catch (const std::exception &)
-			{
-			}
-			if (!advanced)
-			{
-				eastward = !eastward;
-				try
-				{
-					walk({0, 2}, true);
-					advanced = true;
-				}
-				catch (const std::exception &)
-				{
-				}
-			}
-			// A walk hop keeps the same floor layer: the support under the
-			// new feet has not been broken yet (the sweep rings the support,
-			// never breaks it), so the mining plane only shifts sideway.
-		}
-		if (!done)
-		{
-			std::string dump;
-			for (const auto &stack : engine.m_remote->transport.inventory()->slots)
-				if (!stack.isEmpty())
-					dump += " " + std::to_string(int(stack.item)) + "x" + std::to_string(stack.count);
-			throw std::runtime_error("matrix could not assemble its " +
-				std::to_string(goal) + "-unit budget;confirmed kinds:" +
-				(dump.empty() ? " none" : dump));
-		}
-		return firstCell;
+		return {item, count};
 	}
 
-	/// F02 (#316): the full inventory operation matrix driven through the native
-	/// screen on the two-client hosted server. Every op passes the one planner
-	/// path to a single wire action, checks the authoritative totals and — for
-	/// drops — the world items they create. Mined budget: one capped 64-unit
-	/// pile plus a 1-unit remainder of the shaft's stone (65 = a partial merge
-	/// needs a source/destination pair above the 64 cap) and topsoil junk for
-	/// the swap.
+	struct FixtureInventory
+	{
+		std::array<items::ItemStack, items::kInventorySize> slots{};
+		int selected{};
+	};
+
+	FixtureInventory ownerFixture() const
+	{
+		FixtureInventory fixture;
+		fixture.slots[0] = stackOf(kMaterialA, 64); // merge + split row
+		fixture.slots[1] = stackOf(kMaterialA, 40); // partial-merge donor
+		fixture.slots[2] = stackOf(kMaterialA, 5);  // whole move + odd split
+		fixture.slots[3] = stackOf(kMaterialB, 8);  // swap + drop stack
+		fixture.selected = 3;
+		return fixture;
+	}
+
+	FixtureInventory guestFixture() const
+	{
+		FixtureInventory fixture;
+		fixture.slots[12] = stackOf(kGuestItem, 8); // distinct private state
+		fixture.selected = 6;
+		return fixture;
+	}
+
+	void rewriteCommittedRoster(const fs::path &worldDir, uint32_t ownerActorValue) const
+	{
+		// In checkpoint mode the restore source is the ACTIVE committed
+		// generation, not the loose baseline files: rewrite the roster there
+		// and keep the commit manifest's roster checksum consistent.
+		const auto checkpointsDir = worldDir / "checkpoints";
+		const auto manifestPath = checkpointsDir / "manifest";
+		worldsave::CheckpointManifest manifest;
+		const auto commitPoint = readFileBytes(manifestPath);
+		CHECK(commitPoint && worldsave::decodeCheckpointManifest(commitPoint->data(),
+			commitPoint->size(), manifest) == worldsave::SaveStatus::Ok &&
+			manifest.committedGeneration > 0,
+			"the fixture world exposes a valid committed checkpoint manifest");
+		const auto path = checkpointsDir /
+			("generation-" + std::to_string(manifest.committedGeneration)) / worldsave::kRosterFile;
+		worldsave::PlayerRoster roster;
+		CHECK(rosterExists(path) && worldsave::readPlayerRoster(path, roster) == worldsave::SaveStatus::Ok &&
+			roster.players.size() == 2,
+			"the committed fixture world exposes the roster of both joined actors");
+		const auto ownerActor = sim::PlayerId{ownerActorValue};
+		const auto owner = ownerFixture();
+		const auto guest = guestFixture();
+		bool ownerWritten = false, guestWritten = false;
+		for (auto &player : roster.players)
+		{
+			const bool isOwner = player.id.value == ownerActor.value;
+			const auto &source = isOwner ? owner.slots : guest.slots;
+			for (size_t slot = 0; slot < source.size(); ++slot)
+			{
+				const auto &stack = source[slot];
+				player.inventory.slots[slot] = {static_cast<uint16_t>(stack.item), stack.count};
+			}
+			player.inventory.selectedSlot = static_cast<uint8_t>(
+				(isOwner ? owner : guest).selected);
+			ownerWritten |= isOwner;
+			guestWritten |= !isOwner;
+		}
+		CHECK(ownerWritten && guestWritten,
+			"the fixture rewrite binds a distinct private inventory to each actor");
+		const auto encoded = worldsave::encodePlayerRoster(roster);
+		auto pending = path;
+		pending += ".fixture";
+		{
+			std::ofstream out(pending, std::ios::binary);
+			out.write(reinterpret_cast<const char *>(encoded.data()),
+				static_cast<std::streamsize>(encoded.size()));
+			out.close();
+			if (!out)
+				throw std::runtime_error("could not stage the fixture roster");
+		}
+		fs::rename(pending, path);
+
+		manifest.rosterChecksum = worldsave::fnv1a64(encoded.data(), encoded.size());
+		const auto manifestPatch = worldsave::encodeCheckpointManifest(manifest);
+		auto manifestPending = manifestPath;
+		manifestPending += ".fixture";
+		{
+			std::ofstream out(manifestPending, std::ios::binary);
+			out.write(reinterpret_cast<const char *>(manifestPatch.data()),
+				static_cast<std::streamsize>(manifestPatch.size()));
+			out.close();
+			if (!out)
+				throw std::runtime_error("could not stage the fixture manifest");
+		}
+		fs::rename(manifestPending, manifestPath);
+	}
+
+	static std::optional<std::vector<uint8_t>> readFileBytes(const fs::path &path)
+	{
+		std::ifstream in(path, std::ios::binary);
+		if (!in)
+			return std::nullopt;
+		std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+			std::istreambuf_iterator<char>());
+		if (!in)
+			return std::nullopt;
+		return bytes;
+	}
+
+	static bool rosterExists(const fs::path &path)
+	{
+		std::error_code error;
+		return fs::is_regular_file(path, error);
+	}
+
+	/// F07 (#316): every confirmed-inventory access takes an owned snapshot
+	/// out of the by-value optional; a missing snapshot is a terminal failure
+	/// with its own diagnostic (polls read the optional directly instead of
+	/// dereferencing it).
+	std::array<items::ItemStack, items::kInventorySize> confirmedSlots() const
+	{
+		const auto inventory = engine.m_remote->transport.inventory();
+		if (!inventory)
+			throw std::runtime_error("the authoritative inventory is unavailable (resync or departure)");
+		return inventory->slots;
+	}
+
+	/// F09: the full deterministic inventory operation matrix, driven through
+	/// the native screen on the two-client hosted server. The fixture put
+	/// known piles in known slots, so every row asserts exact source and
+	/// destination contents instead of scanning mined piles: whole move (+
+	/// duplicate input), odd split, merge, partial merge, swap, drop one,
+	/// drop stack, rejected drop, with the F04 pending feedback, identified
+	/// world entities, pickup restoration and item conservation verified
+	/// along the way.
 	void hostedInventoryMatrix()
 	{
 		const auto workspace = engine.developerWorkspaceVisible();
 		engine.setDeveloperWorkspaceVisible(false);
 		focus();
-		// Open/close through the same toggle the E shortcut calls: the
-		// windowed closure's imgui event handoff can hold stale pending
-		// focus the routing policy correctly keeps for the developer UI,
-		// and F01's toggle routing is covered by the solo proof and the
-		// routing unit tests.
 		engine.setInventoryOpen(true);
 		until([&] { return engine.inventoryPanelOpen(); },
 			"hosted inventory matrix could not open the native screen",
 			std::chrono::seconds(5));
-		// A terrain resync transient left over from the sweep disables
-		// submissions; the gestures only run once the view is ready.
+		// A terrain resync transient disables submissions; the gestures only
+		// run once the view is ready AND the native screen rebuilt its layout
+		// during a rendered frame (the slot geometry is published by the paint
+		// step, so clicking before the first paint can hit nothing).
 		until([&] {
 			const auto view = engine.playerInventoryView();
 			return view.enabled() && view.snapshot.has_value();
-		}, "hosted inventory did not become ready for native gestures");
+		}, "hosted inventory did not become ready for native gestures",
+			std::chrono::seconds(20));
+		until([&] {
+			const auto &built = engine.m_playerUi->m_inventoryLayout;
+			const auto ready = [&](int slot) {
+				const auto rect = built.slot({slot});
+				return rect.rect.z - rect.rect.x > 0.5f && rect.rect.w - rect.rect.y > 0.5f;
+			};
+			return ready(2) && ready(10);
+		}, "the native inventory did not publish its slot geometry",
+			std::chrono::seconds(5));
+
 		int width = 0, height = 0;
 		SDL_GetWindowSize(engine.window, &width, &height);
 		const auto layout = gameui::inventoryLayout({{0, 0, float(width), float(height)}},
 			gameui::style::baseline(), engine.m_playerUi->playerUiScale());
 		const auto fire = [&](glm::vec2 point, Uint8 button) {
-			// pump() holds the window "focused" only while it pumps; the
-			// operator shares this desktop, so a real focus change or a
-			// minimization arriving between pumps must not disable the
-			// synthetic gestures (the routing policy evaluates
-			// InputContext per event batch).
-			engine.windowFocused = true;
-			engine.m_windowHidden = false;
-			engine.m_windowMinimized = false;
+			// F09 (#316): the harness never overrides the host's focus or
+			// window state — the gesture re-asserts focus through a real SDL
+			// focus event, and a hidden or minimized window is the failure
+			// rather than a condition to paper over.
+			if (!engine.windowFocused)
+				assertWindowFocus();
+			if (engine.m_windowHidden || engine.m_windowMinimized)
+				throw std::runtime_error("the inventory gesture ran into a hidden or minimized window");
+			// Mirror the solo proof's real-input pattern: warp the OS pointer
+			// and deliver a motion event before the down, so the screen sees
+			// the hover state a human click carries.
+			SDL_WarpMouseInWindow(engine.window, point.x, point.y);
+			SDL_Event motionEvent{};
+			motionEvent.type = SDL_EVENT_MOUSE_MOTION;
+			motionEvent.motion.windowID = SDL_GetWindowID(engine.window);
+			motionEvent.motion.x = point.x;
+			motionEvent.motion.y = point.y;
+			SDL_PushEvent(&motionEvent);
 			for (const auto type : {SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP})
 			{
 				SDL_Event event{};
@@ -628,35 +617,30 @@ struct EngineJoinProbe
 				SDL_PushEvent(&event);
 			}
 			engine.handleEvents();
+			// The screen resolves gestures during its update/paint step, so
+			// the event batch advances a rendered frame exactly like the
+			// solo proof's present().
+			presentClosureFrame();
 		};
 		const auto click = [&](int slot, Uint8 button) {
 			const auto rect = layout.slot({slot});
 			fire(glm::vec2(rect.rect) + gameui::size(rect) * 0.5f, button);
 		};
-		const auto slots = [&] { return engine.m_remote->transport.inventory()->slots; };
+		const auto slots = [&] { return confirmedSlots(); };
 		const auto at = [&](int slot) { return slots()[size_t(slot)]; };
-		const auto itemTotal = [&](items::ItemId item) {
+		// Tolerant reads for polls: a resync missing the confirmed inventory
+		// keeps polling instead of crashing into destroyed storage (F07).
+		const auto totalOf = [&](items::ItemId item) -> std::optional<uint32_t> {
+			const auto inventory = engine.m_remote->transport.inventory();
+			if (!inventory)
+				return std::nullopt;
 			uint32_t total = 0;
-			for (const auto &stack : slots())
+			for (const auto &stack : inventory->slots)
 				if (stack.item == item)
 					total += stack.count;
 			return total;
 		};
-		const auto pileOf = [&](items::ItemId item, uint32_t count) {
-			const auto &current = slots();
-			for (int s = 0; s < items::kInventorySize; ++s)
-				if (current[size_t(s)].item == item && !current[size_t(s)].isEmpty() &&
-					current[size_t(s)].count == count)
-					return s;
-			return -1;
-		};
-		const auto emptyMainSlot = [&]() -> int {
-			const auto &current = slots();
-			for (int s = items::kInventorySize - 1; s >= int(items::kHotbarSize); --s)
-				if (current[size_t(s)].isEmpty())
-					return s;
-			throw std::runtime_error("matrix ran out of empty main slots");
-		};
+		const auto itemTotal = [&](items::ItemId item) { return *totalOf(item); };
 		const auto settle = [&](std::string_view feedback, const char *what) {
 			until([&] { return !engine.m_remote->actionPending; }, what);
 			const auto *published = engine.m_remote->feedback;
@@ -666,227 +650,388 @@ struct EngineJoinProbe
 			CHECK(!engine.m_remote->actionPending && !engine.m_remote->pendingInventoryAction,
 				"the acknowledged action clears its pending slots");
 		};
-		const auto worldStacks = [&] {
-			std::vector<items::ItemStack> stacks;
-			if (const auto &snapshot = engine.m_remote->transport.itemSnapshots().current)
+		// F09 §4: world entities are identified by their entity id against a
+		// baseline snapshot, and consummation waits on both channels — the
+		// confirmed inventory change AND the entity leaving the world —
+		// independently.
+		const auto itemIdSet = [&] {
+			std::vector<uint64_t> ids;
+			const auto &snapshot = engine.m_remote->transport.itemSnapshots().current;
+			if (snapshot)
 				for (const auto &item : std::span(snapshot->items).first(snapshot->count))
-					stacks.push_back(item.stack);
-			return stacks;
+					ids.push_back(item.id);
+			std::ranges::sort(ids);
+			return ids;
+		};
+		const auto newWorldItems = [&](const std::vector<uint64_t> &beforeIds) {
+			std::vector<std::pair<uint64_t, items::ItemStack>> spawned;
+			const auto &snapshot = engine.m_remote->transport.itemSnapshots().current;
+			if (snapshot)
+				for (const auto &item : std::span(snapshot->items).first(snapshot->count))
+					if (!std::ranges::binary_search(beforeIds, item.id))
+						spawned.emplace_back(item.id, item.stack);
+			return spawned;
+		};
+		// F09 §4: an action acknowledgment and the corresponding world item
+		// snapshot do not arrive simultaneously — the identified entity is
+		// awaited on its own channel before its contents are asserted.
+		const auto awaitWorldItems = [&](const std::vector<uint64_t> &beforeIds, const char *what) {
+			std::vector<std::pair<uint64_t, items::ItemStack>> spawned;
+			until([&] {
+				spawned = newWorldItems(beforeIds);
+				return !spawned.empty();
+			}, what, std::chrono::seconds(15));
+			return spawned;
+		};
+		const auto itemsGone = [&](const std::vector<std::pair<uint64_t, items::ItemStack>> &tracked) {
+			const auto &snapshot = engine.m_remote->transport.itemSnapshots().current;
+			if (!snapshot)
+				return false;
+			for (const auto &[trackedId, trackedStack] : tracked)
+				for (const auto &item : std::span(snapshot->items).first(snapshot->count))
+					if (item.id == trackedId)
+						return false;
+			return true;
+		};
+		const auto waitPickupRestored = [&](const std::vector<std::pair<uint64_t, items::ItemStack>> &dropped,
+			items::ItemId item, uint32_t during, const char *what) {
+			uint32_t total = 0;
+			for (const auto &entry : dropped)
+				total += entry.second.count;
+			// Steering state: obstacles (including the excavated edit cell)
+			// block the straight walk, so stagnation rotates the bearing and
+			// hops, like the disjoint mining separation hop pattern.
+			glm::dvec2 lastFeet{std::numeric_limits<float>::max(),
+				std::numeric_limits<float>::max()};
+			int stagnant = 0;
+			int attempts = 0;
+			try
+			{
+				until([&] {
+					if (const auto confirmed = totalOf(item);
+						itemsGone(dropped) && confirmed && *confirmed == during + total)
+					{
+						engine.sendRemoteInput({});
+						return true;
+					}
+					// Steer the actor toward the tracked drop: a thrown stack
+					// can land just outside the 1.5-block shared pickup radius,
+					// and auto-pickup needs the feet inside it. The wire entity
+					// motion is a /64 fixed-point of the world position.
+					const auto &snapshot = engine.m_remote->transport.itemSnapshots().current;
+					glm::dvec2 steer{};
+					if (snapshot)
+					{
+						const auto *actor = engine.m_remote->localPlayer();
+						glm::dvec3 feet{};
+						if (actor)
+							feet = {actor->feet[0], actor->feet[1], actor->feet[2]};
+						double best = std::numeric_limits<double>::max();
+						glm::dvec3 itemPosition{};
+						for (const auto &itemEntity : std::span(snapshot->items).first(snapshot->count))
+						{
+							if (std::ranges::find(dropped, itemEntity.id, &std::pair<uint64_t, items::ItemStack>::first) == dropped.end())
+								continue;
+							const glm::dvec3 position{double(itemEntity.motion.position[0]) / 64.0,
+								double(itemEntity.motion.position[1]) / 64.0,
+								double(itemEntity.motion.position[2]) / 64.0};
+							if (actor)
+							{
+								if (const double distance = glm::distance(feet, position); distance < best)
+								{
+									best = distance;
+									itemPosition = position;
+								}
+							}
+							else if (!std::isfinite(best))
+							{
+								itemPosition = position;
+							}
+						}
+						const glm::dvec2 delta{itemPosition.x - feet.x, itemPosition.z - feet.z};
+						if (glm::length(delta) > 1e-6)
+							steer = delta / glm::length(delta);
+						// Stagnation: hop and rotate the bearing.
+						const glm::dvec2 feetFlat{float(feet.x), float(feet.z)};
+						if (glm::distance(feetFlat, lastFeet) < 0.15)
+						{
+							if (++stagnant >= 40)
+							{
+								const bool left = attempts % 2 == 0;
+								const double turn = left ? 0.8 : -0.8;
+								steer = {steer.x * std::cos(turn) - steer.y * std::sin(turn),
+									steer.x * std::sin(turn) + steer.y * std::cos(turn)};
+								stagnant = 0;
+								++attempts;
+							}
+						}
+						else
+						{
+							stagnant = 0;
+							lastFeet = feetFlat;
+						}
+					}
+					if (glm::length(steer) > 1e-6)
+						engine.sendRemoteInput({.move = steer, .jumpPressed = stagnant > 20 || attempts > 8});
+					return false;
+				}, what, std::chrono::seconds(60));
+			}
+			catch (const std::exception &)
+			{
+				engine.sendRemoteInput({});
+				const auto &snapshot = engine.m_remote->transport.itemSnapshots().current;
+				std::cout << "pickup-restore diagnostics: worldCount="
+					<< (snapshot ? snapshot->count : 0xffffffffu);
+				if (snapshot)
+					for (const auto &itemEntity : std::span(snapshot->items).first(snapshot->count))
+						std::cout << " {id=" << itemEntity.id << ",item="
+							<< static_cast<uint32_t>(itemEntity.stack.item)
+							<< ",count=" << itemEntity.stack.count
+							<< ",pos=" << itemEntity.motion.position[0] << ','
+							<< itemEntity.motion.position[1] << ',' << itemEntity.motion.position[2] << "}";
+				const auto *actor = engine.m_remote->localPlayer();
+				if (actor)
+					std::cout << " ownerFeet=" << actor->feet[0] << ',' << actor->feet[1] << ','
+						<< actor->feet[2];
+				const auto confirmed = totalOf(item);
+				std::cout << " confirmed=" << (confirmed ? std::to_string(*confirmed) : "none")
+					<< " want " << during + total << std::endl;
+				std::cout.flush();
+				throw;
+			}
+		};
+		const auto kindTotal = [&](const char *what) {
+			uint32_t counted = 0;
+			for (const auto &stack : slots())
+			{
+				if (stack.item == kMaterialA)
+					counted += stack.count;
+				else if (stack.item == kMaterialB)
+					counted += stack.count;
+				else if (!stack.isEmpty())
+					throw std::runtime_error(std::string(what) + ": unexpected material entered the inventory");
+			}
+			CHECK(counted == 117, what);
 		};
 
-		// The mined budget is whatever the sweep yielded: exactly one stackable
-		// kind at 65 units (a capped 64 pile plus a 1-unit remainder — a
-		// partial merge needs a pair above the 64 cap) plus second-material
-		// topsoil junk for the swap row.
-		items::ItemId cob = items::ItemId::None;
-		for (const auto &stack : slots())
+		// The fixture is asserted verbatim before the first row: anything else
+		// is a fixture bug, not a matrix result.
+		const auto fixture = ownerFixture();
+		const auto restored = slots();
+		const int restoredSelected = witness().selected;
+		if (restored != fixture.slots || restoredSelected != fixture.selected)
 		{
-			if (stack.isEmpty())
-				continue;
-			if (itemTotal(stack.item) == 65)
-				cob = stack.item;
+			std::ostringstream diagnostic;
+			diagnostic << "the fixture restart restores the owner's exact known piles and selection;"
+				<< " restored selected=" << restoredSelected << " wanted " << fixture.selected;
+			for (size_t slot = 0; slot < fixture.slots.size(); ++slot)
+				diagnostic << " [" << slot << "] got {"
+					<< static_cast<uint32_t>(restored[slot].item) << ',' << restored[slot].count
+					<< "} want {" << static_cast<uint32_t>(fixture.slots[slot].item) << ','
+					<< fixture.slots[slot].count << '}';
+			throw std::runtime_error(diagnostic.str());
 		}
-		if (cob == items::ItemId::None)
-			throw std::runtime_error("matrix budget misses its 65-unit material pile");
 
-		// M1 — whole move: the 1-unit remainder pile changes home entirely; a
-		// second completed gesture fired while the first awaits the
-		// authoritative update is refused by the single-action-in-flight
-		// policy and never runs (duplicate input row).
+		// M1 — whole move (F08: pending state validated BEFORE the ack,
+		// confirmed state AFTER): a repeated submission is refused by the
+		// single-action-in-flight policy, the pending metadata stays exactly
+		// the armed one, and exactly one transfer executes.
 		{
-			const auto source = pileOf(cob, 1);
-			if (source < 0)
-				throw std::runtime_error("matrix budget misses the 1-unit cobblestone pile");
+			constexpr int source = 2, dest = 10, rival = 11;
 			const auto before = slots();
-			const int dest = emptyMainSlot();
 			click(source, SDL_BUTTON_LEFT);
 			click(dest, SDL_BUTTON_LEFT);
 			const auto held = engine.m_remote->pendingInventoryAction;
 			if (!held)
-				throw std::runtime_error("the whole move published no pending action (F04)");
+			{
+				const auto view = engine.playerInventoryView();
+				const auto srcRect = layout.slot({source});
+				const auto srcHit = layout.hitSlot(glm::vec2(srcRect.rect) + gameui::size(srcRect) * 0.5f);
+				const auto *playerUi = engine.m_playerUi.get();
+				std::ostringstream diagnostic;
+				diagnostic << "the whole move published no pending action (F04): snapshot="
+					<< view.snapshot.has_value() << " availability=" << int(view.availability)
+					<< " actionPending=" << view.actionPending
+					<< " pendingSlots=" << view.pendingSlots.has_value()
+					<< " captured=" << engine.mouseCaptured
+					<< " feedback='" << view.feedback << "'"
+					<< " source-hit-slot=" << srcHit.index
+					<< " screensRev=" << playerUi->screens().revision()
+					<< " pressArmed=" << playerUi->hasArmedPress();
+				for (const auto &log : engine.m_hostSnapshot.logs)
+					diagnostic << " | " << log;
+				throw std::runtime_error(diagnostic.str());
+			}
 			CHECK(!engine.submitRemoteInventoryAction({inventoryui::Command::Move,
 				inventoryui::SlotId{source}, inventoryui::SlotId{dest}}),
 				"a duplicate inventory action is refused while one action is in flight (F04)");
-			const auto rival = dest - 1;
-			if (rival < int(items::kHotbarSize) || !at(rival).isEmpty())
-				throw std::runtime_error("matrix duplicate row has no adjacent empty main slot");
-			const auto donor = pileOf(cob, 64);
-			click(donor, SDL_BUTTON_LEFT);
-			click(rival, SDL_BUTTON_LEFT);
-			settle("Action accepted", "the whole move was not acknowledged");
 			const auto &pending = engine.m_remote->pendingInventoryAction;
-			const bool kept = pending && pending->command == held->command &&
-				pending->from == held->from && pending->to == held->to;
-			CHECK(kept && at(rival).isEmpty() && at(dest) == before[size_t(source)] &&
-				at(source).isEmpty() && itemTotal(cob) == 65,
-				"the duplicate runs no command and one transfer executes exactly once (F04)");
+			CHECK(pending && pending->command == held->command && pending->from == held->from &&
+				pending->to == held->to,
+				"the refused duplicate left the pending action metadata unchanged");
+			const auto confirmedDuringPending = slots();
+			if (confirmedDuringPending != before)
+				throw std::runtime_error("the duplicate submission mutated the confirmed inventory before the ack");
+			settle("Action accepted", "the whole move was not acknowledged");
+			CHECK(!engine.m_remote->pendingInventoryAction && !engine.m_remote->actionPending,
+				"the acknowledged move clears its pending metadata");
+			CHECK(at(source).isEmpty() && at(dest).item == kMaterialA && at(dest).count == 5 &&
+				at(dest) == before[size_t(source)] && at(rival) == before[size_t(rival)],
+				"the whole move transfers the entire stack exactly once and leaves the rival slot untouched");
 		}
-		// M2 — split chain: the capped 64 pile halves five times into
-		// 32/16/8/4/2/2 sub-piles (the moved half is the larger).
+		// M2 — odd split (exact): 5 becomes 2 + 3; the moved half is the larger.
 		{
-			if (pileOf(cob, 64) < 0)
-				throw std::runtime_error("matrix budget misses the capped 64 pile");
-			for (const uint32_t size : {64u, 32u, 16u, 8u, 4u})
-			{
-				const auto source = pileOf(cob, size);
-				const int dest = emptyMainSlot();
-				click(source, SDL_BUTTON_RIGHT);
-				click(dest, SDL_BUTTON_LEFT);
-				settle("Action accepted", "the split chain was not acknowledged");
-			}
-			CHECK(itemTotal(cob) == 65, "the split chain conserves the stack budget");
-		}
-		// M3 — merge: 4 + 1 rebuilds a 5 pile (matching stacks combined).
-		{
-			const auto unit = pileOf(cob, 1); // M1's moved remainder pile
-			const auto four = pileOf(cob, 4);
-			if (unit < 0 || four < 0)
-				throw std::runtime_error("matrix merge misses a donor pile");
-			click(unit, SDL_BUTTON_LEFT);
-			click(four, SDL_BUTTON_LEFT);
-			settle("Action accepted", "the merge was not acknowledged");
-			CHECK(pileOf(cob, 5) >= 0 && pileOf(cob, 1) < 0 && pileOf(cob, 4) < 0 &&
-				itemTotal(cob) == 65, "matching stacks merge without loss remotely");
-		}
-		// M4 — odd split: 5 becomes 2 + 3 (the moved half is the larger).
-		{
-			const auto source = pileOf(cob, 5);
-			const int dest = emptyMainSlot();
+			constexpr int source = 10, dest = 12;
+			const auto before = slots();
 			click(source, SDL_BUTTON_RIGHT);
 			click(dest, SDL_BUTTON_LEFT);
 			settle("Action accepted", "the odd split was not acknowledged");
-			CHECK(at(dest).count == 3 && pileOf(cob, 2) >= 0 && pileOf(cob, 5) < 0,
-				"odd split transfers 3 and leaves 2 through the native remote path");
+			CHECK(before[size_t(dest)].isEmpty() && at(source).item == kMaterialA &&
+				at(source).count == 2 && at(dest).item == kMaterialA && at(dest).count == 3,
+				"the odd split transfers 3 and leaves 2");
 		}
-		// M5 — partial merge: the destination reaches capacity, the remainder
-		// stays at the source. 32 + 16 + 8 + 2 + 2 + 2 = 62 leaves room 2 while
-		// the split's 3 pile can only partly fit.
+		// M3 — merge (exact): an even half split rebuilds the capped pile.
 		{
-			const auto merge = [&](uint32_t donor, uint32_t catcher) {
-				const auto from = pileOf(cob, donor);
-				const auto into = pileOf(cob, catcher);
-				if (from < 0 || into < 0)
-					throw std::runtime_error("matrix partial build misses a donor pile");
-				click(from, SDL_BUTTON_LEFT);
-				click(into, SDL_BUTTON_LEFT);
-				settle("Action accepted", "the partial build was not acknowledged");
-			};
-			merge(16, 32);
-			merge(8, 48);
-			merge(2, 56);
-			merge(2, 58);
-			merge(2, 60);
-			const auto from = pileOf(cob, 3);
-			const auto into = pileOf(cob, 62);
-			if (from < 0 || into < 0)
-				throw std::runtime_error("matrix partial merge misses a donor pile");
-			click(from, SDL_BUTTON_LEFT);
-			click(into, SDL_BUTTON_LEFT);
+			constexpr int pile = 0, scratch = 13;
+			click(pile, SDL_BUTTON_RIGHT);
+			click(scratch, SDL_BUTTON_LEFT);
+			settle("Action accepted", "the merge setup split was not acknowledged");
+			CHECK(at(pile).item == kMaterialA && at(pile).count == 32 &&
+				at(scratch).item == kMaterialA && at(scratch).count == 32,
+				"the capped pile splits into two exact halves");
+			click(scratch, SDL_BUTTON_LEFT);
+			click(pile, SDL_BUTTON_LEFT);
+			settle("Action accepted", "the merge was not acknowledged");
+			CHECK(at(pile).item == kMaterialA && at(pile).count == 64 && at(scratch).isEmpty(),
+				"matching stacks merge without loss remotely");
+		}
+		// M4 — partial merge (exact): moving 40 into a pile with 32 room fills
+		// the destination to capacity and keeps the remainder at the source.
+		{
+			constexpr int capped = 0, donor = 1, scratch = 14;
+			click(capped, SDL_BUTTON_RIGHT);
+			click(scratch, SDL_BUTTON_LEFT);
+			settle("Action accepted", "the partial setup split was not acknowledged");
+			CHECK(at(capped).item == kMaterialA && at(capped).count == 32 &&
+				at(scratch).item == kMaterialA && at(scratch).count == 32,
+				"the partial merge halves its capped pile first");
+			click(donor, SDL_BUTTON_LEFT);
+			click(scratch, SDL_BUTTON_LEFT);
 			settle("Action partially applied", "the partial merge was not acknowledged");
-			const auto full = pileOf(cob, 64);
-			CHECK(full >= 0 && at(full).count == 64 && pileOf(cob, 1) >= 0 && itemTotal(cob) == 65,
-				"partial merge fills the destination to capacity and keeps the remainder");
+			CHECK(at(scratch).item == kMaterialA && at(scratch).count == 64 &&
+				at(donor).item == kMaterialA && at(donor).count == 8,
+				"the partial merge fills the destination to capacity and keeps the remainder");
 		}
-		// M6 — swap: the topsoil junk pile exchanges slots with a cobblestone pile.
+		// M5 — swap (exact): different stacks exchange slots in both directions.
 		{
-			const auto &current = slots();
-			const auto junk = std::ranges::find_if(current, [&](const auto &stack) {
-				return !stack.isEmpty() && stack.item != cob;
-			});
-			if (junk == current.end())
-				throw std::runtime_error("matrix found no second material for the native swap");
-			const auto junkSlot = int(junk - current.begin());
-			if (junkSlot != 0)
-				throw std::runtime_error("matrix expected the topsoil pile in the first slot");
-			const auto cobble = pileOf(cob, 1);
+			constexpr int a = 1, b = 3;
 			const auto before = slots();
-			click(junkSlot, SDL_BUTTON_LEFT);
-			click(cobble, SDL_BUTTON_LEFT);
+			CHECK(before[size_t(a)].item == kMaterialA && before[size_t(b)].item == kMaterialB,
+				"the swap row starts from the fixture's two distinct piles");
+			click(a, SDL_BUTTON_LEFT);
+			click(b, SDL_BUTTON_LEFT);
 			settle("Action accepted", "the swap was not acknowledged");
-			const auto &after = slots();
-			CHECK(after[size_t(junkSlot)] == before[size_t(cobble)] &&
-				after[size_t(cobble)] == before[size_t(junkSlot)],
+			CHECK(at(a) == before[size_t(b)] && at(b) == before[size_t(a)],
 				"whole drop onto another item swaps through the native remote path");
 		}
-		// M7 — drop one: the selected hotbar slot loses exactly one unit and the
-		// world gains one item entity; pending state populates before each ack
-		// and clears with the result (F04).
+		// M6 — drop one (F08): the select and the drop populate the pending
+		// slots before their acks; the inventory confirmation, the identified
+		// world entity and the pickup restoration are each waited on their own
+		// channel. The actor looks nearly straight down so the drop lands
+		// inside the shared auto-pickup radius.
 		{
-			CHECK(pileOf(cob, 1) == 0, "the swap seated the unit pile in the first hotbar slot");
-			tap(SDLK_1);
+			constexpr int seat = 7;
+			engine.camera.setYawPitch(0.f, -85.f);
+			presentClosureFrame();
+			click(3, SDL_BUTTON_LEFT);
+			click(seat, SDL_BUTTON_LEFT);
+			settle("Action accepted", "the drop-one seating move was not acknowledged");
+			tap(SDLK_1 + seat);
 			CHECK(engine.m_remote->pendingInventoryAction &&
 				engine.m_remote->pendingInventoryAction->command == inventoryui::Command::Select,
 				"hotbar selection populates pending slots before the ack (F04)");
-			settle("Action accepted", "the hotbar selection was not acknowledged");
-			const auto before = slots();
-			const auto beforeTotal = itemTotal(cob);
+			settle("Action accepted", "the drop-one selection was not acknowledged");
+			const auto entitiesBefore = itemIdSet();
+			const uint32_t beforeTotal = itemTotal(kMaterialA);
 			tap(SDLK_Q);
 			CHECK(engine.m_remote->pendingInventoryAction &&
 				engine.m_remote->pendingInventoryAction->command == inventoryui::Command::DropOne,
 				"the drop populates pending slots before the ack (F04)");
 			settle("Action accepted", "the one-unit drop was not acknowledged");
-			const auto world = worldStacks();
-			CHECK(itemTotal(cob) == beforeTotal - 1 && world.size() == 1 &&
-				world.front().item == cob && world.front().count == 1,
-				"drop one removes exactly one unit and creates one world item");
+			until([&] { return totalOf(kMaterialA) == beforeTotal - 1; },
+				"drop one did not confirm its inventory loss");
+			const auto dropped = awaitWorldItems(entitiesBefore, "drop one did not publish its world item");
+			CHECK(dropped.size() == 1 && dropped.front().second.item == kMaterialA &&
+				dropped.front().second.count == 1,
+				"drop one removes exactly one unit and creates one identified world item");
+			waitPickupRestored(dropped, kMaterialA, *totalOf(kMaterialA),
+				"the one-unit drop was not collected back");
 		}
-		// The stationary player can re-pick the dropped unit once the manual
-		// pickup delay expires; converge before the next row so the counts and
-		// the checkpoint stay deterministic.
-		until([&] { return worldStacks().empty(); }, "the one-unit drop did not return to the inventory");
-		CHECK(itemTotal(cob) == 65, "the returned unit restores the budget");
-		// M8 — drop stack: seat the whole 64 pile in a hotbar slot, select it
-		// with its number key and drop the entire stack with the screen's
-		// Drop control.
+		// M7 — drop stack: the seated B pile is selected by its number key and
+		// leaves as one identified stack through the screen's Drop control.
 		{
-			const auto capped = pileOf(cob, 64);
-			if (capped < 0)
-				throw std::runtime_error("matrix budget misses the capped 64 pile");
-			const int seat = [ & ] {
-				for (int slot = 0; slot < int(items::kHotbarSize); ++slot)
-					if (at(slot).isEmpty())
-						return slot;
-				throw std::runtime_error("matrix drop stack found no empty hotbar slot");
-			}();
-			click(capped, SDL_BUTTON_LEFT);
+			constexpr int seat = 6;
+			click(1, SDL_BUTTON_LEFT);
 			click(seat, SDL_BUTTON_LEFT);
 			settle("Action accepted", "the drop-stack seating move was not acknowledged");
-			CHECK(pileOf(cob, 64) == seat, "the capped pile was seated in an empty hotbar slot");
+			CHECK(at(seat).item == kMaterialB && at(seat).count == 8 && at(1).isEmpty(),
+				"the whole B pile was seated in an empty hotbar slot");
 			tap(SDLK_1 + seat);
 			settle("Action accepted", "the stack-drop selection was not acknowledged");
-			const auto beforeTotal = itemTotal(cob);
+			const auto entitiesBefore = itemIdSet();
+			const auto beforeB = itemTotal(kMaterialB);
 			const auto dropButton = glm::vec2(layout.drop.rect) + gameui::size(layout.drop) * 0.5f;
 			fire(dropButton, SDL_BUTTON_LEFT);
 			settle("Action accepted", "the stack drop was not acknowledged");
-			const auto world = worldStacks();
-			const bool stacked = std::ranges::any_of(world, [&](const auto &stack) {
-				return stack.item == cob && stack.count == 64;
-			});
-			CHECK(at(seat).isEmpty() && itemTotal(cob) == beforeTotal - 64 && stacked,
-				"drop stack empties the selected stack and creates its world item");
+			until([&] { return totalOf(kMaterialB) == beforeB - 8; },
+				"the stack drop did not confirm its inventory loss");
+			const auto dropped = awaitWorldItems(entitiesBefore, "the stack drop did not publish its world item");
+			CHECK(dropped.size() == 1 && dropped.front().second.item == kMaterialB &&
+				dropped.front().second.count == 8,
+				"the stack drop empties the selected stack and creates its world item");
+			waitPickupRestored(dropped, kMaterialB, *totalOf(kMaterialB),
+				"the stack drop was not collected back");
 		}
-		// Converge again so the closure witness and the checkpoint agree.
-		until([&] { return worldStacks().empty(); }, "the stack drop did not return to the inventory");
-		CHECK(itemTotal(cob) == 65, "the matrix conserves the mined budget end to end");
-		// M9 — rejected action: dropping from an empty selected slot leaves the
-		// authoritative inventory unchanged.
+		// M9 — rejected action (F08): the empty hotbar slot is discovered
+		// dynamically, verified empty before the drop, and the complete
+		// confirmed inventory is proven untouched after the rejection. The
+		// fixture (pre-matrix) hotbar selection is restored for the closure's
+		// end-state contract and the shutdown phase.
 		{
-			tap(SDLK_1 + 2); // slot 2 stays empty: the two re-picks merged above
+			const auto current = slots();
+			const int fixtureSelected = ownerFixture().selected;
+			int emptySlot = -1;
+			for (int slot = 0; slot < int(items::kHotbarSize); ++slot)
+				if (current[size_t(slot)].isEmpty())
+				{
+					emptySlot = slot;
+					break;
+				}
+			if (emptySlot < 0)
+				throw std::runtime_error("the rejection row found no empty hotbar slot");
+			tap(SDLK_1 + emptySlot);
 			settle("Action accepted", "the rejection selection was not acknowledged");
 			const auto confirmed = slots();
+			CHECK(confirmed[size_t(emptySlot)].isEmpty(),
+				"the rejected drop runs from a verified empty hotbar slot");
 			tap(SDLK_Q);
 			until([&] { return !engine.m_remote->actionPending; }, "empty drop did not receive its result");
 			const auto rejected = engine.playerInventoryView();
 			CHECK(rejected.feedbackKind == gameui::style::Status::Error && rejected.enabled() &&
 				rejected.snapshot && rejected.snapshot->slots == confirmed,
-				"rejected remote drop preserves the confirmed snapshot");
+				"rejected remote drop preserves the complete confirmed snapshot");
+			tap(SDLK_1 + fixtureSelected);
+			settle("Action accepted", "the fixture hotbar selection was not restored");
+			CHECK(engine.selectedHotbarSlot() == fixtureSelected,
+				"the matrix restores the fixture hotbar selection");
 		}
+		kindTotal("the matrix conserves the fixture budget end to end");
 		engine.setInventoryOpen(false);
 		until([&] { return !engine.inventoryPanelOpen(); },
 			"remote inventory closes through the native shortcut", std::chrono::seconds(5));
 		engine.setDeveloperWorkspaceVisible(workspace);
+		std::cout << "HOSTED inventory matrix=10ops budget=117 conserved" << std::endl;
 	}
-
 	void runHostedClosure(const fs::path &server, const fs::path &evidence, bool restoring)
 	{
 		const bool host = !server.empty();
@@ -901,12 +1046,15 @@ struct EngineJoinProbe
 			frame().createJoinProfile(profile);
 
 		uint64_t checkpoint = 0;
+		// The owner actor recorded at the baseline join — the fixture rebind
+		// reuses it (the identity registry owns the mapping, not the test).
+		uint32_t fixtureOwnerActor = 0;
 		if (host)
 		{
 			engine.m_hostExecutable = server;
 			engine.m_hostSavesRoot = engine.m_savesRoot / "dedicated";
 			hosting::Options options;
-			options.world = "Closure loopback";
+			options.world = kFixtureWorld;
 			options.port = 0;
 			options.playerSlots = 2;
 			options.interestRadius = 1;
@@ -927,6 +1075,7 @@ struct EngineJoinProbe
 			CHECK(admin.role == Role::Owner && owner != admin.players.end() &&
 				owner->id == engine.m_remote->welcome->player && engine.m_remote->namedProfile == profile,
 				"verified durable owner matches the automatically joined host before guest connection");
+			fixtureOwnerActor = engine.m_remote->welcome->player.value;
 			if (restoring)
 			{
 				uint64_t priorCheckpoint = 0;
@@ -964,7 +1113,7 @@ struct EngineJoinProbe
 			{
 				const auto separation = [&] {
 					const auto &sample = engine.m_remote->transport.playerSnapshots().current;
-					if (!sample)
+					if (!sample || !engine.m_remote->welcome)
 						return 0.0;
 					glm::dvec3 mine{}, other{};
 					for (const auto &p : std::span(sample->players).first(sample->count))
@@ -997,30 +1146,139 @@ struct EngineJoinProbe
 		for (int i = 0; i < 3; ++i)
 			presentClosureFrame();
 
+		// F09 (round 2): matrix phases are explicit rendezvous. The owner
+		// keeps one ordinary shared-terrain break, then establishes the
+		// fixture (graceful stop -> committed roster rewrite -> restart on
+		// the same world), runs the deterministic matrix and publishes the
+		// completion marker. The guest rides the restart and verifies its
+		// private-state isolation across the whole matrix.
 		const auto edit = evidence / "first" / "edit.txt";
 		if (host && !restoring)
 		{
-			until([&] { return fs::exists(round / "guest-separated.txt"); },
-				"guest did not move beyond the mining radius", std::chrono::seconds(120));
-			// Announced right after the first break so the guest only waits
-			// on world replication, not on the full budget assembly or the
-			// local inventory operations.
-			const auto cell = mineForMatrix(65, [&](const glm::ivec3 &c) {
-				publish(edit, std::to_string(c.x) + " " + std::to_string(c.y) + " " + std::to_string(c.z));
-			});
+			// The spawn column can stand in water: seek a mineable bank cell
+			// with the same bounded swim the single-block flow used, then
+			// settle before the break.
+			engine.camera.setYawPitch(0.f, -60.f);
+			until([&] {
+				if (mineableAim(engine.remoteTarget()))
+					return true;
+				engine.sendRemoteInput({.move = {1, 0}, .swimUp = true});
+				return false;
+			}, "hosted closure could not reach a mineable surface", std::chrono::seconds(60));
+			engine.sendRemoteInput({});
+			until([&] {
+				const auto *actor = engine.m_remote->localPlayer();
+				return actor && (actor->flags & net::wire::PlayerState::grounded) &&
+					std::hypot(actor->velocity[0], actor->velocity[2]) < 0.1;
+			}, "the shared-edit miner did not settle at the bank");
+			const auto cell = breakRemoteAction("fixed shared terrain edit");
+			publish(edit, std::to_string(cell.x) + " " + std::to_string(cell.y) + " " + std::to_string(cell.z));
+
+			// The fixture rewrite assumes a clean committed item population:
+			// the mined drop must be consumed (server-side pickup) before the
+			// stop, so items.state commits empty and the restart cannot
+			// re-deliver it into the fixture inventory. The client's world
+			// entity snapshot is interest-limited, so the authoritative
+			// confirmed inventory gaining a stack is the reliable signal.
+			until([&] {
+				const auto confirmed = confirmedSlots();
+				return std::any_of(confirmed.begin(), confirmed.end(),
+					[](const items::ItemStack &stack) { return !stack.isEmpty(); });
+			}, "the mined drop did not return to the owner's confirmed inventory before the fixture stop",
+				std::chrono::seconds(60));
+
+			frame().stopHostedServer();
+			until([&] { return engine.m_hostSnapshot.state == hosting::State::Stopped; },
+				"the fixture baseline stop did not reach Stopped", std::chrono::seconds(60));
+			CHECK(engine.m_hostSnapshot.checkpoint > checkpoint,
+				"the fixture stop commits its baseline checkpoint");
+			until([&] {
+				const auto ui = frame();
+				return ui.multiplayerStatus && ui.joinServer && engine.m_remote && !engine.m_remote->scope;
+			}, "the fixture stop did not publish the departure to the owner", std::chrono::seconds(30));
+			checkRetiredProjection();
+			frame().returnToSolo();
+			pump();
+			CHECK(!engine.m_remote, "the owner returns to solo between the fixture stop and its restart");
+
+			rewriteCommittedRoster(engine.m_hostSavesRoot / kFixtureWorld, fixtureOwnerActor);
+			hosting::Options options;
+			options.world = kFixtureWorld;
+			options.port = 0;
+			options.playerSlots = 2;
+			options.interestRadius = 1;
+			options.workers = 1;
+			options.streaming = hosting::StreamingPreset::Low;
+			frame().startHostedServer(options, true, profile);
+			until([&] {
+				const auto &state = engine.m_hostSnapshot;
+				if (state.state == hosting::State::Failed)
+					throw std::runtime_error(state.message);
+				return state.state == hosting::State::Ready && engine.m_remote && engine.m_remote->ready();
+			}, "the fixture server did not become ready and auto-join", std::chrono::seconds(90));
+			CHECK(engine.m_remote->welcome && engine.m_remote->welcome->player.value == fixtureOwnerActor &&
+				engine.m_remote->namedProfile == profile,
+				"the fixture restart resumes the owner actor with its exact identity");
+			const auto endpoint = engine.m_hostSnapshot.address + ":" +
+				std::to_string(engine.m_hostSnapshot.port);
+			publish(round / "fixture-endpoint.txt", endpoint);
+			until([&] { return seesPeer(); }, "the guest did not rejoin the fixture world",
+				std::chrono::seconds(120));
 			hostedInventoryMatrix();
-			std::cout << "HOSTED edit=break inventory_matrix=9ops cell=" << cell.x << ',' << cell.y << ',' << cell.z << std::endl;
+			publish(round / "matrix-done.txt", "done");
 		}
-		else
+		else if (!host && !restoring)
 		{
-			until([&] { return fs::exists(edit); }, "owner did not publish the edited cell");
+			until([&] {
+				const auto ui = frame();
+				return ui.multiplayerStatus && ui.joinServer && engine.m_remote && !engine.m_remote->scope;
+			}, "the fixture stop did not publish the departure to the guest", std::chrono::seconds(120));
+			checkRetiredProjection();
+			frame().returnToSolo();
+			pump();
+			until([&] { return fs::exists(round / "fixture-endpoint.txt"); },
+				"the owner did not publish the fixture endpoint", std::chrono::seconds(120));
+			std::string fixtureEndpoint;
+			std::ifstream(round / "fixture-endpoint.txt") >> fixtureEndpoint;
+			join(fixtureEndpoint.c_str(), profile, "42");
+			until([&] { return fs::exists(edit); }, "owner did not publish the edited cell",
+				std::chrono::seconds(30));
 			glm::ivec3 cell{};
 			if (!(std::ifstream(edit) >> cell.x >> cell.y >> cell.z))
 				throw std::runtime_error("invalid hosted edit witness");
-			until([&] { return materialAt(cell) == TextureType::AIR; }, "both clients must see the edited block after replication and restart");
+			until([&] { return materialAt(cell) == TextureType::AIR; },
+				"the guest must see the edited block after the fixture restart",
+				std::chrono::seconds(30));
+			CHECK(true, "guest observes the shared world edit after the fixture restart");
+			// F09 §5: the guest records its authoritative inventory right
+			// after the rejoin, keeps it under continuous observation while
+			// the owner runs the matrix, and re-verifies it afterwards — one
+			// early snapshot alone is not isolation evidence.
+			const auto before = confirmedSlots();
+			const auto expected = guestFixture();
+			CHECK(before == expected.slots && witness().selected == expected.selected,
+				"the fixture restart restores the guest's distinct private inventory");
+			until([&] {
+				const auto inventory = engine.m_remote->transport.inventory();
+				if (inventory && inventory->slots != before)
+					throw std::runtime_error("the guest's private inventory changed while the owner ran the matrix");
+				return fs::exists(round / "matrix-done.txt");
+			}, "the owner's inventory matrix did not complete for the isolated guest",
+				std::chrono::seconds(300));
+			CHECK(confirmedSlots() == before && !engine.m_remote->pendingInventoryAction,
+				"the guest's private inventory is still unchanged after the matrix");
+		}
+		else
+		{
+			// Restoring run: the persisted edit is only observed; the exact
+			// inventory and selection restoration is checkWitness below.
+			until([&] { return fs::exists(edit); }, "the first run did not publish the edited cell");
+			glm::ivec3 cell{};
+			if (!(std::ifstream(edit) >> cell.x >> cell.y >> cell.z))
+				throw std::runtime_error("invalid hosted edit witness");
+			until([&] { return materialAt(cell) == TextureType::AIR; },
+				"both clients must see the edited block after replication and restart");
 			CHECK(true, "client observes the shared world edit");
-			if (!host)
-				CHECK(witness().slots[9].isEmpty(), "guest never receives the owner's private inventory move");
 		}
 		checkWitness(evidence / "first" / actorFile, round / actorFile, restoring);
 
@@ -1031,8 +1289,17 @@ struct EngineJoinProbe
 			uint32_t guestId = 0;
 			int guestSlot = 0;
 			std::ifstream(round / "guest-actor.txt") >> guestWorld >> guestId >> guestSlot;
-			CHECK(guestWorld == witness().world && guestId && guestId != witness().player &&
-				guestSlot == 6 && witness().selected == 3, "host and guest keep independent identities and hotbars");
+			const auto owner = witness();
+			if (guestWorld != owner.world || guestId == 0 || guestId == owner.player ||
+				guestSlot != 6 || owner.selected != 3)
+			{
+				std::ostringstream diagnostic;
+				diagnostic << "host and guest keep independent identities and hotbars:"
+					<< " guestWorld=" << guestWorld << " guestId=" << guestId
+					<< " guestSlot=" << guestSlot << " ownerWorld=" << owner.world
+					<< " ownerPlayer=" << owner.player << " ownerSelected=" << owner.selected;
+				throw std::runtime_error(diagnostic.str());
+			}
 			const auto submit = [&](Operation operation, sim::PlayerId target = {}) {
 				const auto &state = engine.m_hostSnapshot;
 				const auto error = frame().administerHostedServer(state.launch, operation, target, "");
@@ -1208,6 +1475,15 @@ struct EngineJoinProbe
 		engine.handleEvents();
 	}
 
+	/// F09: a controlled SDL focus event re-asserts focus through the real
+	/// input path — never a direct write behind SDL's back.
+	void assertWindowFocus()
+	{
+		focus();
+		if (!engine.windowFocused)
+			throw std::runtime_error("the harness window could not take keyboard focus");
+	}
+
 	void run(const char *first, const char *second)
 	{
 		engine.requestOpenWorld("solo");
@@ -1242,8 +1518,11 @@ struct EngineJoinProbe
 		until([&] { return engine.selectedHotbarSlot() == 4; }, "server did not apply hotbar selection");
 		CHECK(gameui::style::has(engine.playerHudView().hotbar.slots[4].state, gameui::style::State::Selected),
 			"HUD highlights the successor only when the server publishes it");
-		const auto aliceInventory = engine.m_remote->transport.inventory()->slots;
-		const auto aliceFeet = net::udp::playerFeet(*engine.m_remote->localPlayer());
+		const auto aliceInventory = confirmedSlots();
+		const auto *aliceActor = engine.m_remote->localPlayer();
+		if (!aliceActor)
+			throw std::runtime_error("the first profile lost its authoritative player before the switch");
+		const auto aliceFeet = net::udp::playerFeet(*aliceActor);
 		CHECK(engine.chunkPool->acquiredCount() > 0, "remote projection owns render handles before departure");
 
 		frame().connectServer({second, "bob", "43"});
@@ -1261,9 +1540,12 @@ struct EngineJoinProbe
 		CHECK(engine.m_remote->welcome->player != bobId, "switching profiles on one endpoint changes actors");
 
 		join(first, "alice", "42");
+		const auto *returnedActor = engine.m_remote->localPlayer();
+		if (!returnedActor)
+			throw std::runtime_error("the returning profile is missing from the authoritative snapshot");
 		CHECK(engine.m_remote->welcome->player == aliceId && engine.m_remote->scope != firstScope &&
-		    engine.selectedHotbarSlot() == 4 && engine.m_remote->transport.inventory()->slots == aliceInventory &&
-		    glm::length(net::udp::playerFeet(*engine.m_remote->localPlayer()) - aliceFeet) < 1.0,
+		    engine.selectedHotbarSlot() == 4 && confirmedSlots() == aliceInventory &&
+		    glm::length(net::udp::playerFeet(*returnedActor) - aliceFeet) < 1.0,
 		    "returning to the first profile restores its actor, inventory and position");
 		frame().leaveServer();
 		pump();
@@ -1311,7 +1593,7 @@ struct EngineJoinProbe
 		pump();
 		until([&] { return engine.m_remote->ready(); }, "Reconnect did not restore the session");
 		CHECK(engine.m_remote->welcome->player == aliceId && engine.selectedHotbarSlot() == 4 &&
-			engine.m_remote->transport.inventory()->slots == aliceInventory,
+			confirmedSlots() == aliceInventory,
 			"recovery restores the same actor, selected slot and authoritative inventory");
 		const auto reconnectedHud = engine.playerHudView();
 		CHECK(reconnectedHud.hotbar.available && reconnectedHud.recovery.empty() &&
