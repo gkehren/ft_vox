@@ -52,6 +52,8 @@ void GameUiSample::invalidateLayout()
 void GameUiSample::resetScreens()
 {
 	invalidateLayout();
+	setInventoryView({});
+	cancelInventoryGesture();
 	m_screens.reset();
 	m_field = {};
 	m_secondaryField = {};
@@ -67,6 +69,11 @@ void GameUiSample::openPause()
 
 void GameUiSample::back()
 {
+	if (m_screens.top() == Screen::Inventory)
+	{
+		setInventoryView({});
+		cancelInventoryGesture();
+	}
 	if (m_screens.back())
 		invalidateLayout();
 }
@@ -77,7 +84,7 @@ void GameUiSample::closePause()
 		invalidateLayout();
 }
 
-bool GameUiSample::syncInventory(bool open)
+void GameUiSample::setInventoryOpen(bool open)
 {
 	if (open && m_screens.top() == Screen::Hud)
 	{
@@ -86,7 +93,6 @@ bool GameUiSample::syncInventory(bool open)
 	}
 	else if (!open && m_screens.top() == Screen::Inventory)
 		back();
-	return m_screens.top() == Screen::Inventory;
 }
 
 void GameUiSample::buildScreen(Clip scene, float scale)
@@ -239,7 +245,8 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 
 void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 {
-	auto *field = interactive && m_screens.nativeScreen() && m_layoutRevision == m_screens.revision()
+	auto *field = interactive && m_screens.nativeScreen() && m_screens.top() != Screen::Inventory &&
+		m_layoutRevision == m_screens.revision()
 		? m_widgets.editor(m_screens.focus()) : nullptr;
 	const auto geometry = field
 		? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale, m_fontScale)
@@ -279,6 +286,8 @@ bool GameUiSample::yieldTextInput(SDL_Window *window)
 
 bool GameUiSample::canFocusWidget(float x, float y) const
 {
+	if (m_screens.top() == Screen::Inventory)
+		return m_layoutRevision == m_screens.revision() && inventoryControlAt({x, y}) != 0;
 	return m_layoutRevision == m_screens.revision() && m_widgets.focusableAt({x, y});
 }
 

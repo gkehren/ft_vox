@@ -70,9 +70,6 @@ struct GameUiBackendProbe
 {
 	explicit GameUiBackendProbe(Engine &host) : engine(host) {}
 	Engine &engine;
-	/// Backing storage for io.IniFilename during the ini-persistence proof: ImGui
-	/// keeps the pointer, so it has to outlive every frame.
-	std::string m_iniPath;
 
 	void init()
 	{
@@ -262,12 +259,12 @@ struct GameUiBackendProbe
 		checked(SDL_PushEvent(&event), "queue pointer motion");
 	}
 
-	void clickAt(glm::vec2 point)
+	void clickAt(glm::vec2 point, Uint8 which = SDL_BUTTON_LEFT)
 	{
 		SDL_WarpMouseInWindow(engine.window, point.x, point.y);
 		motion(point.x, point.y);
-		button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y);
-		button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, point.x, point.y, which);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, point.x, point.y, which);
 	}
 
 	void commitText(const char *text)
@@ -1181,6 +1178,446 @@ struct GameUiBackendProbe
 			<< ", known RTSS errors=" << rtss);
 	}
 
+	void playerInventoryProof()
+	{
+		using enum items::ItemId;
+		init();
+		auto &sample = *engine.m_playerUi;
+		const auto &context = *engine.vkContext;
+		const auto errorsBefore = context.validationErrorCount();
+		const auto rtssBefore = context.rtssValidationErrorCount();
+		engine.setDeveloperWorkspaceVisible(false);
+		engine.sim->grantItems(Stone, 64);
+		engine.sim->grantItems(Dirt, 5);
+		engine.sim->grantItems(Stone, 12);
+		engine.sim->grantItems(GrassBlock, 17);
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.f});
+		const auto snapshot = [&] { return engine.playerInventoryView().snapshot->slots; };
+		const auto middle = [](gameui::Clip rect) { return glm::vec2(rect.rect) + gameui::size(rect) * 0.5f; };
+		const auto cell = [&](int index) { return middle(sample.m_inventoryLayout.slot({index})); };
+		const auto clickSlot = [&](int index, Uint8 button = SDL_BUTTON_LEFT) { clickAt(cell(index), button); };
+		const auto held = [&] { return sample.m_inventoryInteraction.drag().active(); };
+		const auto capture = [&](std::string_view scene) {
+			std::cout << "INVENTORY capture=" << scene << " frame=" << engine.frameNumber - 1 << '\n';
+		};
+
+		resize(1920, 1080);
+		frames(2);
+		tap(SDLK_E);
+		present();
+		SDL_WarpMouseInWindow(engine.window, cell(0).x, cell(0).y);
+		present();
+		capture("16x9");
+		CHECK(engine.inventoryPanelOpen() && !engine.developerUiAvailable() &&
+			!engine.mouseCaptured && !engine.simulationSuspended(), "inventory owns native input without pausing solo");
+
+		const auto before = snapshot();
+		clickSlot(2);
+		present();
+		CHECK(held() && snapshot() == before, "whole pickup is a view of the confirmed stack");
+		clickSlot(0);
+		present();
+		CHECK(!held() && snapshot() == before &&
+			engine.playerInventoryView().feedbackKind == gameui::style::Status::Error,
+			"full matching stack rejects the move, shows a reason and clears the drag");
+		clickSlot(2);
+		clickSlot(9);
+		present();
+		CHECK(snapshot()[9].item == Stone && snapshot()[9].count == 12 && snapshot()[2].isEmpty(),
+			"whole move transfers exactly once");
+		clickSlot(1, SDL_BUTTON_RIGHT);
+		clickSlot(10);
+		present();
+		CHECK(snapshot()[10].item == Dirt && snapshot()[10].count == 3 && snapshot()[1].count == 2,
+			"odd half split transfers three and leaves two");
+		clickSlot(9);
+		clickSlot(10);
+		present();
+		CHECK(snapshot()[9].item == Dirt && snapshot()[10].item == Stone, "whole drop onto another item swaps");
+		clickSlot(9);
+		clickSlot(1);
+		present();
+		CHECK(snapshot()[1].count == 5 && snapshot()[9].isEmpty(), "matching stacks merge without loss");
+
+		clickSlot(10);
+		const auto target = cell(11);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, target.x, target.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, target.x + 100.f, target.y);
+		present();
+		CHECK(held() && snapshot()[11].isEmpty(), "release on another cell does not activate the pressed destination");
+		clickAt({4.f, 4.f});
+		present();
+		CHECK(!held() && snapshot()[10].count == 12, "click outside cancels the drag without a world edit");
+		clickSlot(10);
+		tap(SDLK_E);
+		present();
+		CHECK(!engine.inventoryPanelOpen() && !held() && engine.mouseCaptured,
+			"closing mid-drag restores mouse capture");
+		tap(SDLK_E);
+		present();
+		clickSlot(10);
+		present();
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		present();
+		CHECK(!held() && snapshot()[10].count == 12, "focus loss discards an armed inventory gesture");
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		clickSlot(10, SDL_BUTTON_RIGHT);
+		tap(SDLK_RIGHT);
+		key(SDLK_RETURN, SDL_EVENT_KEY_DOWN);
+		key(SDLK_RETURN, SDL_EVENT_KEY_DOWN, true);
+		key(SDLK_RETURN, SDL_EVENT_KEY_UP);
+		present();
+		CHECK(snapshot()[10].count == 6 && snapshot()[11].count == 6 && !held(),
+			"keyboard focus reaches the destination and key repeat cannot submit twice");
+		tap(SDLK_2);
+		present();
+		CHECK(engine.selectedHotbarSlot() == 1, "the inventory preserves number-key selection");
+		tap(SDLK_Q);
+		present();
+		CHECK(snapshot()[1].count == 4, "Q drops one item from the selected stack");
+		clickAt(middle(sample.m_inventoryLayout.drop));
+		present();
+		CHECK(snapshot()[1].isEmpty(), "the drop stack button consumes exactly the remaining selected stack");
+
+		resize(2560, 1080);
+		frames(2);
+		clickSlot(10, SDL_BUTTON_RIGHT);
+		SDL_WarpMouseInWindow(engine.window, cell(11).x, cell(11).y);
+		present();
+		capture("21x9");
+		CHECK(held() && sample.m_inventoryLayout.panel.intersect(sample.m_draws.bounds()) == sample.m_inventoryLayout.panel,
+			"the ultrawide screen renders a held stack and keeps the panel in bounds");
+		tap(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT);
+		present();
+		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() && !held(),
+			"workspace changes cancel held state and keep the native screen open");
+
+		// PR #316 F02 (solo) + F03/F05: the solo proof explicitly covers a
+		// PARTIAL merge, and the held-stack presentation follows the active
+		// input modality and stays inside the available game view. All
+		// addressing goes through slot identities: the layout is a grid whose
+		// CELL n maps to slot (n + 9) % 36, so the fixture searches slots.
+		// The developer workspace hides so the native screen owns the pointer
+		// and the keyboard; the F01 block below shows it again explicitly.
+		engine.setDeveloperWorkspaceVisible(false);
+		engine.sim->grantItems(Cobblestone, 64); // fills the first empty hotbar slot at the cap
+		engine.sim->grantItems(Cobblestone, 40); // overflows into a second pile
+		present();
+		const auto slotPoint = [&](int slot) { return middle(sample.m_inventoryLayout.slot({slot})); };
+		const auto pileOf = [&](uint32_t count) {
+			const auto all = snapshot();
+			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
+				if (all[size_t(slot)].item == Cobblestone && all[size_t(slot)].count == count)
+					return slot;
+			return -1;
+		};
+		const auto capped = pileOf(64);
+		auto over = pileOf(40);
+		CHECK(capped >= 0 && over >= 0 && capped != over,
+			"the partial-merge fixture holds a clashing 64/40 cobblestone pair");
+		const auto scene = [&] { return sample.m_draws.bounds(); };
+		const auto heldInset = std::min(gameui::style::baseline().space.xs * sample.m_inventoryLayout.scale,
+			sample.m_inventoryLayout.main.cell * 0.5f);
+		const auto holdsHeldIcon = [&](gameui::Clip placement) {
+			const auto icon = gameui::inset(placement, heldInset);
+			return std::ranges::any_of(sample.m_draws.quads(), [&](const gameui::Quad &quad) {
+				return quad.layer == static_cast<int32_t>(TextureType::COBBLESTONE) && quad.rect == icon.rect;
+			});
+		};
+		const auto heldRect = [&](glm::vec2 point) {
+			return gameui::heldStackPlacement(point, sample.m_inventoryLayout.main.cell,
+				10.f * sample.m_inventoryLayout.scale, scene());
+		};
+		const auto slotRect = [&](inventoryui::SlotId slot) {
+			return gameui::heldStackPlacement(middle(sample.m_inventoryLayout.slot(slot)),
+				sample.m_inventoryLayout.main.cell, 10.f * sample.m_inventoryLayout.scale, scene());
+		};
+		// F02 (solo): split the capped pile onto the 40 pile — the destination
+		// reaches the cap and the overflow stays at the source.
+		clickAt(slotPoint(capped), SDL_BUTTON_RIGHT);
+		clickAt(slotPoint(over));
+		present();
+		CHECK(!held() && snapshot()[size_t(capped)].item == Cobblestone &&
+			snapshot()[size_t(capped)].count == 40 && snapshot()[size_t(over)].count == 64,
+			"the split fills the destination slot to capacity and keeps the remainder in the source");
+		CHECK(engine.playerInventoryView().feedbackKind == gameui::style::Status::Info &&
+			engine.playerInventoryView().feedback == "Only part of the stack fit.",
+			"a partial merge reports the overflow without an error state");
+		// F05: re-seat the 40 remainder pile in the main grid, then a pointer
+		// pickup anchors the held stack to the pointer. The pile must sit above
+		// the hotbar row: arrow navigation refuses moves out of the bottom row.
+		{
+			const auto mainSeat = [&] {
+				for (int slot = items::kHotbarSize; slot < inventoryui::kSlotCount; ++slot)
+					if (snapshot()[size_t(slot)].isEmpty())
+						return slot;
+				throw std::runtime_error("proof found no empty main slot");
+			}();
+			clickAt(slotPoint(over));
+			clickAt(slotPoint(mainSeat));
+			present();
+			over = mainSeat;
+		}
+		clickAt(slotPoint(over), SDL_BUTTON_RIGHT);
+		present();
+		CHECK(held() && holdsHeldIcon(heldRect(slotPoint(over))),
+			"pointer pickup anchors the held stack next to the pointer");
+		// F05: keyboard navigation moves the anchor to the focused slot without
+		// touching the armed gesture, and passive motion cannot pull it back.
+		const auto beforeKeys = snapshot();
+		const int focusStart = int(sample.screens().focus());
+		tap(SDLK_DOWN);
+		present();
+		inventoryui::SlotId destination = inventoryui::slotAtCell(focusStart - 1 + inventoryui::kColumns);
+		CHECK(held() && snapshot() == beforeKeys &&
+			int(sample.screens().focus()) == focusStart + inventoryui::kColumns,
+			"an arrow key moves the focus without submitting or cancelling the held stack");
+		CHECK(holdsHeldIcon(slotRect(destination)),
+			"the held stack follows the focused slot under keyboard control");
+		tap(SDLK_RIGHT);
+		present();
+		const int focusNext = int(sample.screens().focus());
+		destination = inventoryui::slotAtCell(focusNext - 1);
+		const glm::vec4 keyboardRect = slotRect(destination).rect;
+		CHECK(focusNext == focusStart + inventoryui::kColumns + 1 && held() &&
+			holdsHeldIcon(slotRect(destination)),
+			"arrow navigation keeps moving the keyboard-anchored held stack");
+		motion(middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).x,
+			middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).y);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) && int(sample.screens().focus()) == focusNext,
+			"passive pointer motion cannot jump the keyboard-anchored held stack");
+		// F11 (#316): inert keyboard events never move the preview. A
+		// modifier-only key is delivered but consumes nothing: focus pos,
+		// keyboard anchoring and the held stack stay exactly where they are.
+		tap(SDLK_LSHIFT);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) && int(sample.screens().focus()) == focusNext &&
+			sample.m_inventoryModality == gameui::InventoryModality::Keyboard,
+			"a modifier-only key leaves the keyboard anchoring untouched");
+		// F11: an unsupported pointer button never re-anchors the preview.
+		clickAt(middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))), SDL_BUTTON_X1);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) &&
+			sample.m_inventoryModality == gameui::InventoryModality::Keyboard,
+			"an unsupported mouse button leaves the keyboard anchoring untouched");
+		// F05: a completed click outside the grid is an invalid drop target: the
+		// armed gesture cancels without a command and the presentation returns
+		// to pointer anchoring.
+		const auto deadZone = glm::vec2{middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).x,
+			sample.m_inventoryLayout.main.bounds.rect.w + 8.f};
+		clickAt(deadZone);
+		present();
+		CHECK(!held() && snapshot() == beforeKeys &&
+			sample.m_inventoryModality == gameui::InventoryModality::Pointer,
+			"a click outside the grid cancels the armed gesture without a command");
+		// F03: re-arm by pointer, then carry the stack toward the bottom-right
+		// game-view edge — the offset flips / clamps so it stays fully visible.
+		clickAt(slotPoint(over), SDL_BUTTON_RIGHT);
+		const glm::vec2 corner{scene().rect.z - 10.f, scene().rect.w - 10.f};
+		SDL_WarpMouseInWindow(engine.window, corner.x, corner.y);
+		motion(corner.x, corner.y);
+		present();
+		const auto edgeRect = heldRect(corner);
+		const auto unflipped = gameui::rectangle(corner + glm::vec2{10.f * sample.m_inventoryLayout.scale},
+			{sample.m_inventoryLayout.main.cell, sample.m_inventoryLayout.main.cell});
+		const bool inside = edgeRect.rect.x >= scene().rect.x && edgeRect.rect.y >= scene().rect.y &&
+			edgeRect.rect.z <= scene().rect.z + 0.5f && edgeRect.rect.w <= scene().rect.w + 0.5f;
+		CHECK(held() && holdsHeldIcon(edgeRect) && inside && !(edgeRect.rect == unflipped.rect),
+			"the held stack flips near the view edge and stays fully inside the game view");
+
+		// PR #316 F01: Developer UI takes the keyboard from the open inventory;
+		// its keys never become inventory commands until a slot click hands the
+		// keyboard back.
+		engine.setDeveloperWorkspaceVisible(true);
+		char editorValue[32]{};
+		glm::vec2 editorPoint{};
+		bool popupWanted = false, popupVisible = false, popupCloseRequested = false;
+		const auto ownershipEditor = [&] {
+			ImGui::SetNextWindowPos({45.f, 70.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({220.f, 84.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Inventory keyboard ownership", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				ImGui::InputText("##owned", editorValue, sizeof(editorValue));
+				const auto item = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				editorPoint = {item.x - origin.x + 15.f, item.y - origin.y + 8.f};
+				popupVisible = false;
+				if (popupWanted)
+					ImGui::OpenPopup("owned-popup");
+				if (ImGui::BeginPopup("owned-popup"))
+				{
+					popupVisible = true;
+					ImGui::Text("Keyboard owned by Developer UI");
+					if (popupCloseRequested)
+						ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
+			}
+			ImGui::End();
+		};
+		popupWanted = true;
+		present(ownershipEditor);
+		present(ownershipEditor); // OpenPopup takes effect on the next frame
+		CHECK(popupVisible, "the developer window opens a non-modal popup over the inventory");
+		present(ownershipEditor);
+		CHECK(!held() && engine.inventoryPanelOpen() && popupVisible &&
+			sample.m_inventoryModality == gameui::InventoryModality::Pointer,
+			"opening a Developer UI popup cancels the held stack and resets the modality");
+		popupWanted = false;
+		popupCloseRequested = true;
+		present(ownershipEditor);
+		popupCloseRequested = false;
+		present(ownershipEditor);
+		CHECK(!popupVisible, "the proof popup closes again");
+		const auto beforeEditor = snapshot();
+		const auto focusEditor = int(sample.screens().focus());
+		clickAt(editorPoint);
+		present(ownershipEditor);
+		CHECK(engine.imgui->editingText(),
+			"the developer editor takes keyboard ownership from the open inventory");
+		tap(SDLK_END);
+		commitText("dev");
+		tap(SDLK_RETURN); // InputText applies its working buffer when the edit ends
+		tap(SDLK_SPACE);
+		tap(SDLK_LEFT);
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		for (int frame = 0; frame < 4; ++frame) // ImGui consumes its event queue one frame late
+			present(ownershipEditor);
+		CHECK(std::string_view(editorValue) == "dev", "committed text reaches only the developer editor");
+		CHECK(snapshot() == beforeEditor && !held() && int(sample.screens().focus()) == focusEditor,
+			"Enter, Space, arrows and Tab reach only the developer editor, not the inventory");
+		clickSlot(2);
+		present(ownershipEditor);
+		CHECK(!engine.imgui->pendingKeyboard() && !engine.imgui->editingText() && !held(),
+			"clicking an inventory slot returns keyboard ownership to the native screen");
+		const int focusResume = int(sample.screens().focus());
+		tap(SDLK_TAB);
+		present(ownershipEditor);
+		CHECK(int(sample.screens().focus()) == focusResume + 1,
+			"native keyboard navigation resumes after the developer handoff");
+		capture("ownership");
+
+		// PR #316 round 3 F01: keyboard ownership with a NON-TEXTUAL widget.
+		// A focused button stays the owner after its ActiveId releases; Tab,
+		// arrows, Enter and Space reach only the Developer UI; a right-click
+		// on a native slot hands the keyboard back and arms a half-stack
+		// gesture that the deferred handoff must not re-latch away.
+		int buttonActivations = 0;
+		glm::vec2 buttonPoint{};
+		const auto navButton = [&] {
+			// Below the round-2 editor rect: that window stops being submitted
+			// here, but ImGui can keep it as HoveredWindow for a while, and a
+			// overlapping rect would steal the hover from this one.
+			ImGui::SetNextWindowPos({45.f, 200.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({220.f, 84.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Inventory keyboard button", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				if (ImGui::Button("Dev button"))
+					++buttonActivations;
+				const auto item = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				buttonPoint = {item.x - origin.x + 15.f, item.y - origin.y + 8.f};
+			}
+			ImGui::End();
+		};
+		present(navButton); // paints the window and locates the button
+		// Focus and release in separate builds: the press arms the widget
+		// (ActiveId), the next build releases it and activates the button —
+		// the exact press-then-release an interactive focus carries. The
+		// pointer position is fed to ImGui directly: a real interaction has
+		// the OS cursor at the press point, and the desktop can move the
+		// physical cursor between the frames of an automated run. Events
+		// queued behind a keyboard-yield boundary drain over a few frames,
+		// so the activation is polled within a bounded deadline.
+		SDL_WarpMouseInWindow(engine.window, buttonPoint.x, buttonPoint.y);
+		engine.imgui->observePointer(buttonPoint.x, buttonPoint.y);
+		motion(buttonPoint.x, buttonPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, buttonPoint.x, buttonPoint.y);
+		present(navButton);
+		engine.imgui->observePointer(buttonPoint.x, buttonPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, buttonPoint.x, buttonPoint.y);
+		for (int frame = 0; frame < 8 && buttonActivations == 0; ++frame)
+			present(navButton);
+		present(navButton); // the latch observes the released ActiveId here
+		CHECK(buttonActivations == 1,
+			"the click reaches and activates the non-textual developer button exactly once");
+		CHECK(engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"a released non-textual developer button keeps the keyboard (no editing field involved)");
+		CHECK(!engine.imgui->ownsActiveInput(),
+			"the released button holds no ActiveId while the keyboard ownership persists");
+		const auto beforeDevNav = snapshot();
+		const int focusBeforeDevNav = int(sample.screens().focus());
+		tap(SDLK_TAB);
+		tap(SDLK_LEFT);
+		tap(SDLK_RIGHT);
+		tap(SDLK_RETURN);
+		tap(SDLK_SPACE);
+		engine.handleEvents();
+		for (int frame = 0; frame < 4; ++frame) // ImGui consumes its event queue one frame late
+			present(navButton);
+		CHECK(engine.imgui->ownsKeyboard() && !held() && snapshot() == beforeDevNav &&
+			int(sample.screens().focus()) == focusBeforeDevNav,
+			"Tab, arrows, Enter and Space reach only the developer button, not the inventory");
+		engine.sim->grantItems(Sand, 20);
+		present(navButton);
+		const auto sandSlot = [&] {
+			const auto all = snapshot();
+			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
+				if (all[size_t(slot)].item == Sand && all[size_t(slot)].count == 20)
+					return slot;
+			throw std::runtime_error("proof found no sand stack for the round-3 ownership handoff");
+		}();
+		const auto emptyMain = [&] {
+			for (int slot = items::kHotbarSize; slot < inventoryui::kSlotCount; ++slot)
+				if (snapshot()[size_t(slot)].isEmpty())
+					return slot;
+			throw std::runtime_error("proof found no empty main slot for the round-3 split");
+		}();
+		clickAt(slotPoint(sandSlot), SDL_BUTTON_RIGHT);
+		present(navButton);
+		CHECK(held() && !engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"a right-click on a native slot takes the keyboard back and arms the half-stack gesture");
+		for (int frame = 0; frame < 6; ++frame)
+			present(navButton);
+		CHECK(held() && !engine.imgui->ownsKeyboard() && !engine.imgui->editingText(),
+			"deferred frames do not restore the developer keyboard ownership");
+		clickAt(slotPoint(emptyMain));
+		present(navButton);
+		CHECK(!held() && snapshot()[size_t(sandSlot)].count == 10 &&
+			snapshot()[size_t(emptyMain)].item == Sand && snapshot()[size_t(emptyMain)].count == 10,
+			"the half-stack split completes through native input after the developer handoff");
+		capture("ownership-button");
+
+		engine.setDeveloperWorkspaceVisible(false);
+		resize(960, 540);
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 2.f});
+		sample.setFaceDensityOverride(2.f);
+		const auto generation = engine.m_atlasVersion;
+		CHECK(engine.applyResourcePack("").atlasOk && engine.m_atlasVersion != generation, "atlas generation changes while open");
+		frames(3);
+		capture("compact-2x");
+		CHECK(sample.m_draws.atlasGeneration() == engine.m_atlasVersion &&
+			sample.lastRecordedStats()->metrics.dropped == 0 &&
+			std::ranges::any_of(sample.m_draws.quads(), [](const gameui::Quad &q) { return q.layer == STONE; }),
+			"compact high-density layout renders fresh item icons after reload");
+		clickSlot(10);
+		present();
+		CHECK(held() && engine.reloadWorld(43), "epoch test begins while holding a stack");
+		present();
+		CHECK(!engine.inventoryPanelOpen() && !held() && engine.playerHudView().hotbar.slots[0].empty(),
+			"world reload drops the previous inventory and cursor presentation");
+		context.waitIdle();
+		const auto errors = context.validationErrorCount() - errorsBefore;
+		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;
+		std::cout << "Inventory validation errors=" << errors << " known_rtss_errors=" << rtss << '\n';
+		CHECK(errors == rtss, "inventory adds no validation errors outside known RTSS messages");
+	}
+
 	void playerHudProof()
 	{
 		init();
@@ -1219,8 +1656,6 @@ struct GameUiBackendProbe
 					std::abs(restored.size.y - dockedView.size.y) < 0.5f,
 				"the persisted docking layout is restored after every toggle");
 		}
-		// The legacy inventory keeps working in both layouts: docked/floating in
-		// the workspace, and floating over gameplay while it is hidden.
 		tap(SDLK_E);
 		present();
 		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable(),
@@ -1233,13 +1668,13 @@ struct GameUiBackendProbe
 		present();
 		tap(SDLK_E);
 		present();
-		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() &&
+		CHECK(engine.inventoryPanelOpen() && !engine.developerUiAvailable() &&
 				!engine.developerWorkspaceVisible(),
-			"a hidden workspace still opens the legacy inventory as a floating window");
+			"the native inventory opens with the workspace hidden");
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(!engine.inventoryPanelOpen() && engine.mouseCaptured,
-			"Escape closes the floating inventory and returns to the HUD");
+			"Escape closes the inventory and returns to the HUD");
 		engine.setShowDeveloperUi(false);
 		engine.sim->grantItems(items::ItemId::Stone, 12);
 		engine.sim->grantItems(items::ItemId::Dirt, 4);
@@ -1271,11 +1706,10 @@ struct GameUiBackendProbe
 			"one wheel event and one non-repeat drop produce one selection and one count decrement");
 
 		tap(SDLK_E);
-		tap(SDLK_Q);
 		present();
-		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() && !hasStoneIcon() &&
-			engine.playerHudView().hotbar.slots[0].count == 11,
-			"inventory hides the HUD and consumes gameplay input without the workspace");
+		CHECK(engine.inventoryPanelOpen() && !engine.developerUiAvailable() && hasStoneIcon() &&
+			sample.m_inventoryView.snapshot->slots[0].count == 11,
+			"the native inventory uses the same authoritative stacks as the HUD");
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(!engine.inventoryPanelOpen() && hasStoneIcon() && engine.mouseCaptured,
@@ -1367,23 +1801,7 @@ struct GameUiBackendProbe
 		CHECK(errors == rtss, "HUD adds no validation errors outside known RTSS messages");
 	}
 
-	/// The persisted inventory record of the canonical window, straight out of the
-	/// settings blob ImGui would write (issue #303 F01/F12). Empty when the record
-	/// is absent.
-	std::string inventoryIniRecord()
-	{
-		const char *ini = ImGui::SaveIniSettingsToMemory();
-		const std::string text = ini ? ini : "";
-		const auto start = text.find("[Window][Inventory]\n");
-		if (start == std::string::npos)
-			return {};
-		const auto end = text.find("\n[", start + 1);
-		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
-	}
-
-	/// F04/F09/F11/F12: the workspace visibility chord, its benchmark guard,
-	/// developer-input cancellation and the inventory docking identity are
-	/// exercised through real SDL events, not through direct setter calls.
+	/// Exercise the workspace shortcut, dock tree and input cancellation with SDL events.
 	void workspaceProof()
 	{
 		auto &shell = engine.gameUi->shell();
@@ -1488,51 +1906,21 @@ struct GameUiBackendProbe
 		CHECK(menuBarFrame() >= ImGui::GetFrameCount() - 1,
 			"the developer frame is built again as soon as the workspace returns");
 
-		// (6) F01: the hidden-workspace inventory is a separate, non-persistent
-		// identity, so the canonical window keeps its dock and its settings record.
+		// A player screen can remain open as the workspace changes around it.
+		auto &sample = *engine.m_playerUi;
 		tap(SDLK_E);
 		frames(2);
-		checked(engine.inventoryPanelOpen(), "the inventory opens in the visible workspace");
-		const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(shell.dockspaceId());
-		checked(central && central->ID != 0, "the dockspace exposes a central node to dock into");
-		ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : shell.dockspaceId());
-		ImGui::DockBuilderFinish(shell.dockspaceId());
-		frames(2);
-		const ImGuiWindow *canonical = ImGui::FindWindowByName("Inventory");
-		checked(canonical != nullptr, "the canonical inventory window exists");
-		const ImGuiID dockedId = canonical ? canonical->DockId : 0;
-		const auto recordBefore = inventoryIniRecord();
-		CHECK(dockedId != 0 && recordBefore.find("DockId=") != std::string::npos,
-			"the inventory is docked with a persisted association before hiding (dock=" << dockedId
-				<< " record=[" << recordBefore << "])");
+		const auto dockedPanel = sample.m_inventoryLayout.panel;
+		const auto dockId = shell.dockspaceId();
 		tap(SDLK_D, chord);
-		present();
 		frames(2);
-		const ImGuiWindow *floating = ImGui::FindWindowByName("Inventory###inventory-floating");
-		CHECK(engine.inventoryPanelOpen() && floating != nullptr,
-			"the hidden workspace keeps the inventory open through its temporary identity");
-		CHECK(floating && floating->DockId == 0 &&
-			(floating->Flags & ImGuiWindowFlags_NoDocking) &&
-			(floating->Flags & ImGuiWindowFlags_NoSavedSettings),
-			"the temporary inventory refuses docking and the settings file");
-		const ImGuiWindow *stillCanonical = ImGui::FindWindowByName("Inventory");
-		CHECK(stillCanonical && stillCanonical->DockId == dockedId,
-			"opening the floating inventory does not undock the canonical window");
-		const auto recordWhileHidden = inventoryIniRecord();
-		CHECK(recordWhileHidden == recordBefore &&
-			recordWhileHidden.find("inventory-floating") == std::string::npos,
-			"the persisted inventory record is untouched while the workspace is hidden");
-		tap(SDLK_E);
-		present();
-		CHECK(!engine.inventoryPanelOpen(), "the floating inventory still closes normally");
-		engine.setDeveloperWorkspaceVisible(true);
+		CHECK(engine.inventoryPanelOpen() && !engine.developerUiAvailable() &&
+			sample.m_inventoryLayout.panel != dockedPanel && shell.dockspaceId() == dockId,
+			"native inventory uses the full view when the workspace hides");
+		tap(SDLK_D, chord);
 		frames(2);
-		tap(SDLK_E);
-		frames(2);
-		const ImGuiWindow *restored = ImGui::FindWindowByName("Inventory");
-		CHECK(engine.inventoryPanelOpen() && restored && restored->DockId == dockedId &&
-			inventoryIniRecord() == recordBefore,
-			"restoring the workspace reopens the inventory in its original dock");
+		CHECK(engine.inventoryPanelOpen() && sample.m_inventoryLayout.panel == dockedPanel &&
+			shell.dockspaceId() == dockId, "restoring the workspace restores the inventory safe area");
 		tap(SDLK_E);
 		present();
 	}
@@ -1621,83 +2009,8 @@ struct GameUiBackendProbe
 			<< " sets=" << stats.descriptorSets << " instance_bytes=" << stats.instanceBytes
 			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
-	/// F01/F12 across a real process boundary: the same ini file is written by the
-	/// `dock` phase (workspace visible, inventory docked into the central node) and
-	/// then re-opened by the `hidden` phase, which starts without the developer
-	/// workspace and opens the inventory through the temporary identity. The
-	/// canonical `[Window][Inventory]` record must come back byte-identical.
-	void iniPersistence(const std::filesystem::path &ini, std::string_view phase)
-	{
-		init();
-		m_iniPath = ini.string();
-		ImGui::GetIO().IniFilename = m_iniPath.c_str();
-		if (std::filesystem::exists(ini))
-			ImGui::LoadIniSettingsFromDisk(m_iniPath.c_str());
-		const bool dock = phase == "dock";
-		engine.setDeveloperWorkspaceVisible(dock);
-		engine.setInventoryOpen(false);
-		frames(3);
-		tap(SDLK_E);
-		frames(2);
-		checked(engine.inventoryPanelOpen(), "the inventory is open for the ini proof");
-		if (dock)
-		{
-			const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(engine.gameUi->shell().dockspaceId());
-			checked(central && central->ID != 0, "the dockspace exposes a central node");
-			ImGui::DockBuilderDockWindow("Inventory", central ? central->ID : engine.gameUi->shell().dockspaceId());
-			ImGui::DockBuilderFinish(engine.gameUi->shell().dockspaceId());
-			frames(2);
-			tap(SDLK_E);
-			frames(1);
-			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
-			const auto record = iniFileInventoryRecord(ini);
-			std::cout << "ini dock phase record: " << record << '\n';
-			CHECK(record.find("DockId=") != std::string::npos &&
-				record.find("DockId=0x00000000") == std::string::npos,
-				"the dock phase persists a real docking association");
-		}
-		else
-		{
-			const auto before = iniFileInventoryRecord(ini);
-			checked(before.find("DockId=0x00000000") == std::string::npos && !before.empty(),
-				"the hidden phase starts from a persisted docking association");
-			tap(SDLK_E); // close through the temporary identity
-			frames(1);
-			tap(SDLK_E); // and open it again
-			frames(2);
-			checked(engine.inventoryPanelOpen() &&
-				ImGui::FindWindowByName("Inventory###inventory-floating") != nullptr,
-				"the hidden workspace opens the inventory through its temporary identity");
-			ImGui::SaveIniSettingsToDisk(m_iniPath.c_str());
-			const auto after = iniFileInventoryRecord(ini);
-			std::cout << "ini hidden phase record: " << after << '\n';
-			CHECK(after == before,
-				"opening and closing the inventory with the workspace hidden keeps its persisted record");
-		}
-	}
-
-	std::string iniFileInventoryRecord(const std::filesystem::path &ini) const
-	{
-		std::ifstream stream(ini);
-		if (!stream)
-			return {};
-		std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-		const auto start = text.find("[Window][Inventory]\n");
-		if (start == std::string::npos)
-			return {};
-		const auto end = text.find("\n[", start + 1);
-		return end == std::string::npos ? text.substr(start) : text.substr(start, end + 1 - start);
-	}
 };
 
-int runGameUiIniPersistence(Engine &engine, const std::filesystem::path &ini, std::string_view phase)
-{
-	GameUiBackendProbe(engine).iniPersistence(ini, phase);
-	if (testmain::fails == 0)
-		std::cout << "PASS: inventory ini persistence, " << phase << " phase (" << testmain::checks
-			<< " checks)\n";
-	return testmain::exitCode();
-}
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output)
 {
 	GameUiBackendProbe(engine).screenshot(output);
@@ -1741,5 +2054,13 @@ int runPlayerHudProof(Engine &engine)
 	GameUiBackendProbe(engine).playerHudProof();
 	if (testmain::fails == 0)
 		std::cout << "PASS: live player HUD proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
+int runPlayerInventoryProof(Engine &engine)
+{
+	GameUiBackendProbe(engine).playerInventoryProof();
+	if (testmain::fails == 0)
+		std::cout << "PASS: native player inventory (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();
 }

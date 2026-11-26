@@ -187,7 +187,6 @@ void Engine::retireWorldProjection()
 	if (!m_remote)
 	{
 		worldRenderer->overlays().setPlayers({});
-		m_inventoryPanelOpen = false;
 		jumpPressed = false;
 	}
 	if (!renderBridge)

@@ -268,11 +268,9 @@ void Engine::resetWorldProjection()
 	m_itemEventsScratch.clear();
 	clearGameplayInput();
 	m_inputRouter.cancelPlayerUi();
+	m_inventoryResult.reset();
 	if (m_playerUi)
-	{
 		m_playerUi->resetScreens();
-		m_inventoryPanelOpen = false;
-	}
 	if (worldRenderer)
 	{
 		// Drop the renderer's mob presentation too: setMobs is otherwise
@@ -294,15 +292,9 @@ void Engine::resetWorldProjection()
 	m_uiBiomeWorldGen = 0;
 	m_uiBiome = -1;
 	if (gameUi)
-	{
 		gameUi->invalidateBiomeMap();
-		gameUi->resetInventoryInteraction();
-	}
 	if (m_remote)
-	{
-		m_inventoryPanelOpen = false;
 		jumpPressed = false;
-	}
 }
 
 void Engine::stepDerivedProjectionForTests(double dt)
@@ -440,11 +432,7 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 	{
 		vkContext->waitIdle();
 		const TextureAtlasLoadReport report = worldRenderer->reloadResourcePack(path);
-		++m_atlasVersion; // UI icon descriptors revalidate against the new atlas
-		// Eagerly drop icon views of the destroyed atlas while the device is
-		// idle (issue #229 review): no orphaned view lingers until next draw.
-		if (gameUi)
-			gameUi->invalidateItemIcons();
+		++m_atlasVersion;
 		out.atlasOk = true;
 		out.packHits = report.packHits;
 		out.packMisses = report.packMisses;
@@ -984,8 +972,7 @@ void Engine::handleEvents()
 			const SDL_Keycode key = event.key.key;
 			// Workspace visibility (issue #303 F04). GLOBAL by policy, so it also
 			// fires while a developer text field owns the keyboard; the whole
-			// workspace goes away, the legacy inventory keeps floating and the
-			// dockspace identity survives (F01).
+			// workspace goes away and the dockspace identity survives (F01).
 			if (isWorkspaceToggle(static_cast<int>(key), event.key.mod))
 			{
 				setDeveloperWorkspaceVisible(!m_showDeveloperUi);
@@ -1081,7 +1068,7 @@ void Engine::handleEvents()
 			}
 			if (key == SDLK_E)
 			{
-				setInventoryOpen(!m_inventoryPanelOpen);
+				setInventoryOpen(true);
 				break;
 			}
 			if (key == SDLK_T)
@@ -1114,7 +1101,7 @@ void Engine::handleEvents()
 				break;
 			if (m_remote)
 			{
-				if (windowFocused && !m_inventoryPanelOpen &&
+				if (windowFocused &&
 					(event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT))
 					sendRemoteVoxelAction(event.button.button == SDL_BUTTON_RIGHT);
 				break;
@@ -1579,20 +1566,11 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	// The developer workspace can be hidden at runtime, but ImGui still runs:
-	// the legacy inventory may be open, and the dockspace is submitted with
-	// KeepAliveOnly so the persisted docking layout survives the hidden frames
-	// (issue #303 F01). Only a native player screen or an inspection/benchmark
-	// view removes the developer layer entirely.
+	// Keep the dock tree alive while the workspace is hidden.
 	if (!gameUi || !developerUiPresent())
 		return;
 
-	// Nothing consumes the developer frame while the workspace is hidden and no
-	// inventory is on screen: submit the dockspace alone instead of sampling
-	// biome/inventory/network/persistence state and wiring callbacks every frame
-	// (issue #303 F09). Toggle state owned by the developer keys still reaches the
-	// overlay layer, so B and the demo players keep working without the panels.
-	if (!m_showDeveloperUi && !m_inventoryPanelOpen)
+	if (!m_showDeveloperUi)
 	{
 		gameUi->maintainDockspace();
 		applyOverlayToggles();
@@ -1683,9 +1661,7 @@ void Engine::drawUi()
 	f.render = &renderSettings;
 	f.timing = &renderTiming;
 	f.staging = &stagingRing;
-	// Commands-only sim surface (review M6): read-only views + command
-	// callbacks, the inventory discipline — no mutable pointer into
-	// authoritative state crosses into the UI.
+	// Commands-only sim surface (review M6).
 	f.highlight = &highlight;
 	f.mouseCaptured = &presentedCapture;
 	f.showChunkBorders = &showChunkBorders;
@@ -1702,15 +1678,7 @@ void Engine::drawUi()
 		f.mobsEnabled = sim->mobsEnabled();
 		f.setMobsEnabled = [this](bool enabled) { sim->setMobsEnabled(enabled); };
 		f.paused = &presentedPause;
-		sim->inventorySnapshot(f.inventory);
-		f.selectHotbarSlot = [this](int slot) { selectHotbarSlot(slot); };
-		f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
-		f.swapStacks = [this](int a, int b) { sim->swapStacks(a, b); };
-		f.splitStack = [this](int from, int to) { sim->splitStack(from, to); };
-		f.dropFromSlot = [this](int slot, uint16_t count, glm::dvec3 dir) { sim->dropFromSlot(slot, count, dir); };
 	}
-	f.inventoryPanelOpen = &m_inventoryPanelOpen;
-	f.atlasVersion = m_atlasVersion;
 	if (m_playerUi)
 		f.gameUiStats = m_playerUi->lastRecordedStats();
 	f.seed = worldSeed();
@@ -1802,10 +1770,7 @@ void Engine::drawUi()
 		};
 	}
 
-	if (m_showDeveloperUi)
-		gameUi->draw(f);
-	else
-		gameUi->drawWithoutWorkspace(f);
+	gameUi->draw(f);
 
 	if (presentedPause != prevPause)
 	{
@@ -2037,10 +2002,16 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 			view = {{x, y, x + area.size.x, y + area.size.y}};
 		}
 		std::optional<gameui::HudView> hud;
-		if (!m_uiSpike && m_playerUi->hudVisible() && !m_inventoryPanelOpen && !paused &&
+		if (!m_uiSpike && m_playerUi->hudVisible() && !paused &&
 			m_playerUi->screens().top() == gameui::Screen::Hud &&
 			!(developerOverlay && (imgui->hasOpenPopup() || gameUi->isFileDialogOpen())))
 			hud = playerHudView();
+		if (inventoryPanelOpen())
+		{
+			if (inputContext().devDialog)
+				m_playerUi->cancelInventoryGesture();
+			m_playerUi->setInventoryView(playerInventoryView());
+		}
 		m_playerUi->prepare(window, frameIndex, swapchain->getExtent(), view,
 			worldRenderer->getTextureManager(), m_atlasVersion, hud ? &*hud : nullptr);
 		syncUiInput();

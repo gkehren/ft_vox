@@ -63,6 +63,7 @@ add_test(NAME GameUiStyle COMMAND test_game_ui_style)
 add_executable(test_game_ui_components test_game_ui_components.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiComponents.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerHud.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/PlayerInventory.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiGallery.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/PlayerUiWidgets.cpp)
 target_include_directories(test_game_ui_components PRIVATE ${CMAKE_SOURCE_DIR}/src)

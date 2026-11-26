@@ -45,7 +45,7 @@ public:
 	}
 	uint64_t revision() const { return m_revision; }
 	bool suppressDeveloper() const { return top() == Screen::ConfirmExit || top() == Screen::Loading; }
-	bool nativeScreen() const { return top() != Screen::Hud && top() != Screen::Inventory; }
+	bool nativeScreen() const { return top() != Screen::Hud; }
 	bool blocksGameplay() const { return top() != Screen::Hud; }
 	bool pausesWorld(bool connected) const { return !connected && contains(Screen::Pause); }
 
@@ -87,7 +87,7 @@ struct InputContext
 	bool transition{};
 	bool captureFailed{};
 
-	InputOwner choose(InputKind kind, bool global = false, bool back = false, bool inventoryBack = false,
+	InputOwner choose(InputKind kind, bool global = false, bool back = false, bool inventoryShortcut = false,
 					  bool captureShortcut = false) const
 	{
 		if (!interactive)
@@ -100,11 +100,20 @@ struct InputContext
 			return InputOwner::PlayerUi;
 		if (devDialog)
 			return InputOwner::DeveloperUi;
-		if (kind == InputKind::Key && back)
+		if (kind == InputKind::Key)
 		{
-			if (devText || (!nativeScreen && devKeyboard && !inventory))
+			// Explicit Developer UI keyboard ownership (PR #316 F01): an active
+			// developer control, keyboard navigation or a non-modal popup owns
+			// every key while it holds the keyboard — including back keys and
+			// the keys of an open native screen, whose navigation would
+			// otherwise fire inventory operations through a shared keyboard.
+			// The host neutralizes only passive ImGui focus before entering
+			// the policy (routeUiEvent) and transfers ownership back when the
+			// player clicks the native surface. Dev text (an editing field or a
+			// queued activation of one) keeps its historical first priority.
+			if (devText || devKeyboard)
 				return InputOwner::DeveloperUi;
-			if (nativeScreen || inventory)
+			if (back && (nativeScreen || inventory))
 				return InputOwner::PlayerUi;
 		}
 		if (kind == InputKind::Pointer)
@@ -120,16 +129,14 @@ struct InputContext
 			return InputOwner::DeveloperUi;
 		if (nativeScreen)
 			return InputOwner::PlayerUi;
-		if (inventory && inventoryBack)
+		if (inventory && inventoryShortcut)
 			return InputOwner::PlayerUi;
 		if (kind != InputKind::Pointer && devKeyboard)
 			return InputOwner::DeveloperUi;
 		// The host can open Pause while joining or disconnected, and C must stay
-		// reachable: the HUD's recovery line asks the player to release the
-		// captured mouse before Multiplayer > Reconnect (issue #303 F03). Both
-		// exceptions sit after every modal, inventory, developer and benchmark
-		// guard above, and neither unlocks movement or gameplay commands.
-		if (transition && !inventory && kind == InputKind::Key && (back || captureShortcut))
+		// reachable to recover from a connection failure. E can open the
+		// inventory to show the current session state while commands are disabled.
+		if (transition && !inventory && kind == InputKind::Key && (back || captureShortcut || inventoryShortcut))
 			return InputOwner::Gameplay;
 		if (inventory || transition || kind == InputKind::Text || (captureFailed && !back && !captureShortcut))
 			return InputOwner::Blocked;

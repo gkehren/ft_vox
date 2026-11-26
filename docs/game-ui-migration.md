@@ -2,6 +2,116 @@
 
 Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Phase A adds an isolated preview. A normal launch still follows the existing solo, Join and Host paths and the existing ImGui controls.
 
+## Native player inventory (#304)
+
+Press **E** in a solo or remote world to open a three-by-nine inventory above the nine-slot hotbar. The panel fits the available game view and follows the saved player UI scale. It uses the same slot tokens and generation-tagged atlas icons as the HUD. A missing icon leaves a placeholder and the item count. Tooltips fit inside the game view, including when developer docks are visible.
+
+| Input | Behavior |
+| --- | --- |
+| Click a stack, then click a destination | Move the whole stack into an empty slot, merge with a matching item, or swap different items. |
+| Right-click a stack, then click a destination | Move the larger half into an empty or matching slot. Only the amount that fits moves. |
+| Re-click the source, right-click while holding, or click a gap or outside the panel | Cancel the held stack. |
+| Arrows, Tab, Shift+Tab | Move focus through the grid and buttons. |
+| Enter or Space, with Shift for half | Use the focused slot or button. |
+| 1–9 or wheel, Q, Drop selected stack | Select a hotbar slot, drop one item, or drop the whole selected stack. |
+| E, Escape, or Close | Close inventory and restore the previous capture state. |
+
+The native screen owns focus and the held stack. The `InventoryUi.hpp` planner stores a typed source slot and whole/half mode. The displayed stack is computed from the current snapshot. A newer private revision or a changed solo snapshot invalidates the gesture, as do focus loss, closing, a workspace toggle and a world or session reset. Joining, resyncing and disconnected states hide the previous inventory and disable its commands. Reconnect uses the existing Multiplayer menu.
+
+One completed gesture emits one Engine intent. The solo adapter returns the simulation result immediately. The remote adapter disables commands while the request is pending, marks the affected slots and keeps showing confirmed counts. The server's reliable channel sends the required inventory revision ahead of the action result. The screen can then show rejection or a partial transfer using that result. Item IDs, saves and wire messages use the existing formats. The old ImGui inventory and its per-layer icon descriptors are retired. Developer inspection, hosting and the dockspace continue through the existing Developer UI.
+
+### Correction pass: ownership and held stack (#316)
+
+- **Keyboard ownership (F01).** The Developer UI and the native inventory share one explicit keyboard owner, carried by `InputContext` over a persistent `ImGuiLayer` ownership latch (round 2 below — a `WantCaptureKeyboard` retained by passive ImGui focus never owns). While an active developer control, ImGui keyboard navigation or a non-modal popup holds the keyboard, every key — including navigation and back keys — goes to the Developer UI and the inventory screen receives nothing, so developer navigation can never trigger inventory gestures. Clicking an inventory slot transfers ownership back to the native screen, and the developer side cancelling input (modal, capture change, transition) also cancels the inventory's held stack and armed gesture. Global shortcuts, the pause menu and the existing modal/text-input priorities are unchanged; `E` and Escape stay contextual. The policy is unit-tested in `GameUiInteraction` and `InputRouting` and regression-tested by the solo inventory proof.
+- **Held-stack placement (F03/F05).** `heldStackPlacement` (`src/Engine/PlayerInventory.hpp`) is the single pure geometry helper: it prefers the normal pointer offset, flips it when the icon would cross the right or bottom edge of the available game view, and clamps the final rectangle fully inside — compact, ultrawide and 200%-scale layouts keep the held stack visible, and placement follows the same available game view, so the central developer dock area is respected. The presentation follows the active input modality (`InventoryModality` in `GameUiSample.hpp`): pointer interaction anchors the preview to the pointer; keyboard pickup and arrow navigation anchor it to the focused slot, falling back to the source slot when no valid destination is focused. Passive mouse events do not override keyboard navigation, switching modality neither cancels nor submits an armed gesture and mutates nothing, and the transient modality state resets with the screen (close/reset).
+- **Unified pending tracking (F04).** HUD shortcuts (`1–9`, `Q`) and native gestures share one submission adapter, `Engine::submitRemoteInventoryAction` (`src/Engine/EngineMultiplayer.cpp`). The affected slots publish only after a successful submission, so a HUD selection or drop followed by opening the inventory shows the pending state on the relevant slot; the action result, disconnect, resync and session reset clear it, and failed submissions never leave stale metadata. Terrain actions keep their own pending flag. The single-action-in-flight policy and the wire protocol are unchanged.
+
+### Correction verification (#316 F01–F06)
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti, Vulkan 1.4.357, SDL 3.4.18. Every row was executed on the corrected HEAD of #316. The `--ui-ini-persistence` proof mode and the `GameUIInventory.cpp` ImGui panel are retired and no longer part of the reproducible procedures.
+
+| Check | Result |
+| --- | --- |
+| `test_engine_reload.exe --player-inventory-proof` | PASS, 40 checks, including the F01 keyboard-ownership scenario (developer navigation/popups own every key, clicking the inventory hands ownership back), the F03 edge/clamp placement, and the F05 modality-following held stack; `errors=21 known_rtss_errors=21` (only the known RTSS swapchain messages) |
+| `test_engine_reload.exe --player-hud-proof` | PASS, 48 checks |
+| `test_engine_reload.exe --game-ui-showcase-proof` | PASS, 39 checks |
+| `ctest -C Release` (graphical build) | 66/66 excluding the multiplayer label; `VisualRegression` passes with the committed goldens (the offscreen scenes contain no player UI) |
+| `ctest -C Release -L multiplayer` | 9/9 passed |
+| `tests/test_multiplayer_join_native.py` (graphical client) | 60 checks passed: readiness, reconnect, blocked-session recovery, motion tracing across switches |
+| Manual hosted two-party session (the real game joined to a dedicated `ft_vox_server` with the F04 submission trace) | 37 accepted native gestures confirmed by authoritative revisions: 23 selects, 4 whole moves (hotbar↔grid both directions), 3 half splits (an odd 3-stack split into 1+1+1), 3 drop-one (exactly one unit each, later re-collected — conservation), 1 whole-stack drop. Two authoritative rejections left the confirmed inventory untouched. Server stop-file shutdown committed checkpoint generation 2 |
+
+A first attempt at the scripted two-client hosted closure (`tests/test_hosted_closure_native.py`) failed with a native `0xC0000005` in both clients; this was resolved in correction round 2 below (the root cause was the F07 harness defect — dangling references to by-value optionals — not a production issue), and the closure now passes repeatedly on the same machine.
+
+### Correction round 2 (#316 F01, F07–F11)
+
+Round 2 replaces the fragile hosted-closure validation with deterministic checks and fixes the reliability findings the first round surfaced. The architecture, server authority, wire protocol and save formats are unchanged.
+
+- **Keyboard ownership latch (F01).** Ownership is now persistent instead of per-event: a meaningful Developer UI signal — an active widget, an editing field, an open popup or a visible keyboard-navigation highlight (`ImGui::GetIO().NavVisible`) — latches `ImGuiLayer::m_devKeyboardOwner` at the frame boundary, and only a meaningful move toward the player UI releases it (clicking the native screen, focus loss, a workspace or session change). A passive `WantCaptureKeyboard` retained by an idle ImGui window never latches, so it can neither swallow the contextual `E`/Escape nor trigger inventory gestures, while a focused button *without* an active `ActiveId` keeps its keys. Global shortcuts, modal and text-input priorities are unchanged.
+- **Memory safety in the validation harness (F07).** The root cause of the previously reported `0xC0000005` was in the test harness: `ClientTransport::inventory()` returns `std::optional<wire::Inventory>` **by value**, and the closure bound references to those temporaries (`const auto &inventory = *remote.transport.inventory()`) and ranged over `transport.inventory()->slots` — reading destroyed storage. Every access now takes an owned snapshot, missing authoritative state is a terminal failure with its own diagnostic, and nothing is retained across `pump()` calls.
+- **Deterministic multiplayer inventory matrix (F09/F02).** The exhaustive operation matrix no longer mines: after one shared-terrain break (the original closure contract), the owner stops the server, rewrites the committed checkpoint roster into a known fixture (owner: 64/40/5 of material A, 8 of material B, selection 3; guest: 8 of a distinct item, selection 6) with the commit manifest's roster checksum kept consistent, and restarts on the same world. The matrix then drives whole move (+ duplicate-input once-only), odd split (5→2+3), merge, partial merge (destination to capacity, remainder preserved), swap, drop one, drop stack, pickup restoration and a rejected drop from a dynamically discovered empty slot, all through the real native screen and the real client/server action path. World entities are identified by entity id against a baseline snapshot, awaited independently of the action acknowledgment, and the actor is steered toward the tracked drop so the shared 1.5-block auto-pickup radius is actually entered. Guest private-state isolation is polled across the whole matrix and re-verified after the checkpoint restart. See the hosted-closure row in the verification table below.
+- **Held-stack bounds (F10).** `heldStackPlacement` constrains the effective cell to the available view (`std::min({cell, available.x, available.y})`) before flipping/clamping, uses that effective size consistently, keeps the square aspect and returns an empty rectangle when nothing fits — a viewport smaller than the requested cell can no longer produce an overflowing preview. `tests/test_game_ui_components.cpp` covers strictly smaller, narrow, short, offset and empty viewports.
+- **Input-modality filtering (F11).** The `InventoryModality` (pointer vs keyboard, F05) only changes on a *supported* interaction: unsupported buttons return before touching the preview, modifier-only keys and chords leave it, passive motion and irrelevant releases never reach the branches, and unsupported/unhandled keys do not move it. A modality change never submits or cancels a gesture on its own.
+
+#### Round-2 verification
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti, Vulkan 1.4.357. CPU-only and graphical ctest suites were re-run after the round-2 changes; the hosted closure ran repeatedly on the same build (see below). The previously reported `0xC0000005` was traced to the F07 harness defect above; with the dangling reads fixed, repeated hosted-closure executions complete without any access violation, on the same machine that reproduced the crash.
+
+| Check | Result |
+| --- | --- |
+| `test_engine_reload.exe --player-inventory-proof` | PASS, 42 checks — F01 latch (passive focus does not steal keys, clicking restores native nav), F10 bounds and F11 filtered modality; only the known RTSS swapchain validation messages |
+| `test_engine_reload.exe --player-hud-proof` | PASS, 48 checks |
+| `test_engine_reload.exe --game-ui-showcase-proof` | PASS, 40 checks |
+| `ctest -C Release` (graphical) | 75/75 passed (full suite, includes the 9 multiplayer tests) |
+| `ctest -C Release -L multiplayer` | 9/9 passed |
+| `tests/test_multiplayer_join_native.py` | PASS, 60 checks (readiness, reconnect, blocked-session recovery, motion tracing across switches) |
+| `tests/test_hosted_closure_native.py` (two native clients + hosted child) | PASS end to end (deterministic fixture matrix + checkpoint restart phase), repeated consecutive executions without an access violation — see the F07 note above for the resolved crash |
+
+### Correction round 3 (#316 F01, F11–F14)
+
+A small final pass over the ownership handoff, the input-modality filter and the validation harness. The architecture, server authority, wire protocol and save formats are unchanged.
+
+- **Right-click ownership handoff (F01).** A right-click on an inventory control now transfers keyboard ownership to the native screen exactly like the left-click path (owner-checked; gameplay and other native screens keep left-click-only), so a half-stack gesture can start immediately after interacting with the Developer UI. While a deferred handoff drains, stale ImGui signals (a released `ActiveId`, a lingering `NavVisible`) cannot re-latch the developer ownership: the round-2 latch observes them only when no yield boundary is pending. The inventory ownership proof now covers a real non-textual ImGui button: focus and release without an active `ActiveId`, developer-only Tab/arrows/Enter/Space, right-click handoff, deferred frames without re-latching and a completed half-stack split through native input.
+- **Modality filtering completion (F11).** Pointer modality changes only on a validated press over a control or the matched release that activates it; keyboard modality updates only when supported navigation actually moves the focus (the previous focus is recorded before navigation, covering Tab, Shift+Tab and the arrows), and the unreachable Tab condition in the arrow branch is gone.
+- **Checked harness access (F12).** The hosted closure reaches mandatory remote session state only through a checked helper that fails with its own diagnostic when the authoritative snapshot is missing; polling state (peer visibility, transiently unavailable inventory snapshots) keeps waiting within the deadline instead of dereferencing.
+- **Guest synchronization (F13).** The owner waits for two guest-published rendezvous markers: one after the guest observes the live terrain edit before the checkpoint fixture is prepared, one after the guest verifies its exact fixture inventory and hotbar selection before the matrix starts. The guest polls its private inventory and selection until the matrix completes and re-verifies both after the checkpoint restart.
+- **Pending-state regressions (F14).** Two new matrix rows: a duplicate native gesture while an action is pending must not replace the pending metadata, mutate the confirmed inventory or submit a second command (complementing the direct adapter rejection check), and HUD shortcuts submitted with the inventory closed (hotbar selection and drop) expose the affected slot as pending when the inventory opens, then clear on the authoritative result.
+- **Windows CI `GameUiStyle` concurrency failure.** The R03 reader check (`concurrent readers never report a false corrupt record or a partial value`) failed once in `cpu-windows`. The persistence code is from #302 and untouched by this PR; the failure also reproduces on `main` (run 45719082861) but not locally (40 consecutive passes), and is tracked as issue #317.
+
+#### Round-3 verification
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti, Vulkan 1.4.357, all proofs with `FT_VOX_VALIDATION=1`.
+
+| Check | Result |
+| --- | --- |
+| `test_engine_reload.exe --player-inventory-proof` | PASS, 49 checks (round-3 ownership sequence including the non-textual button; only the 21 known RTSS swapchain validation messages) |
+| `test_engine_reload.exe --player-hud-proof` | PASS, 48 checks |
+| `test_engine_reload.exe --game-ui-showcase-proof` | PASS, 40 checks |
+| `ctest -C Release` | 75/75 passed |
+| `tests/test_multiplayer_join_native.py` | PASS, 60 checks |
+| `tests/test_hosted_closure_native.py` (two native clients + hosted child) | PASS end to end, 15 checks, including both round-3 guest rendezvous points |
+
+### Inventory verification
+
+Windows 11, MSVC Release, GeForce RTX 4070 Ti (621.24), Vulkan 1.4.357, SDL 3.4.18, Low quality, seed 42. The native proof submits real SDL mouse and keyboard events and renders through the game swapchain. The screenshot layer captured the presented frames in a separate run from validation.
+
+| Capture | What it shows |
+| --- | --- |
+| [1920×1080 at 100%](images/game-ui-inventory/normal-16x9.webp) | Full inventory, selected Stone stack and tooltip. |
+| [2560×1080 at 100%](images/game-ui-inventory/held-21x9.webp) | Half-stack cursor, source remainder and focused slot. |
+| [960×540 at 200% UI scale and 2× font density](images/game-ui-inventory/compact-2x.webp) | Responsive grid and current atlas after resource-pack reload. The proof sets the face density directly. |
+
+Run the proof from the game's Release directory with `FT_VOX_VALIDATION=1`.
+
+```powershell
+../tests/Release/test_engine_reload.exe --player-inventory-proof
+```
+
+The proof passed 22 checks, including whole and half transfer, merge, swap, full-stack rejection, both drop controls, repeated keys, pointer release over a different target, outside cancellation, focus loss, workspace toggle, atlas reload and world reset. All 21 WSI validation messages matched the known RTSS swapchain diagnostics. The Windows CPU-only build passed all 53 CTests, including inventory policy, Items, GameplayLoop, VoxelActions, EntityReplication and WorldCheckpoint. EntityReplication also delays a private inventory update ahead of its action result and replays an older inventory packet.
+
+The [native Join and hosted closure scripts](multiplayer-client-smoke.md) passed with validation enabled. The Join smoke covered a disabled inventory during synchronization and disconnect, then restored the same private state on reconnect. Two concurrent graphical clients exercised pickup, a pending split, duplicate input during the pending interval, a rejected drop, independent hotbars and checkpoint restart. The guest's inventory stayed private while both clients saw the same terrain edit. The HUD and widget showcase proofs and the existing visual-regression scenes also passed.
+
+The input runs used scripted SDL events on physical hardware. They exercised the font-density path with a 2× override. Reverting the migration restores the ImGui panel against the same saved inventories and wire protocol.
+
 ## Live player HUD (#303)
 
 Normal solo and remote launches now use the native Game UI hotbar. It draws the nine shared slots from the solo simulation snapshot or the connected client's confirmed private inventory. The selected stack name and quantity follow that snapshot. Pending remote actions mark the confirmed slot and show feedback until the server responds. The HUD reads the current atlas generation each frame, so reloads and session changes rebuild the icons from the current data.
@@ -30,7 +140,7 @@ Every piece of HUD copy sits on one contrast plate built from the `hudScrim` tok
 
 `Ctrl+Shift+D` (Developer ▸ **Hide developer workspace**) shows and hides the complete developer workspace at runtime. `H` keeps toggling the layout tiles, and the existing developer panel shortcuts still bring the workspace back. Hiding is not "close every panel": the dockspace is still submitted, with `ImGuiDockNodeFlags_KeepAliveOnly` and the same dockspace identity (`UiShell::beginFrame(Workspace)`), so the dock node tree, the split sizes and `imgui.ini` associations survive. Hidden surfaces neither paint nor claim pointer input; gameplay keeps the cursor and the keyboard.
 
-A legacy inventory that was docked keeps working in that mode. A window docked into a `KeepAliveOnly` node is not displayed, so while the workspace is hidden `GameUI::drawInventoryPanel` draws the same content through a **separate** window identity (`Inventory###inventory-floating`, visible title `Inventory`) flagged `NoDocking | NoSavedSettings`. The canonical `Inventory` window is never submitted while the workspace is hidden, so `dock node`, dock order and its `imgui.ini` record are untouched for the whole hidden period: opening or closing the floating inventory, exiting with the workspace hidden and resetting the developer layout can neither lose nor overwrite a persisted association. Switching between the two identities discards the transient drag cursor, and the queued reset/default layout still runs while the workspace is hidden, so a first launch with `--no-dev-ui` still materializes the default developer layout before it is ever shown.
+Since #304 the native inventory follows the same available game view as the hotbar. The legacy docking figures below document the #303 behavior before this migration.
 
 ### Multiplayer recovery (#303 F03)
 
@@ -123,7 +233,6 @@ Same machine, generator, driver and scene as the pass above. What changed in beh
 | `test_game_ui_interaction.exe` (`GameUiInteraction`) | The transition matrix: `C` and Escape reach gameplay, movement, gameplay keys, pointer, text and the inventory close key stay blocked, and a benchmark lock, a native screen, a modal, a developer text field, developer keyboard ownership and an open inventory each keep their own policy for the same key |
 | `test_engine_reload.exe --game-ui-showcase-proof` | 39 checks passed; the standalone strip behavior is unchanged |
 | `test_engine_reload.exe --ui-spike-smoke` | 10 checks passed |
-| `test_engine_reload.exe --ui-ini-persistence <ini> dock`, then `--ui-ini-persistence <ini> hidden` | Two real processes sharing one `imgui.ini`: the first docks the inventory into the central node and writes `DockId=0x00000007`; the second starts without the developer workspace, opens and closes the inventory through the temporary identity, and the `[Window][Inventory]` record comes back byte-identical |
 | Debian WSL, GCC, `-DFT_VOX_GRAPHICS=OFF -DFT_VOX_SANITIZERS=ON` | The graphics-off suite passes under ASan+UBSan, including `GameUiComponents` (which is where the F08 `memcpy` undefined behaviour showed up) and every dependency/include guard. `TerrainGeneration` — the terrain calibration binary, unrelated to this slice — needs far longer than a Release run under sanitizers on this VM and was still executing when the pass closed; its Release run is green in both configurations |
 | Debian WSL, GCC, `-DFT_VOX_GRAPHICS=OFF -DFT_VOX_TSAN=ON` | The nine `multiplayer` tests and the headless, Game UI, dependency and include guards passed under TSan. They were launched through `setarch -R`: this kernel's ASLR entropy trips the known `ThreadSanitizer: unexpected memory mapping` runtime abort, which has nothing to do with the code under test |
 
@@ -167,7 +276,7 @@ The measured HUD used one draw, 936 vertices, four preallocated descriptor sets,
 | Current surface | Behavior and owner today | Planned destination and parity gate |
 | --- | --- | --- |
 | Hotbar, item count/name, targeting and status | `PlayerHud` draws the live bounded snapshot, contextual hints and connection feedback. Engine maps `1–9`, wheel, `Q`, LMB/RMB and publishes the 3D block highlight. | **#303 HUD.** Live in normal solo and remote play. F1 density and detailed performance/diagnostics stay in the developer workspace. |
-| Inventory and drag/drop | `E` toggles an Engine flag. `InventoryUi` and `GameUIInventory` handle slots, icons, tooltips and a transient drag cursor. Snapshots and callbacks select, move, swap, split or drop via Engine. Atlas layer descriptors are cached per generation. | **#304 Inventory.** Preserve selected slot, whole/half stack and partial transfers, disabled input during remote pending state, rejected-command feedback, tooltip/icon behavior and drag cancellation on close, focus loss, session or resource change. Compare authoritative inventory before and after solo and remote gestures. |
+| Inventory and drag/drop | Native since #304: `GameUiInventoryScreen.cpp` owns the 3×9 grid, hotbar, focus, held-stack presentation and gestures; `InventoryUi.hpp` supplies typed slot identities and pure whole/half click planning. Engine emits one existing command per completed gesture (solo sim result immediately; remote through the shared `submitRemoteInventoryAction` adapter with per-slot pending state). The native renderer samples the same generation-tagged atlas as the HUD. | **#304 Inventory — landed.** Parity record: selected slot, whole/half stack and partial transfers, disabled input during remote pending state, rejected-command feedback, tooltip/icon behavior and drag cancellation on close, focus loss, session or resource change; authoritative inventory compared before and after solo and remote gestures. |
 | Solo world and pause | `--world` and `--seed` enter a saved or transient world through Engine initialization. World panel shows seed, save identity, queue/health and errors. `P` mutates host pause, `C` controls host cursor capture, and Escape or the menu requests exit. Engine owns save, flush, world epoch reset and restoration. | **#305 Main Menu, Loading and Pause.** Create/select an existing world or start transient play through the existing lifecycle. Preserve CLI entry points, save error visibility and session-epoch barriers. Validate open, resume, save-and-leave, exit and retry. Show save health to players and detailed persistence counters in Dev UI. |
 | Join, profiles, and client status | `GameUIMultiplayer`, `EngineJoin` and `EngineMultiplayer` own endpoint/expected seed, favorites, named profile creation/selection, private keys, loading/readiness, reconnect, switch, disconnect and return to suspended solo. The public roster and private inventory arrive through the remote client path. | **#306 Multiplayer.** Preserve favorites/profile persistence, unavailable/error states, endpoint validation, two-client roster and local inventory privacy, reconnect identity, and blocked transition on solo save failure. Put actionable status and latency in Game UI and detailed packet, snapshot and motion telemetry in Dev UI. |
 | Host, roster and stop | `EngineHosting` and `ServerSupervisor` enumerate server worlds, launch a sibling server and surface readiness, configuration, endpoint copy, auto/manual join, roster and delayed/failing stop. The engine coordinates app exit and force-stop confirmation. | **#306 Host.** Preserve existing/new world and profile selection, private bind guidance, port/player/interest/worker/streaming options, readiness, copy/join, confirmed graceful stop, Wait/Force Stop and exit recovery. Verify stop and restart with checkpoint persistence. |

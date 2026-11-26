@@ -17,7 +17,7 @@ void routing()
 {
 	const InputContext hud;
 	const InputContext developer{.devKeyboard = true, .devPointer = true};
-	const InputContext inventory{.inventory = true};
+	const InputContext inventory{.nativeScreen = true, .inventory = true};
 	const InputContext paused{.nativeScreen = true, .paused = true};
 	const InputContext connected{.nativeScreen = true};
 	const InputContext modal{.nativeScreen = true, .modal = true, .devKeyboard = true, .devPointer = true};
@@ -41,9 +41,26 @@ void routing()
 		passiveCover.choose(Text) == Blocked, "an occluding passive overlay claims no keyboard or text");
 	CHECK(devText.choose(Text) == DeveloperUi && devText.choose(Key, false, true) == DeveloperUi,
 		"active developer text takes one keyboard stream while a native nonmodal screen is visible");
-	CHECK(inventory.choose(Key) == Blocked && inventory.choose(Key, false, true) == PlayerUi &&
-		inventory.choose(Pointer) == Blocked && !inventory.allowsMovement(),
-		"inventory blocks gameplay, offers Escape to the screen");
+	CHECK(inventory.choose(Key) == PlayerUi && inventory.choose(Key, false, true) == PlayerUi &&
+		inventory.choose(Pointer) == PlayerUi && !inventory.allowsMovement(),
+		"native inventory owns pointer and keyboard and blocks movement");
+	// PR #316 F01: explicit Developer UI keyboard ownership binds an open
+	// inventory. Navigation keys reach only the owning interface, and the
+	// policy hands everything — back keys included — to the developer layer.
+	const InputContext inventoryFocus{.nativeScreen = true, .inventory = true, .devKeyboard = true};
+	CHECK(inventoryFocus.choose(Key) == DeveloperUi && inventoryFocus.choose(Key, false, true) == DeveloperUi &&
+		inventoryFocus.choose(Key, true) == Global,
+		"developer keyboard ownership wins over an open inventory without touching globals");
+	CHECK(inventoryFocus.choose(Pointer) == PlayerUi && !inventoryFocus.allowsMovement(),
+		"developer keyboard ownership leaves the native pointer surface to the inventory");
+	// After the player clicks a slot the host neutralizes the retained passive
+	// focus and the same keys return to the native screen.
+	const InputContext inventoryRestored{.nativeScreen = true, .inventory = true};
+	CHECK(inventoryRestored.choose(Key) == PlayerUi && inventoryRestored.choose(Key, false, true) == PlayerUi,
+		"with developer ownership released, native navigation returns to the inventory");
+	const InputContext hudFocus{.devKeyboard = true};
+	CHECK(hudFocus.choose(Key) == DeveloperUi && hudFocus.choose(Key, false, false, true) == DeveloperUi,
+		"developer keyboard ownership answers the inventory shortcut too");
 	CHECK(paused.choose(Key) == PlayerUi && connected.choose(Pointer) == PlayerUi &&
 		!paused.allowsMovement() && !connected.allowsMovement(), "both menus stop local gameplay input");
 	CHECK(modal.choose(Key, true) == PlayerUi && modal.choose(Text) == PlayerUi &&
@@ -91,27 +108,22 @@ void workspaceVisibility()
 
 	// Hidden workspace, inventory closed: no developer surface owns input, so
 	// gameplay keeps the pointer, the keyboard and movement.
-	const bool hidden = ui::developerUiAvailable(true, false, Hidden, false);
-	CHECK(!hidden, "a hidden workspace without the inventory is not an input surface");
+	const bool hidden = ui::developerUiAvailable(true, false, Hidden);
+	CHECK(!hidden, "a hidden workspace has no developer input");
 	const InputContext gameplay{.devKeyboard = hidden, .devPointer = hidden};
 	CHECK(gameplay.choose(Key) == Gameplay && gameplay.choose(Pointer) == Gameplay &&
 		gameplay.allowsMovement(), "hidden workspace leaves gameplay fully in charge");
 
-	// Hidden workspace, inventory open: the legacy inventory stays interactive
-	// (its Escape path belongs to the player screen, not to gameplay).
-	const bool withInventory = ui::developerUiAvailable(true, false, Hidden, true);
-	CHECK(withInventory, "the legacy inventory remains a developer surface while hidden");
-	const InputContext inventory{.inventory = true, .devKeyboard = withInventory,
-		.devPointer = withInventory};
+	const InputContext inventory{.nativeScreen = true, .inventory = true, .devKeyboard = hidden,
+		.devPointer = hidden};
 	CHECK(inventory.choose(Key, false, true) == PlayerUi &&
-		inventory.choose(Key) == DeveloperUi && !inventory.allowsMovement(),
-		"a docked-then-hidden inventory keeps Escape and its widgets");
+		inventory.choose(Key) == PlayerUi && !inventory.allowsMovement(),
+		"inventory stays interactive with the workspace hidden");
 
 	// Visible workspace: developer widgets own input; explicit globals bypass the
 	// text field and still reach the host (the panel shortcuts restore it).
-	const bool shown = ui::developerUiAvailable(true, false, Visible, false);
-	CHECK(shown && ui::developerUiAvailable(true, false, Visible, true),
-		"a visible workspace owns developer input with or without the inventory");
+	const bool shown = ui::developerUiAvailable(true, false, Visible);
+	CHECK(shown, "a visible workspace can own developer input");
 	const InputContext developer{.devKeyboard = shown, .devPointer = shown};
 	CHECK(developer.choose(Key) == DeveloperUi && developer.choose(Key, true) == Global &&
 		!developer.allowsMovement(),
@@ -119,7 +131,7 @@ void workspaceVisibility()
 
 	// A native player screen (pause menu, loading, exit confirmation) outranks
 	// visibility: it removes the developer layer entirely.
-	CHECK(!ui::developerUiAvailable(true, true, Visible, true),
+	CHECK(!ui::developerUiAvailable(true, true, Visible),
 		"a native player screen removes developer input even with the workspace visible");
 	CHECK(ui::developerUiPresent(true, false) && !ui::developerUiPresent(true, true),
 		"hiding the workspace keeps the ImGui frame, a native screen does not");
@@ -152,8 +164,8 @@ void transitionRecovery()
 	CHECK(blocked.choose(Key) == Blocked && blocked.choose(Pointer) == Blocked &&
 			blocked.choose(Text) == Blocked && !blocked.allowsMovement(),
 		"movement, gameplay keys, pointer and text stay blocked during a session transition");
-	CHECK(blocked.choose(Key, false, false, true) == Blocked,
-		"the inventory close key does not reach gameplay without an open inventory");
+	CHECK(blocked.choose(Key, false, false, true) == Gameplay,
+		"E can open the disabled inventory during a session transition");
 
 	// The exception sits after every other ownership rule, so a benchmark lock, a
 	// native screen, a modal, a developer field and the inventory all keep their
@@ -179,8 +191,8 @@ void transitionRecovery()
 	const InputContext dialog{.devDialog = true, .transition = true};
 	CHECK(dialog.choose(Key, false, false, false, true) == DeveloperUi,
 		"an open developer dialog outranks the transition exception");
-	const InputContext inventory{.inventory = true, .transition = true};
-	CHECK(inventory.choose(Key, false, false, false, true) == Blocked &&
+	const InputContext inventory{.nativeScreen = true, .inventory = true, .transition = true};
+	CHECK(inventory.choose(Key, false, false, false, true) == PlayerUi &&
 			inventory.choose(Key, false, false, true) == PlayerUi,
 		"an open inventory keeps its own policy for C and for its close key");
 
@@ -195,7 +207,7 @@ void transitionRecovery()
 void screens()
 {	ScreenStack stack;
 	CHECK(stack.top() == Screen::Hud && !stack.back() && !stack.blocksGameplay(), "HUD is passive root");
-	CHECK(stack.push(Screen::Inventory) && !stack.pausesWorld(false) && stack.back(),
+	CHECK(stack.push(Screen::Inventory) && stack.nativeScreen() && !stack.pausesWorld(false) && stack.back(),
 		"inventory is dismissible and does not pause solo");
 	CHECK(stack.push(Screen::Pause) && stack.pausesWorld(false) && !stack.pausesWorld(true),
 		"same pause menu suspends solo only");

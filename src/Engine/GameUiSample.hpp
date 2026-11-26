@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine/PlayerHud.hpp>
+#include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiFonts.hpp>
 #include <Engine/PlayerUiGallery.hpp>
@@ -29,8 +30,9 @@ public:
 	{
 		m_armed = false;
 		m_widgets.cancelPress();
+		m_inventoryPress.reset();
 	}
-	bool hasArmedPress() const { return m_armed || m_widgets.hasPress(); }
+	bool hasArmedPress() const { return m_armed || m_widgets.hasPress() || m_inventoryPress.has_value(); }
 	bool hitsStrip(float x, float y) const;
 	bool canFocusWidget(float x, float y) const;
 	void resetScreens();
@@ -41,7 +43,10 @@ public:
 	void openGallery();
 	/// Push a screen on the real stack (the pause menu and the proofs use it).
 	void openScreen(gameui::Screen screen);
-	bool syncInventory(bool open);
+	void setInventoryOpen(bool open);
+	void setInventoryView(gameui::InventoryView view);
+	void cancelInventoryGesture();
+	inventoryui::Action handleInventoryEvent(const SDL_Event &event);
 	void updateTextInput(SDL_Window *window, bool interactive);
 	bool yieldTextInput(SDL_Window *window);
 	const gameui::ScreenStack &screens() const { return m_screens; }
@@ -83,6 +88,7 @@ public:
 private:
 	friend struct UiSpikeProbe;
 	friend struct GameUiBackendProbe;
+	friend struct EngineJoinProbe;
 
 	void handleWindowEvent(Uint32 type);
 	/// Re-bakes the face when the framebuffer density changed (issue #302 F11)
@@ -113,6 +119,8 @@ private:
 	void buildScreen(gameui::Clip scene, float scale);
 	void buildGallery(gameui::Clip scene, float scale);
 	void buildHudMock(gameui::Clip scene, float scale);
+	void paintInventory(gameui::Clip scene, glm::vec2 pointer, std::optional<uint64_t> atlasGeneration);
+	gameui::ControlId inventoryControlAt(glm::vec2 point) const;
 	void paintScreen(glm::vec2 pointer);
 	void paintDesignSystem(glm::vec2 pointer);
 	InputResult applyWidgetEvent(gameui::WidgetEvent event);
@@ -137,6 +145,14 @@ private:
 	bool m_previewStrip{true}, m_hudVisible{true};
 	gameui::ScreenStack m_screens;
 	gameui::WidgetSet m_widgets;
+	gameui::InventoryView m_inventoryView;
+	gameui::InventoryLayout m_inventoryLayout;
+	/// Last meaningful interaction device on the inventory screen (F05): the
+	/// held stack follows it; reset by every gesture cancellation.
+	gameui::InventoryModality m_inventoryModality{gameui::InventoryModality::Pointer};
+	inventoryui::Interaction m_inventoryInteraction;
+	struct InventoryPress { gameui::ControlId control{}; Uint8 button{}; };
+	std::optional<InventoryPress> m_inventoryPress;
 	gameui::TextField m_field, m_secondaryField;
 	gameui::TextField *m_sdlEditor{};
 	gameui::Toggle m_feature{true}, m_enableSecond{true};

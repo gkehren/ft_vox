@@ -5,6 +5,7 @@
 // viewport, tokens reaching the draw list, fallback behavior for missing
 // glyphs/icons, and the bounded draw budget.
 #include <Engine/PlayerHud.hpp>
+#include <Engine/PlayerInventory.hpp>
 #include <Engine/PlayerUiComponents.hpp>
 #include <Engine/PlayerUiGallery.hpp>
 #include <Engine/PlayerUiStyle.hpp>
@@ -24,6 +25,85 @@ namespace
 const style::Theme &theme()
 {
 	return style::baseline();
+}
+
+void inventoryScreen()
+{
+	using namespace inventoryui;
+	for (const auto bounds : {Clip{{0, 0, 1920, 1080}}, Clip{{0, 0, 2560, 1080}},
+							 Clip{{200, 40, 700, 460}}, Clip{{0, 0, 960, 540}}})
+	{
+		const auto layout = inventoryLayout(bounds, theme(), 2.f);
+		CHECK(layout.scale > 0.f && layout.panel.intersect(bounds) == layout.panel,
+			"inventory panel fits 16:9, ultrawide, docked and compact high-scale views");
+		CHECK(layout.status.intersect(layout.panel) == layout.status &&
+			layout.main.bounds.rect.w < layout.hotbar.bounds.rect.y &&
+			layout.hotbar.bounds.rect.w < layout.drop.rect.y,
+			"main grid, hotbar, and actions have separate rows");
+		bool allSlotsHit = true;
+		for (int i = 0; i < kSlotCount; ++i)
+		{
+			const SlotId id{i};
+			const auto rect = layout.slot(id);
+			allSlotsHit &= layout.hitSlot(glm::vec2(rect.rect) + size(rect) * 0.5f) == id;
+		}
+		CHECK(allSlotsHit, "all 36 painted cells hit their original authority slot");
+		const auto first = layout.slot({9});
+		CHECK(!layout.hitSlot({first.rect.z + layout.main.gap * 0.5f, first.rect.y}).valid(),
+			"the gutter hits no slot");
+	}
+	const auto noAtlas = makeItemSlot(items::makeStack(items::ItemId::Stone, 4), std::nullopt);
+	CHECK(noAtlas.count == 4 && noAtlas.label == "Stone" && !noAtlas.icon,
+		"missing atlas keeps the item count and tooltip data");
+	CHECK(makeItemSlot(items::makeStack(items::ItemId::Stone, 4), 9).icon->generation == 9,
+		"item presentation uses the current atlas generation");
+
+	InventoryView view;
+	view.availability = InventoryAvailability::Ready;
+	view.snapshot = Snapshot{};
+	view.snapshot->revision = 1;
+	view.snapshot->slots[0] = items::makeStack(items::ItemId::Stone, 5);
+	Interaction input;
+	const auto observe = [&] { input.observe(view.snapshot ? &*view.snapshot : nullptr, view.epoch, view.enabled()); };
+	observe();
+	CHECK(input.activate({0}, true).command == Command::None && input.drag().active(),
+		"pickup is a presentation change only");
+	observe();
+	CHECK(input.drag().active(), "repainting the same inventory keeps the drag");
+	CHECK(input.activate({9}, false).command == Command::Split && !input.drag().active(),
+		"one drop consumes the gesture and produces one half-stack command");
+	view.actionPending = true;
+	observe();
+	CHECK(input.activate({0}, false).command == Command::None && !input.drag().active() &&
+		view.snapshot->slots[0].count == 5 && view.snapshot->slots[9].isEmpty(),
+		"a delayed inventory packet leaves the confirmed counts and blocks a second submission");
+	view.actionPending = false; // rejection with the same confirmed snapshot
+	observe();
+	CHECK(input.activate({9}, false).command == Command::None && !input.drag().active(),
+		"rejection does not restore the old held stack or replay the action");
+	input.activate({0}, false);
+	view.snapshot->revision++;
+	observe();
+	CHECK(!input.drag().active() && input.activate({9}, false).command == Command::None,
+		"a newer private revision invalidates a stale source even when its count is unchanged");
+	input.activate({0}, false);
+	view.availability = InventoryAvailability::Disconnected;
+	view.snapshot.reset();
+	observe();
+	CHECK(!input.drag().active() && input.activate({0}, false).command == Command::None,
+		"disconnect discards the drag and disables the previous inventory");
+	view.availability = InventoryAvailability::Ready;
+	view.epoch++;
+	view.snapshot = Snapshot{};
+	view.snapshot->slots[0] = items::makeStack(items::ItemId::Stone, 5);
+	observe();
+	input.activate({0}, false);
+	view.epoch++;
+	observe();
+	CHECK(!input.drag().active(), "world and session epochs clear the drag even with equal snapshots");
+	input.activate({0}, false);
+	input.cancel();
+	CHECK(!input.drag().active(), "closing the screen or losing focus cancels without an intent");
 }
 
 /// Synthetic face: printable ASCII, 6 px advance, one atlas UV rectangle. The
@@ -66,6 +146,81 @@ bool inside(Clip inner, Clip outer)
 bool overlaps(Clip a, Clip b)
 {
 	return a.rect.x < b.rect.z && b.rect.x < a.rect.z && a.rect.y < b.rect.w && b.rect.y < a.rect.w;
+}
+
+// PR #316 F03: the held stack stays fully inside the available game view near
+// every edge and corner. Pure geometry: preferred offset, flip, then clamp.
+void heldStackPlacementTest()
+{
+	constexpr float cell = 30.f, offset = 10.f;
+	const Clip view{{0, 0, 400, 300}};
+	const auto rect = [](const Clip &r) { return r.rect; };
+
+	// Center of the room: the ordinary pointer offset is used verbatim.
+	CHECK(rect(heldStackPlacement({100.f, 100.f}, cell, offset, view)) == glm::vec4(110, 110, 140, 140),
+		"an interior anchor keeps the usual pointer offset");
+
+	// Right edge: the offset flips, so the icon is not clipped away.
+	const auto atRight = rect(heldStackPlacement({385.f, 100.f}, cell, offset, view));
+	CHECK(atRight.x == 385.f - offset - cell && atRight.z == 385.f - offset,
+		"an anchor near the right edge flips the offset to the left");
+
+	// Bottom edge: the offset flips upward.
+	const auto atBottom = rect(heldStackPlacement({100.f, 285.f}, cell, offset, view));
+	CHECK(atBottom.y == 285.f - offset - cell && atBottom.w == 285.f - offset,
+		"an anchor near the bottom edge flips the offset upward");
+
+	// Bottom-right corner: both axes flip, which already fits — the rectangle
+	// lands fully inside without clamping.
+	const auto atCorner = rect(heldStackPlacement({378.f, 278.f}, cell, offset, view));
+	CHECK(atCorner.x == 378.f - offset - cell && atCorner.y == 278.f - offset - cell &&
+		atCorner.z <= 400.f && atCorner.w <= 300.f,
+		"a corner anchor flips on both axes and stays inside the view");
+
+	// The anchor can never push the icon out of the left/top edge either.
+	CHECK(rect(heldStackPlacement({-50.f, -50.f}, cell, offset, view)).x == 0.f &&
+		rect(heldStackPlacement({-50.f, -50.f}, cell, offset, view)).y == 0.f,
+		"an out-of-view anchor clamps to the top-left corner");
+
+	// A view with a dock offset (the central Developer UI node): clamping uses
+	// the view, not the window; the corner anchor flips inside it.
+	const Clip docked{{200.f, 40.f, 700.f, 460.f}};
+	const auto dockedRect = rect(heldStackPlacement({690.f, 450.f}, cell, offset, docked));
+	CHECK(dockedRect == glm::vec4(650, 410, 680, 440),
+		"clamping respects the docked game-view rectangle");
+
+	// Compact views: a view narrower than the cell shrinks the square instead
+	// of producing a negative or outside rectangle (PR #316 F10).
+	const Clip tiny{{10.f, 10.f, 40.f, 50.f}};
+	const auto tinyRect = rect(heldStackPlacement({25.f, 25.f}, cell, offset, tiny));
+	CHECK(tinyRect.x == 10.f && tinyRect.y >= 10.f && tinyRect.z <= 40.f && tinyRect.w <= 50.f,
+		"a view smaller than the cell keeps the stack at its clamped edge");
+
+	// F10: a viewport strictly smaller than the requested cell on both axes
+	// shrinks the square; the aspect ratio stays 1:1 and nothing leaves the view.
+	const Clip smaller{{10.f, 10.f, 35.f, 30.f}};
+	const auto smallerRect = rect(heldStackPlacement({22.f, 20.f}, cell, offset, smaller));
+	CHECK(smallerRect.z - smallerRect.x == 20.f && smallerRect.w - smallerRect.y == 20.f &&
+		smallerRect.x >= 10.f && smallerRect.y >= 10.f &&
+		smallerRect.z <= 35.f && smallerRect.w <= 30.f,
+		"a viewport strictly smaller than the cell shrinks the square and stays inside");
+
+	// F10: narrow and short viewports size the square to the missing axis and
+	// keep the other axis at the preferred anchor.
+	const Clip narrow{{0.f, 0.f, 20.f, 200.f}};
+	const auto narrowRect = rect(heldStackPlacement({10.f, 100.f}, cell, offset, narrow));
+	CHECK(narrowRect.z - narrowRect.x == 20.f && narrowRect.w - narrowRect.y == 20.f &&
+		narrowRect.x == 0.f && narrowRect.z <= 20.f && narrowRect.w <= 200.f,
+		"a narrow viewport shrinks the held stack to its width");
+	const Clip shortView{{0.f, 0.f, 200.f, 15.f}};
+	const auto shortRect = rect(heldStackPlacement({100.f, 8.f}, cell, offset, shortView));
+	CHECK(shortRect.z - shortRect.x == 15.f && shortRect.w - shortRect.y == 15.f &&
+		shortRect.y == 0.f && shortRect.z <= 200.f && shortRect.w == 15.f,
+		"a short viewport shrinks the held stack to its height");
+
+	CHECK(heldStackPlacement({0, 0}, 0.f, offset, view).empty() &&
+		heldStackPlacement({0, 0}, cell, offset, Clip{{10.f, 10.f, 5.f, 50.f}}).empty(),
+		"degenerate cells and empty views place nothing");
 }
 
 void slotGeometry()
@@ -1141,6 +1296,8 @@ void gallery()
 int main()
 {
 	slotGeometry();
+	inventoryScreen();
+	heldStackPlacementTest();
 	tooltips();
 	notifications();
 	notificationLifetime();

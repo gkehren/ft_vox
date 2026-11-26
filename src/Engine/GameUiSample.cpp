@@ -1,4 +1,5 @@
 #include <Engine/GameUiSample.hpp>
+#include <Renderer/TextureManager.hpp>
 #include <utils.hpp>
 
 #include <cstdio>
@@ -279,19 +280,27 @@ void GameUiSample::prepare(SDL_Window *window, uint32_t slot, VkExtent2D extent,
 		const auto bounds = m_draws.bounds();
 		const auto scene = m_screens.suppressDeveloper() || view.empty() ? bounds : view.intersect(bounds);
 		m_screenScale = resolvedScale;
-		switch (m_screens.top())
-		{
-		case gameui::Screen::Gallery: buildGallery(scene, resolvedScale); break;
-		case gameui::Screen::HudMock: buildHudMock(scene, resolvedScale); break;
-		default: buildScreen(scene, resolvedScale); break;
-		}
 		float x = 0.f, y = 0.f;
 		SDL_GetMouseState(&x, &y);
 		const auto pointer = SDL_GetMouseFocus() == window ? glm::vec2{x, y} : glm::vec2{-1};
-		if (m_screens.top() == gameui::Screen::Gallery || m_screens.top() == gameui::Screen::HudMock)
+		switch (m_screens.top())
+		{
+		case gameui::Screen::Inventory:
+			paintInventory(scene, pointer, atlas.isValid() ? std::optional{atlasGeneration} : std::nullopt);
+			break;
+		case gameui::Screen::Gallery:
+			buildGallery(scene, resolvedScale);
 			paintDesignSystem(pointer);
-		else
+			break;
+		case gameui::Screen::HudMock:
+			buildHudMock(scene, resolvedScale);
+			paintDesignSystem(pointer);
+			break;
+		default:
+			buildScreen(scene, resolvedScale);
 			paintScreen(pointer);
+			break;
+		}
 	}
 	// The optional showcase strip yields to session feedback (issue #303 F05):
 	// connection errors and pending actions own the band above the HUD, and a

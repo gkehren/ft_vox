@@ -30,7 +30,11 @@ def run_phase(client: Path, server: Path, root: Path, phase: str) -> None:
                                            stderr=subprocess.STDOUT, env=env)
                 processes.append((role, process, logs_path))
 
-            deadline = time.monotonic() + 100
+            # F09 (#316 round 2): the matrix no longer mines; its operations
+            # are deterministic fixture rows with their own bounded deadlines
+            # in the C++ scenario. The phase budget only bounds the fixture
+            # stop/restart round-trip plus the two clients' lifetimes.
+            deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
                 codes = [process.poll() for _, process, _ in processes]
                 if any(code not in (None, 0) for code in codes):

@@ -38,7 +38,23 @@ public:
 	bool hasModal() const;
 	bool hasOpenPopup() const;
 	bool ownsActiveInput() const;
+	/// True when the Developer UI owns the keyboard (PR #316 F01, round 2):
+	/// ownership is persistent — a meaningful signal (an active widget, an
+	/// editing field, an open popup or a visible keyboard-navigation
+	/// highlight) latches this layer as the owner, and only a meaningful
+	/// move toward the player UI (a native-screen press, focus loss, a
+	/// workspace or session change) releases it. WantCaptureKeyboard retained
+	/// by mere passive focus — the window stays focused after the last
+	/// interaction was handed away — never owns, so it can neither swallow
+	/// the player's contextual keys nor trigger inventory commands.
+	bool ownsKeyboard() const;
 	bool pendingKeyboard() const;
+	/// Latch the Developer UI as the persistent keyboard owner (a Developer
+	/// UI press or a navigation highlight did).
+	void retainKeyboardOwnership();
+	/// Hand persistent keyboard ownership back to the player UI (a native
+	/// screen press, focus loss, a workspace or session change).
+	void releaseKeyboardOwnership();
 	enum class PointerHit { PassThrough, Occludes, Interactive };
 	PointerHit pointerHit(float x, float y) const;
 	static void markCurrentWindowPassThrough();
@@ -74,5 +90,6 @@ private:
 	unsigned m_yieldThroughEvent{};
 	int m_keyboardReleasedFrame{-1};
 	bool m_provisionalTextInput{};
+	bool m_devKeyboardOwner{false};
 	SDL_Window *m_window{nullptr};
 };

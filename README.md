@@ -149,13 +149,18 @@ See the [dedicated server guide](docs/dedicated-server.md),
 | WASD / mouse | Move / look |
 | Space / Shift | Jump / sprint (up / down while swimming or flying) |
 | LMB / RMB | Break / place block |
-| T | Cycle selected block |
+| E | Open / close inventory |
+| 1–9 / wheel | Select a hotbar slot |
+| Q | Drop one item from the selected slot |
+| T | Cycle creative block in flight |
 | V | Toggle walking / debug flight |
 | B | Toggle chunk borders |
-| Esc | Release mouse |
+| C | Release / capture mouse |
+| Esc | Open game menu / close inventory |
 
 Flight boost, swimming and all movement modes are detailed in
-[player-physics.md](docs/player-physics.md).
+[player-physics.md](docs/player-physics.md). See the
+[inventory controls](docs/game-ui-migration.md#native-player-inventory-304) for mouse and keyboard stack actions.
 
 ## Documentation
 
