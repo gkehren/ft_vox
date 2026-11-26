@@ -185,6 +185,13 @@ Engine::Engine(std::string resourcePackRoot)
 
 Engine::~Engine()
 {
+	// CPU session work owns its simulation until completion and uses the
+	// Engine worker pool. Finish it before tearing that pool down.
+	if (m_soloWork.valid())
+	{
+		m_soloWork.wait();
+		m_soloWork = {};
+	}
 	m_hostServer.stop();
 	if (m_remote)
 		m_remote->disconnect();
@@ -269,7 +276,7 @@ void Engine::resetWorldProjection()
 	clearGameplayInput();
 	m_inputRouter.cancelPlayerUi();
 	m_inventoryResult.reset();
-	if (m_playerUi)
+	if (m_playerUi && !m_playerSessionRequest)
 		m_playerUi->resetScreens();
 	if (worldRenderer)
 	{
@@ -331,8 +338,6 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	// against the still-live old world.
 	resetWorldProjection();
 	renderBridge.reset();
-	if (!chunkPool)
-		chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 	if (!sim)
 		sim = std::make_unique<sim::GameSimulation>(threadPool.get());
 
@@ -345,6 +350,13 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	config.worldName = m_openWorldName;
 	config.savesRoot = m_savesRoot;
 	const glm::dvec3 bootstrapCenter = sim->initialize(config, glm::dvec3(camera.getPosition()));
+	finishSoloBootstrap(bootstrapCenter, false);
+}
+
+void Engine::finishSoloBootstrap(glm::dvec3 bootstrapCenter, bool resident)
+{
+	if (!chunkPool)
+		chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	camera.setPosition(glm::vec3(bootstrapCenter));
 	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
@@ -353,7 +365,11 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	// Synchronous terrain bootstrap: authoritative voxels + render binding,
 	// meshing and upload in one step (the bridge drains the world's Loaded
 	// events itself). The headless path is sim->bootstrapTerrain().
-	renderBridge->generateInitialArea(glm::vec3(bootstrapCenter),
+	if (resident)
+		renderBridge->meshResidentArea(glm::vec3(bootstrapCenter), sim::GameSimulation::kBootstrapRadiusChunks,
+			vkContext->getAllocator(), *immediate, worldRenderer->arenas());
+	else
+		renderBridge->generateInitialArea(glm::vec3(bootstrapCenter),
 									  sim::GameSimulation::kBootstrapRadiusChunks,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 
@@ -684,7 +700,7 @@ void Engine::tickDayCycle(double dt)
 	// must still track dayTime and the current view distance every frame:
 	// otherwise a view-distance change (or atmosphere edit) made while
 	// paused would leave stale fog values until the world unpauses.
-	if (!paused && !nativePause() && shaderParams.dayCycleEnabled)
+	if ((sim || m_remote) && !paused && !nativePause() && shaderParams.dayCycleEnabled)
 	{
 		shaderParams.dayTime = std::fmod(shaderParams.dayTime + static_cast<float>(dt) * shaderParams.dayCycleSpeed, 1.0f);
 		if (shaderParams.dayTime < 0.f)
@@ -1178,7 +1194,7 @@ void Engine::handleEvents()
 
 void Engine::processInput(double dt)
 {
-    if (m_inspectionView) return;
+    if (m_inspectionView || (!sim && !m_remote)) return;
 	// Host suspension policy (issue #209): pause/focus/benchmark freeze the
 	// authoritative player; the simulation clears accumulators + buffered
 	// input so nothing accumulated is replayed on resume.
@@ -1670,7 +1686,7 @@ void Engine::drawUi()
 	populateJoinUi(f);
 	if (m_remote)
 		populateRemoteUi(f);
-	else
+	else if (sim)
 	{
 		f.selectedTexture = &sim->selectedBlock();
 		f.setSelectedBlock = [this](TextureType type) { sim->setSelectedBlock(type); };
@@ -1723,7 +1739,7 @@ void Engine::drawUi()
 	f.drawCount = drawList.size();
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
-	f.benchmark = m_remote || m_hostSnapshot.active() ? nullptr : &m_benchmark;
+	f.benchmark = !sim || m_hostSnapshot.active() ? nullptr : &m_benchmark;
 	if (swapchain)
 		f.presentModeName =
 			VkSwapchain::presentModeName(swapchain->getPresentMode());
@@ -2145,6 +2161,8 @@ void Engine::run()
 	{
 		loadJoinPreferences();
 		loadHosting();
+		if (!sim && !m_remote)
+			showMainMenu();
 	}
 
 	// First run on this machine (no imgui.ini yet): start with the default
@@ -2172,7 +2190,14 @@ void Engine::run()
 			GetProfiler().endFrame();
 			break;
 		}
-		applySessionRequests();
+		pumpPlayerSession();
+		if (!running)
+		{
+			GetProfiler().endFrame();
+			break;
+		}
+		if (!m_playerSessionRequest)
+			applySessionRequests();
 
 		// (2) Viewport: a minimized/hidden window skips the whole frame; the
 		// clock resync AFTER the sleep keeps the skipped stretch out of the
@@ -2250,7 +2275,7 @@ void Engine::run()
 		// presentation day cycle.
 		{
 			PROFILE_SCOPE("Benchmark");
-			if (!m_remote)
+			if (sim)
 				tickBenchmark(deltaTime);
 		}
 		{
@@ -2310,6 +2335,8 @@ void Engine::run()
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
+			else if (m_playerSessionRequest)
+				m_sessionProgressPresented = true;
 		}
 
 		// (16) Live memory/workload gauges for the developer console (issue

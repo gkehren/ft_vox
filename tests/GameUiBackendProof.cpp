@@ -8,6 +8,8 @@
 #include "TestMain.hpp"
 #include "VisualImage.hpp"
 
+#include <World/WorldCheckpoint.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <array>
@@ -106,6 +108,117 @@ struct GameUiBackendProbe
 			VK_WHOLE_SIZE) == VK_SUCCESS, "Game UI screenshot invalidate");
 		return target.pixels();
 	}
+
+	void sessionMenuProof(const std::filesystem::path &out)
+	{
+		using enum gameui::SessionAction;
+		using gameui::Screen;
+		using namespace std::chrono_literals;
+		ImGui::GetIO().IniFilename = nullptr;
+		engine.setShowDeveloperUi(false);
+		engine.setSavesRootForTests(out / "saves");
+		engine.renderSettings.maxRenderDistance = 128;
+		engine.worldRenderer->postSettings().applyPreset(GraphicsQualityPreset::Low);
+		engine.enableGameUi(false, false);
+		engine.running = true;
+		engine.showMainMenu();
+		auto &sample = *engine.m_playerUi;
+		auto &device = *engine.vkContext;
+		const auto errors = device.validationErrorCount();
+		constexpr VkExtent2D extent{960, 540};
+		resize(int(extent.width), int(extent.height));
+		constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
+		engine.worldRenderer->resizeOutput(extent, format, kColorSpace);
+		sample.renderer().setOutput(format, kColorSpace);
+		Readback target{device};
+		const auto allocator = device.getAllocator();
+		target.output = createImage2D(allocator, device.getDevice(), extent.width, extent.height,
+			format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+		target.buffer = createBuffer(allocator, extent.width * extent.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VMA_MEMORY_USAGE_AUTO, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+		const auto shot = [&](const char *name) {
+			sample.prepare(engine.window, 0, extent, {}, engine.worldRenderer->getTextureManager(), engine.m_atlasVersion);
+			const auto image = capture(target, &sample.renderer());
+			checked(visual::writePng((out / name).string(), image), "write session screenshot");
+		};
+		const auto request = [&](gameui::SessionAction action, std::string name = {}, std::string seed = {}) {
+			sample.m_sessionRequest = gameui::SessionRequest{action, std::move(name), std::move(seed)};
+			engine.pumpPlayerSession();
+		};
+		const auto until = [&](auto done) {
+			const auto deadline = std::chrono::steady_clock::now() + 15s;
+			while (!done() && std::chrono::steady_clock::now() < deadline)
+			{
+				engine.pumpPlayerSession();
+				SDL_PumpEvents();
+				SDL_Delay(2);
+			}
+			checked(done(), "session menu transition timed out");
+		};
+		const auto complete = [&] {
+			engine.m_sessionProgressPresented = true;
+			until([&] { return !engine.m_playerSessionRequest; });
+		};
+
+		shot("launch.png");
+		CHECK(!engine.sim && !engine.renderBridge && !std::filesystem::exists(out / "saves"),
+			"launch has no active world or saves folder");
+		sample.openScreen(Screen::Worlds);
+		request(List);
+		until([&] { return !engine.m_worldCatalog.valid(); });
+		sample.openScreen(Screen::CreateWorld);
+		request(Create, "../escape", "42");
+		complete();
+		CHECK(sample.screens().top() == Screen::SessionError, "unsafe world name is rejected");
+		request(Cancel);
+		request(Create, "menu-proof", "wrong");
+		complete();
+		CHECK(sample.screens().top() == Screen::SessionError, "invalid seed is visible");
+		request(Cancel);
+		request(Create, "menu-proof", "42");
+		shot("loading.png");
+		request(Create, "duplicate", "43");
+		complete();
+		CHECK(engine.sim && engine.sim->isWorldOpen() && engine.worldSeed() == 42 &&
+			!std::filesystem::exists(out / "saves" / "duplicate"), "create publishes one persistent world");
+		engine.tickStreaming(0.);
+		sample.openPause();
+		engine.syncUiInput();
+		engine.pumpPlayerSession();
+		shot("pause.png");
+		CHECK(engine.simulationSuspended() && !engine.mouseCaptured, "native pause suspends solo steps");
+		sample.back();
+		engine.syncUiInput();
+		CHECK(!engine.nativePause(), "resume releases native suspension");
+		sample.openPause();
+		engine.sim->world()->worldPersistence()->setCheckpointFaultForTests(worldsave::CheckpointFaultPoint::BeforeStaging);
+		request(Leave);
+		complete();
+		CHECK(sample.screens().top() == Screen::SessionError && engine.sim && engine.sim->isWorldOpen(),
+			"checkpoint failure refuses leave and retains the authoritative world");
+		shot("recoverable-error.png");
+		engine.sim->world()->worldPersistence()->setCheckpointFaultForTests(worldsave::CheckpointFaultPoint::None);
+		request(Retry);
+		complete();
+		CHECK(!engine.sim && !engine.renderBridge && sample.screens().top() == Screen::MainMenu,
+			"retry closes the saved session and returns to the menu");
+		sample.openScreen(Screen::Worlds);
+		request(List);
+		until([&] { return !engine.m_worldCatalog.valid(); });
+		CHECK(sample.m_worldCatalog.names == std::vector<std::string>{"menu-proof"}, "catalog lists the saved world");
+		shot("world-selection.png");
+		request(Open, "menu-proof");
+		complete();
+		CHECK(engine.sim && engine.sim->isWorldOpen() && engine.worldSeed() == 42, "reopen uses persisted metadata");
+		sample.openPause();
+		request(Save);
+		complete();
+		CHECK(engine.sim && sample.screens().top() == Screen::Pause, "explicit save returns to pause");
+		request(Quit);
+		complete();
+		CHECK(!engine.running && !engine.sim && device.validationErrorCount() == errors, "quit closes the world without Vulkan validation errors");
+	}
+
 
 	void screenshot(const std::filesystem::path &out)
 	{
@@ -352,7 +465,8 @@ struct GameUiBackendProbe
 		CHECK(sample.screens().focus() == widget("Resume").id,
 			"new Pause focuses Resume (focus=" << sample.screens().focus() << ", layout revision=" <<
 			sample.m_layoutRevision << ", screen revision=" << sample.screens().revision() << ")");
-		tap(SDLK_TAB);
+		for (int i = 0; i < 4; ++i)
+			tap(SDLK_TAB);
 		engine.handleEvents();
 		CHECK(sample.screens().focus() == widget("Widget showcase").id,
 			"Tab focuses the showcase opener (focus=" << sample.screens().focus() << ", active=" <<
@@ -566,7 +680,8 @@ struct GameUiBackendProbe
 		};
 		tap(SDLK_ESCAPE);
 		present(developer);
-		tap(SDLK_TAB);
+		for (int i = 0; i < 4; ++i)
+			tap(SDLK_TAB);
 		tap(SDLK_RETURN);
 		present(developer);
 		present(developer);
@@ -2010,6 +2125,13 @@ struct GameUiBackendProbe
 			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
 };
+
+int runSessionMenuProof(Engine &engine, const std::filesystem::path &output)
+{
+	std::filesystem::create_directories(output);
+	GameUiBackendProbe(engine).sessionMenuProof(output);
+	return testmain::exitCode();
+}
 
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output)
 {

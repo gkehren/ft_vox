@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,6 +24,7 @@
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/InventoryUi.hpp>
 #include <Engine/PlayerUiPreferences.hpp>
+#include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
 #include <Engine/GameUI.hpp>
 #include <Core/ThreadPool.hpp>
@@ -190,6 +192,24 @@ private:
 	void tickHosting();
 	void queueHostedJoin(const hosting::Snapshot &server, const std::string &profile);
 	void requestExit();
+	void pumpPlayerSession();
+	void showMainMenu();
+	void queuePlayerSession(gameui::SessionRequest request);
+	void completePlayerSession();
+	void failPlayerSession(std::string message);
+	void finishSoloBootstrap(glm::dvec3 center, bool resident);
+	struct SoloWorkResult
+	{
+		std::unique_ptr<sim::GameSimulation> simulation;
+		glm::dvec3 center{};
+		std::string error;
+	};
+	std::future<SoloWorkResult> m_soloWork;
+	std::future<gameui::WorldCatalog> m_worldCatalog;
+	std::optional<gameui::SessionRequest> m_playerSessionRequest;
+	std::optional<gameui::SessionRequest> m_failedPlayerSession;
+	bool m_waitingForHostExit{}, m_hostExitFailed{};
+	bool m_sessionProgressPresented{}, m_leavingToMenu{}, m_useMainMenu{};
 	void persistJoinPreferences();
 	void populateJoinUi(GameUIFrame &frame);
 	void applySessionRequests();
@@ -203,7 +223,7 @@ private:
 	void startRemote(std::unique_ptr<RemoteSession> remote);
 	void resumeSolo();
 	void retireWorldProjection();
-	bool switchingSession() const { return m_nextRemote || m_returnToSolo; }
+	bool switchingSession() const { return m_nextRemote || m_returnToSolo || m_leavingToMenu; }
 	void pollRemote();
 	void sendRemoteInput(const physics::PlayerInput &input);
 	void updateRemoteCamera();

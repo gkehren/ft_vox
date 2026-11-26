@@ -213,6 +213,8 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 		m_suspendedSolo.emplace(SuspendedSolo{std::move(sim), camera, paused, shaderParams.dayTime});
 		paused = false;
 	}
+	else if (!m_remote)
+		retireWorldProjection();
 	try
 	{
 		// Start the join timeout after the old projection has drained.
@@ -224,6 +226,8 @@ void Engine::startRemote(std::unique_ptr<RemoteSession> remote)
 	{
 		if (!m_remote && m_suspendedSolo)
 			resumeSolo();
+		else if (!m_remote && m_useMainMenu)
+			showMainMenu();
 		throw;
 	}
 	// Replacing the session closes its trace before opening the next one.
@@ -260,6 +264,11 @@ void Engine::resumeSolo()
 		if (paused)
 			renderBridge->meshResidentArea(camera.getPosition(), sim::GameSimulation::kBootstrapRadiusChunks,
 				vkContext->getAllocator(), *immediate, worldRenderer->arenas());
+	}
+	else if (m_useMainMenu)
+	{
+		m_remote.reset();
+		showMainMenu();
 	}
 	else
 	{

@@ -100,7 +100,7 @@ gameui::InputContext Engine::inputContext() const
 			(mouseCaptured ? imgui->ownsActiveInput() : imgui->ownsKeyboard())),
 		.devDialog = devAvailable && (imgui->hasModal() || (gameUi && gameUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
-		.transition = switchingSession() || (m_remote && !m_remote->ready()),
+		.transition = m_playerSessionRequest.has_value() || switchingSession() || (m_remote && !m_remote->ready()),
 		.captureFailed = m_captureFailed,
 	};
 }

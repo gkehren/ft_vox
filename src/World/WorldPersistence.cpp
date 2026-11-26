@@ -723,7 +723,7 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
                                                           const std::string &name,
                                                           int currentSeed,
                                                           uint32_t currentGeneratorVersion,
-                                                          bool dedicatedServer)
+                                                          bool dedicatedServer, bool existingOnly)
 {
 	// A prior open keeps its service alive until shutdown; reopening on top
 	// would leak a running worker.
@@ -765,6 +765,11 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	}
 	else if (read == worldsave::SaveStatus::NotFound)
 	{
+		if (existingOnly)
+		{
+			info.error = "world '" + name + "' no longer exists";
+			return info;
+		}
 		info.created = true;
 		std::error_code ec;
 		std::filesystem::create_directories(chunksDir, ec);

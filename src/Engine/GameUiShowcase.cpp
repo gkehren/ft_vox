@@ -1,5 +1,7 @@
 #include <Engine/GameUiSample.hpp>
 
+#include <utility>
+
 using namespace gameui;
 
 namespace
@@ -7,7 +9,8 @@ namespace
 enum ScreenControl : ControlId
 {
 	Resume = 1, Showcase, Quit, Return, Confirm, Name, Option, Amount, Choices,
-	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock, ToggleHud
+	SecondaryName, EnableSecond, SecondaryAmount, SecondaryChoices, Disabled, Gallery, HudMock, ToggleHud, Worlds, NewWorld, OpenWorld, CreateWorld, WorldList, WorldName, WorldSeed,
+	Save, Leave, ConfirmLeave, Multiplayer, Settings, Retry, CancelFailure, ForceStop, ConfirmForceStop, FailedQuit, Refresh
 };
 constexpr std::array<std::string_view, 8> kBiomes{
 	"Grassland", "Forest", "Desert", "Tundra", "Swamp", "Savanna", "Taiga", "Ocean"};
@@ -49,12 +52,17 @@ void GameUiSample::invalidateLayout()
 	m_layoutRevision = UINT64_MAX;
 }
 
-void GameUiSample::resetScreens()
+void GameUiSample::resetScreens(Screen root)
 {
 	invalidateLayout();
 	setInventoryView({});
 	cancelInventoryGesture();
-	m_screens.reset();
+	m_screens.reset(root);
+	m_sessionRequest.reset();
+	m_sessionStatus.clear();
+	m_worldName = {};
+	m_worldSeed = {};
+	m_worldList.selection = {};
 	m_field = {};
 	m_secondaryField = {};
 	m_list.selection = {};
@@ -69,6 +77,13 @@ void GameUiSample::openPause()
 
 void GameUiSample::back()
 {
+	if (holdingForSession())
+		return;
+	if (m_screens.top() == Screen::SessionError)
+	{
+		m_sessionRequest = SessionRequest{SessionAction::Cancel, {}, {}};
+		return;
+	}
 	if (m_screens.top() == Screen::Inventory)
 	{
 		setInventoryView({});
@@ -109,7 +124,8 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 		m_widgets.cancelPress();
 	const auto screen = m_screens.top();
 	m_screenScale = scale;
-	const float height = screen == Screen::Showcase ? 364.f : (screen == Screen::Pause ? 300.f : 164.f);
+	const float height = screen == Screen::Showcase ? 364.f :
+		(screen == Screen::Pause ? 450.f : (screen == Screen::Worlds ? 355.f : 260.f));
 	const float width = screen == Screen::Showcase ? 640.f : 456.f;
 	const auto panel = anchor(inset(scene, 8.f), {width * scale, height * scale}, {0.5f, 0.5f});
 	const bool moved = panel != m_panel;
@@ -123,7 +139,12 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 	const auto add = [&](ControlId id, Control control, float h, std::string_view title) {
 		m_widgets.add({id, column.next(h * scale), title, {}, control});
 	};
-	if (screen == Screen::Showcase)
+	m_sessionMessage = {};
+	if (buildSessionScreen(screen, column))
+	{
+		// Session controls use the same focus, clipping and input path.
+	}
+	else if (screen == Screen::Showcase)
 	{
 		m_list.items = kBiomes;
 		m_secondaryList.items = kMaterials;
@@ -147,7 +168,8 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 	else if (screen == Screen::ConfirmExit)
 	{
 		add(0, Label{}, 26.f, "Exit to desktop?");
-		add(0, Label{}, 27.f, "The game will use its normal shutdown path.");
+		add(0, Label{}, 27.f, m_hostedSession ? "Save and stop the hosted server before exiting." :
+			(m_persistentSession ? "Save the world before exiting." : "Close the game window."));
 		const auto row = column.next(36.f * scale);
 		// R10: destructive actions are visually distinct. Cancel is added first,
 		// so it is also the initial focus: a stray Enter can never exit the game.
@@ -159,8 +181,14 @@ void GameUiSample::buildScreen(Clip scene, float scale)
 	{
 		add(0, Label{}, 32.f, "Game menu");
 		add(Resume, Button{}, 36.f, "Resume");
-		add(Showcase, Button{}, 36.f, "Widget showcase");
-		add(Quit, Button{}, 36.f, "Exit to desktop");
+		if (m_persistentSession)
+			add(Save, Button{}, 32.f, "Save world");
+		add(Leave, Button{}, 32.f, m_remoteSession ? "Leave server" :
+			(m_persistentSession ? "Save and return to menu" : "Return to menu"));
+		add(Multiplayer, Button{}, 32.f, "Multiplayer");
+		add(Settings, Button{}, 32.f, "Settings");
+		add(Showcase, Button{}, 30.f, "Widget showcase");
+		add(Quit, Button{}, 32.f, "Exit to desktop");
 		// Design-system previews (issue #302) stay after the game actions until
 		// #303-#308 move them into the real screens.
 		add(Gallery, Button{}, 36.f, "Design system");
@@ -184,6 +212,10 @@ void GameUiSample::paintScreen(glm::vec2 pointer)
 	if (m_screens.suppressDeveloper())
 		paint.backdrop(m_draws.bounds(), theme.palette.scrim);
 	paint.card(m_panel);
+	if (m_screens.top() == Screen::SessionError)
+		paint.wrappedLabel(m_sessionMessage, m_sessionStatus, style::TextRole::Body, theme.palette.ink, 5);
+	if (m_screens.top() == Screen::Loading)
+		paint.progress(m_sessionMessage, 0.f, true, m_uiPhase);
 	m_widgets.paint(m_draws, font(), m_screenScale, m_screens.focus(), pointer, theme, m_atlasLayers,
 		m_fontScale);
 }
@@ -221,6 +253,8 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 	{
 		if (m_screens.top() == Screen::Gallery)
 			return applyGalleryActivate(event.id);
+		if (activateSessionControl(event.id))
+			return InputResult::Consumed;
 		switch (event.id)
 		{
 		case Resume:
@@ -334,4 +368,171 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event
 	}
 	m_screens.focus(focus);
 	return applyWidgetEvent(result);
+}
+
+void GameUiSample::setWorldCatalog(WorldCatalog catalog)
+{
+	m_worldCatalog = std::move(catalog);
+	m_worldNames.clear();
+	for (const auto &name : m_worldCatalog.names)
+		m_worldNames.emplace_back(name);
+	m_worldList.items = m_worldNames;
+	m_worldList.selection = {};
+	invalidateLayout();
+}
+
+void GameUiSample::setSessionStatus(std::string message, bool retry, bool force, bool failedQuit)
+{
+	if (m_sessionStatus == message && m_retrySession == retry && m_forceStop == force &&
+		m_failedQuit == failedQuit)
+		return;
+	m_sessionStatus = std::move(message);
+	m_retrySession = retry;
+	m_forceStop = force;
+	m_failedQuit = failedQuit;
+	invalidateLayout();
+}
+
+void GameUiSample::setSessionContext(bool remote, bool persistent, bool hosted)
+{
+	if (remote != m_remoteSession || persistent != m_persistentSession || hosted != m_hostedSession)
+		invalidateLayout();
+	m_remoteSession = remote;
+	m_persistentSession = persistent;
+	m_hostedSession = hosted;
+}
+
+std::optional<SessionRequest> GameUiSample::takeSessionRequest()
+{
+	return std::exchange(m_sessionRequest, std::nullopt);
+}
+
+bool GameUiSample::holdingForSession() const
+{
+	return m_screens.top() == Screen::Loading;
+}
+
+bool GameUiSample::buildSessionScreen(Screen screen, StackLayout &column)
+{
+	const auto label = [&](std::string_view title) {
+		m_widgets.add({0, column.next(26.f * m_screenScale), title, {}, Label{}});
+	};
+	const auto button = [&](ControlId id, std::string_view title, bool enabled = true,
+		style::ButtonVariant variant = style::ButtonVariant::Secondary) {
+		m_widgets.add({id, column.next(34.f * m_screenScale), title, {}, Button{}, enabled, variant});
+	};
+	switch (screen)
+	{
+	case Screen::MainMenu:
+		label("ft_vox");
+		button(Worlds, "Local worlds");
+		button(Multiplayer, "Multiplayer");
+		button(Settings, "Settings");
+		button(Quit, "Exit to desktop");
+		break;
+	case Screen::Worlds:
+		label("Local worlds");
+		label(m_worldCatalog.notice.empty() ?
+			(m_worldNames.empty() ? "No saved worlds found." : "Choose a saved world.") : m_worldCatalog.notice);
+		m_worldList.visibleRows = 4;
+		m_widgets.add({WorldList, column.next(112.f * m_screenScale), "Saved worlds", {}, &m_worldList,
+			!m_worldNames.empty()});
+		button(OpenWorld, "Open selected world", !m_worldNames.empty());
+		button(NewWorld, "Create world");
+		button(Refresh, "Refresh");
+		button(Return, "Back");
+		break;
+	case Screen::CreateWorld:
+		label("Create local world");
+		label("Use 1-32 letters, digits, dashes or underscores.");
+		m_widgets.add({WorldName, column.next(38.f * m_screenScale), "World name", {}, &m_worldName});
+		m_widgets.add({WorldSeed, column.next(38.f * m_screenScale), "Seed (blank for random)", {}, &m_worldSeed});
+		button(CreateWorld, "Create and play");
+		button(Return, "Back");
+		break;
+	case Screen::Loading:
+		label(m_sessionStatus);
+		m_sessionMessage = column.next(12.f * m_screenScale);
+		if (m_forceStop)
+			button(ForceStop, "Force stop...", true, style::ButtonVariant::Danger);
+		break;
+	case Screen::SessionError:
+		label("Session action failed");
+		// The body is painted with wrapping below, above the recovery actions.
+		m_sessionMessage = column.next(100.f * m_screenScale);
+		button(CancelFailure, m_failedQuit ? "Stay in game" : "Back");
+		if (m_retrySession)
+			button(Retry, "Retry");
+		if (m_failedQuit)
+			button(FailedQuit, "Exit after server failure", true, style::ButtonVariant::Danger);
+		break;
+	case Screen::ConfirmLeave:
+		label(m_remoteSession ? "Leave this server?" : "Return to the main menu?");
+		label(m_hostedSession ? "The hosted server will keep running." :
+			(m_persistentSession ? "The world will be saved before leaving." :
+			(m_remoteSession ? "The server will keep running." : "This transient world will be discarded.")));
+		button(Return, "Cancel");
+		button(ConfirmLeave, "Leave", true, style::ButtonVariant::Danger);
+		break;
+	case Screen::Multiplayer:
+		label("Multiplayer");
+		label("Use the Multiplayer panel to host or join.");
+		button(Multiplayer, "Show Multiplayer panel");
+		button(Return, "Back");
+		break;
+	case Screen::Settings:
+		label("Settings");
+		label("Use the Graphics panel for display settings.");
+		button(Settings, "Show Graphics panel");
+		button(Gallery, "Player UI scale");
+		button(Return, "Back");
+		break;
+	case Screen::ConfirmForceStop:
+		label("Force stop the hosted server?");
+		label("Recent server changes may be lost.");
+		button(Return, "Keep waiting");
+		button(ConfirmForceStop, "Force stop", true, style::ButtonVariant::Danger);
+		break;
+	default: return false;
+	}
+	return true;
+}
+
+bool GameUiSample::activateSessionControl(ControlId id)
+{
+	const auto request = [&](SessionAction action, std::string name = {}, std::string seed = {}) {
+		if (!m_sessionRequest)
+			m_sessionRequest = SessionRequest{action, std::move(name), std::move(seed)};
+	};
+	switch (id)
+	{
+	case Worlds: openScreen(Screen::Worlds); request(SessionAction::List); break;
+	case Refresh: request(SessionAction::List); break;
+	case NewWorld: m_worldName = {}; m_worldSeed = {}; openScreen(Screen::CreateWorld); break;
+	case OpenWorld:
+		if (const auto row = static_cast<size_t>(m_worldList.selection.selected); row < m_worldNames.size())
+			request(SessionAction::Open, std::string(m_worldNames[row]));
+		break;
+	case CreateWorld: request(SessionAction::Create, m_worldName.value(), m_worldSeed.value()); break;
+	case Save: request(SessionAction::Save); break;
+	case Leave: openScreen(Screen::ConfirmLeave); break;
+	case ConfirmLeave: request(SessionAction::Leave); break;
+	case Multiplayer: request(SessionAction::Multiplayer); break;
+	case Settings: request(SessionAction::Settings); break;
+	case Retry: request(SessionAction::Retry); break;
+	case CancelFailure: request(SessionAction::Cancel); break;
+	case ForceStop: openScreen(Screen::ConfirmForceStop); break;
+	case ConfirmForceStop: request(SessionAction::ForceStop); back(); break;
+	case FailedQuit: request(SessionAction::ConfirmFailedQuit); break;
+	default: return false;
+	}
+	return true;
+}
+
+void GameUiSample::finishSessionScreen()
+{
+	while (m_screens.top() == Screen::Loading || m_screens.top() == Screen::SessionError ||
+		m_screens.top() == Screen::ConfirmForceStop)
+		m_screens.back();
+	invalidateLayout();
 }

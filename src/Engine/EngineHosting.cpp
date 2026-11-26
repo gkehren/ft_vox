@@ -92,7 +92,7 @@ void Engine::tickHosting()
 		m_hostSnapshot = std::move(*next);
 	}
 	if (m_hostSnapshot.state == hosting::State::Ready && m_hostAutoProfile &&
-		!m_joinRequest && !switchingSession() && !m_exitAfterHostedStop)
+		!m_joinRequest && !switchingSession() && !m_exitAfterHostedStop && !m_playerSessionRequest)
 	{
 		queueHostedJoin(m_hostSnapshot, *m_hostAutoProfile);
 		m_hostAutoProfile.reset();
@@ -111,6 +111,11 @@ void Engine::tickHosting()
 
 void Engine::requestExit()
 {
+	if (m_playerUi && !m_uiSpike && !m_inspectionView && !m_benchmark.isActive())
+	{
+		queuePlayerSession({gameui::SessionAction::Quit, {}, {}});
+		return;
+	}
 	if (m_exitAfterHostedStop)
 		return;
 	if (!m_hostServer.snapshot().active())

@@ -371,6 +371,7 @@ public:
 	/// the current visible state.
 	void leaveLayoutTilesHidden() { m_layoutTilesHidden = false; }
 	void showHostPanel();
+	void showGraphicsPanel() { leaveLayoutTilesHidden(); m_debug.panels.rendering = true; }
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
