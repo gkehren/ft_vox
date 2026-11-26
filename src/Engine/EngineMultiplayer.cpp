@@ -588,7 +588,11 @@ void Engine::sendRemoteVoxelAction(bool placing)
 void Engine::selectHotbarSlot(int slot)
 {
 	if (m_remote)
-		m_remote->submitSlots(wire::ActionKind::Select, slot);
+	{
+		// F04 (#316): one submission adapter for HUD and native gestures, so a
+		// selection made through the HUD highlights its slot in the inventory.
+		submitRemoteInventoryAction({inventoryui::Command::Select, inventoryui::SlotId{slot}});
+	}
 	else
 		sim->selectHotbarSlot(slot);
 }
@@ -602,8 +606,10 @@ int Engine::selectedHotbarSlot() const
 
 void Engine::dropSelectedItem()
 {
+	// F04 (#316): the HUD drop takes the same submission adapter as the
+	// inventory, so the affected slot shows its pending state on open.
 	if (m_remote)
-		m_remote->submitSlots(wire::ActionKind::DropOne, selectedHotbarSlot());
+		submitRemoteInventoryAction({inventoryui::Command::DropOne, inventoryui::SlotId{selectedHotbarSlot()}});
 	else
 		sim->dropFromSlot(selectedHotbarSlot(), 1, glm::dvec3(camera.getFront()));
 }
@@ -699,7 +705,6 @@ gameui::InventoryView Engine::playerInventoryView() const
 void Engine::submitInventoryAction(inventoryui::Action action)
 {
 	using enum inventoryui::Command;
-	using wire::ActionKind;
 	m_playerUi->cancelInventoryGesture();
 	const auto view = playerInventoryView();
 	if (!view.enabled() || !action.from.valid() ||
@@ -709,19 +714,7 @@ void Engine::submitInventoryAction(inventoryui::Action action)
 	const int from = action.from.index, to = action.to.index;
 	if (m_remote)
 	{
-		ActionKind operation = ActionKind::Select;
-		switch (action.command)
-		{
-		case Move: operation = ActionKind::Move; break;
-		case Swap: operation = ActionKind::Swap; break;
-		case Split: operation = ActionKind::SplitHalf; break;
-		case Select: operation = ActionKind::Select; break;
-		case DropOne: operation = ActionKind::DropOne; break;
-		case DropStack: operation = ActionKind::DropStack; break;
-		case None: return;
-		}
-		if (m_remote->submitSlots(operation, from, action.to.valid() ? to : 0))
-			m_remote->pendingInventoryAction = action;
+		submitRemoteInventoryAction(action);
 		return;
 	}
 
@@ -743,6 +736,34 @@ void Engine::submitInventoryAction(inventoryui::Action action)
 	}
 	m_inventoryResult = result;
 	m_inventoryResultUntil = Clock::now() + 3s;
+}
+
+bool Engine::submitRemoteInventoryAction(inventoryui::Action action)
+{
+	using enum inventoryui::Command;
+	using wire::ActionKind;
+	auto &remote = *m_remote;
+	ActionKind operation = ActionKind::Select;
+	switch (action.command)
+	{
+	case Move: operation = ActionKind::Move; break;
+	case Swap: operation = ActionKind::Swap; break;
+	case Split: operation = ActionKind::SplitHalf; break;
+	case Select: operation = ActionKind::Select; break;
+	case DropOne: operation = ActionKind::DropOne; break;
+	case DropStack: operation = ActionKind::DropStack; break;
+	case None: return false;
+	}
+	// PR #316 F04: HUD shortcuts and native gestures share this adapter. The
+	// single-action-in-flight policy stays inside submitSlots(); the affected
+	// slots are published only after a successful submission, and the action
+	// result, disconnect, resync and session-reset paths (pollRemote, scope
+	// change) clear them. Terrain actions keep their own pending flag.
+	if (!action.from.valid() ||
+		!remote.submitSlots(operation, action.from.index, action.to.valid() ? action.to.index : 0))
+		return false;
+	remote.pendingInventoryAction = action;
+	return true;
 }
 
 void Engine::populateRemoteUi(GameUIFrame &frame)

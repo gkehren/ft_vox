@@ -1292,6 +1292,212 @@ struct GameUiBackendProbe
 		present();
 		CHECK(engine.inventoryPanelOpen() && engine.developerUiAvailable() && !held(),
 			"workspace changes cancel held state and keep the native screen open");
+
+		// PR #316 F02 (solo) + F03/F05: the solo proof explicitly covers a
+		// PARTIAL merge, and the held-stack presentation follows the active
+		// input modality and stays inside the available game view. All
+		// addressing goes through slot identities: the layout is a grid whose
+		// CELL n maps to slot (n + 9) % 36, so the fixture searches slots.
+		// The developer workspace hides so the native screen owns the pointer
+		// and the keyboard; the F01 block below shows it again explicitly.
+		engine.setDeveloperWorkspaceVisible(false);
+		engine.sim->grantItems(Cobblestone, 64); // fills the first empty hotbar slot at the cap
+		engine.sim->grantItems(Cobblestone, 40); // overflows into a second pile
+		present();
+		const auto slotPoint = [&](int slot) { return middle(sample.m_inventoryLayout.slot({slot})); };
+		const auto pileOf = [&](uint32_t count) {
+			const auto all = snapshot();
+			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
+				if (all[size_t(slot)].item == Cobblestone && all[size_t(slot)].count == count)
+					return slot;
+			return -1;
+		};
+		const auto capped = pileOf(64);
+		auto over = pileOf(40);
+		CHECK(capped >= 0 && over >= 0 && capped != over,
+			"the partial-merge fixture holds a clashing 64/40 cobblestone pair");
+		const auto scene = [&] { return sample.m_draws.bounds(); };
+		const auto heldInset = std::min(gameui::style::baseline().space.xs * sample.m_inventoryLayout.scale,
+			sample.m_inventoryLayout.main.cell * 0.5f);
+		const auto holdsHeldIcon = [&](gameui::Clip placement) {
+			const auto icon = gameui::inset(placement, heldInset);
+			return std::ranges::any_of(sample.m_draws.quads(), [&](const gameui::Quad &quad) {
+				return quad.layer == static_cast<int32_t>(TextureType::COBBLESTONE) && quad.rect == icon.rect;
+			});
+		};
+		const auto heldRect = [&](glm::vec2 point) {
+			return gameui::heldStackPlacement(point, sample.m_inventoryLayout.main.cell,
+				10.f * sample.m_inventoryLayout.scale, scene());
+		};
+		const auto slotRect = [&](inventoryui::SlotId slot) {
+			return gameui::heldStackPlacement(middle(sample.m_inventoryLayout.slot(slot)),
+				sample.m_inventoryLayout.main.cell, 10.f * sample.m_inventoryLayout.scale, scene());
+		};
+		// F02 (solo): split the capped pile onto the 40 pile — the destination
+		// reaches the cap and the overflow stays at the source.
+		clickAt(slotPoint(capped), SDL_BUTTON_RIGHT);
+		clickAt(slotPoint(over));
+		present();
+		const std::string_view feedbackNow = engine.playerInventoryView().feedback;
+		std::cout << "DBG held=" << held() << " capped=" << capped << " over=" << over
+			<< " feedback=" << (feedbackNow.empty() ? std::string_view("null") : feedbackNow) << '\n';
+		{
+			const auto all = snapshot();
+			for (int slot = 0; slot < inventoryui::kSlotCount; ++slot)
+				if (!all[size_t(slot)].isEmpty())
+					std::cout << "DUMP slot=" << slot << " item="
+						<< static_cast<int>(all[size_t(slot)].item)
+						<< " count=" << all[size_t(slot)].count << '\n';
+		}
+		CHECK(!held() && snapshot()[size_t(capped)].item == Cobblestone &&
+			snapshot()[size_t(capped)].count == 40 && snapshot()[size_t(over)].count == 64,
+			"the split fills the destination slot to capacity and keeps the remainder in the source");
+		CHECK(engine.playerInventoryView().feedbackKind == gameui::style::Status::Info &&
+			engine.playerInventoryView().feedback == "Only part of the stack fit.",
+			"a partial merge reports the overflow without an error state");
+		// F05: re-seat the 40 remainder pile in the main grid, then a pointer
+		// pickup anchors the held stack to the pointer. The pile must sit above
+		// the hotbar row: arrow navigation refuses moves out of the bottom row.
+		{
+			const auto mainSeat = [&] {
+				for (int slot = items::kHotbarSize; slot < inventoryui::kSlotCount; ++slot)
+					if (snapshot()[size_t(slot)].isEmpty())
+						return slot;
+				throw std::runtime_error("proof found no empty main slot");
+			}();
+			clickAt(slotPoint(over));
+			clickAt(slotPoint(mainSeat));
+			present();
+			over = mainSeat;
+		}
+		clickAt(slotPoint(over), SDL_BUTTON_RIGHT);
+		present();
+		CHECK(held() && holdsHeldIcon(heldRect(slotPoint(over))),
+			"pointer pickup anchors the held stack next to the pointer");
+		// F05: keyboard navigation moves the anchor to the focused slot without
+		// touching the armed gesture, and passive motion cannot pull it back.
+		const auto beforeKeys = snapshot();
+		const int focusStart = int(sample.screens().focus());
+		tap(SDLK_DOWN);
+		present();
+		inventoryui::SlotId destination = inventoryui::slotAtCell(focusStart - 1 + inventoryui::kColumns);
+		CHECK(held() && snapshot() == beforeKeys &&
+			int(sample.screens().focus()) == focusStart + inventoryui::kColumns,
+			"an arrow key moves the focus without submitting or cancelling the held stack");
+		CHECK(holdsHeldIcon(slotRect(destination)),
+			"the held stack follows the focused slot under keyboard control");
+		tap(SDLK_RIGHT);
+		present();
+		const int focusNext = int(sample.screens().focus());
+		destination = inventoryui::slotAtCell(focusNext - 1);
+		const glm::vec4 keyboardRect = slotRect(destination).rect;
+		CHECK(focusNext == focusStart + inventoryui::kColumns + 1 && held() &&
+			holdsHeldIcon(slotRect(destination)),
+			"arrow navigation keeps moving the keyboard-anchored held stack");
+		motion(middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).x,
+			middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).y);
+		present();
+		CHECK(held() && holdsHeldIcon({keyboardRect}) && int(sample.screens().focus()) == focusNext,
+			"passive pointer motion cannot jump the keyboard-anchored held stack");
+		// F05: a completed click outside the grid is an invalid drop target: the
+		// armed gesture cancels without a command and the presentation returns
+		// to pointer anchoring.
+		const auto deadZone = glm::vec2{middle(sample.m_inventoryLayout.slot(inventoryui::slotAtCell(4))).x,
+			sample.m_inventoryLayout.main.bounds.rect.w + 8.f};
+		clickAt(deadZone);
+		present();
+		CHECK(!held() && snapshot() == beforeKeys &&
+			sample.m_inventoryModality == gameui::InventoryModality::Pointer,
+			"a click outside the grid cancels the armed gesture without a command");
+		// F03: re-arm by pointer, then carry the stack toward the bottom-right
+		// game-view edge — the offset flips / clamps so it stays fully visible.
+		clickAt(slotPoint(over), SDL_BUTTON_RIGHT);
+		const glm::vec2 corner{scene().rect.z - 10.f, scene().rect.w - 10.f};
+		SDL_WarpMouseInWindow(engine.window, corner.x, corner.y);
+		motion(corner.x, corner.y);
+		present();
+		const auto edgeRect = heldRect(corner);
+		const auto unflipped = gameui::rectangle(corner + glm::vec2{10.f * sample.m_inventoryLayout.scale},
+			{sample.m_inventoryLayout.main.cell, sample.m_inventoryLayout.main.cell});
+		const bool inside = edgeRect.rect.x >= scene().rect.x && edgeRect.rect.y >= scene().rect.y &&
+			edgeRect.rect.z <= scene().rect.z + 0.5f && edgeRect.rect.w <= scene().rect.w + 0.5f;
+		CHECK(held() && holdsHeldIcon(edgeRect) && inside && !(edgeRect.rect == unflipped.rect),
+			"the held stack flips near the view edge and stays fully inside the game view");
+
+		// PR #316 F01: Developer UI takes the keyboard from the open inventory;
+		// its keys never become inventory commands until a slot click hands the
+		// keyboard back.
+		engine.setDeveloperWorkspaceVisible(true);
+		char editorValue[32]{};
+		glm::vec2 editorPoint{};
+		bool popupWanted = false, popupVisible = false, popupCloseRequested = false;
+		const auto ownershipEditor = [&] {
+			ImGui::SetNextWindowPos({45.f, 70.f}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({220.f, 84.f}, ImGuiCond_Always);
+			if (ImGui::Begin("Inventory keyboard ownership", nullptr,
+				ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				ImGui::InputText("##owned", editorValue, sizeof(editorValue));
+				const auto item = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				editorPoint = {item.x - origin.x + 15.f, item.y - origin.y + 8.f};
+				popupVisible = false;
+				if (popupWanted)
+					ImGui::OpenPopup("owned-popup");
+				if (ImGui::BeginPopup("owned-popup"))
+				{
+					popupVisible = true;
+					ImGui::Text("Keyboard owned by Developer UI");
+					if (popupCloseRequested)
+						ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
+			}
+			ImGui::End();
+		};
+		popupWanted = true;
+		present(ownershipEditor);
+		present(ownershipEditor); // OpenPopup takes effect on the next frame
+		CHECK(popupVisible, "the developer window opens a non-modal popup over the inventory");
+		present(ownershipEditor);
+		CHECK(!held() && engine.inventoryPanelOpen() && popupVisible &&
+			sample.m_inventoryModality == gameui::InventoryModality::Pointer,
+			"opening a Developer UI popup cancels the held stack and resets the modality");
+		popupWanted = false;
+		popupCloseRequested = true;
+		present(ownershipEditor);
+		popupCloseRequested = false;
+		present(ownershipEditor);
+		CHECK(!popupVisible, "the proof popup closes again");
+		const auto beforeEditor = snapshot();
+		const auto focusEditor = int(sample.screens().focus());
+		clickAt(editorPoint);
+		present(ownershipEditor);
+		CHECK(engine.imgui->editingText(),
+			"the developer editor takes keyboard ownership from the open inventory");
+		tap(SDLK_END);
+		commitText("dev");
+		tap(SDLK_RETURN); // InputText applies its working buffer when the edit ends
+		tap(SDLK_SPACE);
+		tap(SDLK_LEFT);
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		for (int frame = 0; frame < 4; ++frame) // ImGui consumes its event queue one frame late
+			present(ownershipEditor);
+		CHECK(std::string_view(editorValue) == "dev", "committed text reaches only the developer editor");
+		CHECK(snapshot() == beforeEditor && !held() && int(sample.screens().focus()) == focusEditor,
+			"Enter, Space, arrows and Tab reach only the developer editor, not the inventory");
+		clickSlot(2);
+		present(ownershipEditor);
+		CHECK(!engine.imgui->pendingKeyboard() && !engine.imgui->editingText() && !held(),
+			"clicking an inventory slot returns keyboard ownership to the native screen");
+		const int focusResume = int(sample.screens().focus());
+		tap(SDLK_TAB);
+		present(ownershipEditor);
+		CHECK(int(sample.screens().focus()) == focusResume + 1,
+			"native keyboard navigation resumes after the developer handoff");
+		capture("ownership");
+
 		engine.setDeveloperWorkspaceVisible(false);
 		resize(960, 540);
 		sample.setScalePolicy({gameui::ScaleMode::Fixed, 2.f});

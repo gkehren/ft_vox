@@ -148,6 +148,59 @@ bool overlaps(Clip a, Clip b)
 	return a.rect.x < b.rect.z && b.rect.x < a.rect.z && a.rect.y < b.rect.w && b.rect.y < a.rect.w;
 }
 
+// PR #316 F03: the held stack stays fully inside the available game view near
+// every edge and corner. Pure geometry: preferred offset, flip, then clamp.
+void heldStackPlacementTest()
+{
+	constexpr float cell = 30.f, offset = 10.f;
+	const Clip view{{0, 0, 400, 300}};
+	const auto rect = [](const Clip &r) { return r.rect; };
+
+	// Center of the room: the ordinary pointer offset is used verbatim.
+	CHECK(rect(heldStackPlacement({100.f, 100.f}, cell, offset, view)) == glm::vec4(110, 110, 140, 140),
+		"an interior anchor keeps the usual pointer offset");
+
+	// Right edge: the offset flips, so the icon is not clipped away.
+	const auto atRight = rect(heldStackPlacement({385.f, 100.f}, cell, offset, view));
+	CHECK(atRight.x == 385.f - offset - cell && atRight.z == 385.f - offset,
+		"an anchor near the right edge flips the offset to the left");
+
+	// Bottom edge: the offset flips upward.
+	const auto atBottom = rect(heldStackPlacement({100.f, 285.f}, cell, offset, view));
+	CHECK(atBottom.y == 285.f - offset - cell && atBottom.w == 285.f - offset,
+		"an anchor near the bottom edge flips the offset upward");
+
+	// Bottom-right corner: both axes flip, which already fits — the rectangle
+	// lands fully inside without clamping.
+	const auto atCorner = rect(heldStackPlacement({378.f, 278.f}, cell, offset, view));
+	CHECK(atCorner.x == 378.f - offset - cell && atCorner.y == 278.f - offset - cell &&
+		atCorner.z <= 400.f && atCorner.w <= 300.f,
+		"a corner anchor flips on both axes and stays inside the view");
+
+	// The anchor can never push the icon out of the left/top edge either.
+	CHECK(rect(heldStackPlacement({-50.f, -50.f}, cell, offset, view)).x == 0.f &&
+		rect(heldStackPlacement({-50.f, -50.f}, cell, offset, view)).y == 0.f,
+		"an out-of-view anchor clamps to the top-left corner");
+
+	// A view with a dock offset (the central Developer UI node): clamping uses
+	// the view, not the window; the corner anchor flips inside it.
+	const Clip docked{{200.f, 40.f, 700.f, 460.f}};
+	const auto dockedRect = rect(heldStackPlacement({690.f, 450.f}, cell, offset, docked));
+	CHECK(dockedRect == glm::vec4(650, 410, 680, 440),
+		"clamping respects the docked game-view rectangle");
+
+	// Compact views: a view narrower than the cell collapses onto its edge
+	// without producing a negative or outside rectangle.
+	const Clip tiny{{10.f, 10.f, 40.f, 50.f}};
+	const auto tinyRect = rect(heldStackPlacement({25.f, 25.f}, cell, offset, tiny));
+	CHECK(tinyRect.x == 10.f && tinyRect.y >= 10.f && tinyRect.z <= 40.f && tinyRect.w <= 50.f,
+		"a view smaller than the cell keeps the stack at its clamped edge");
+
+	CHECK(heldStackPlacement({0, 0}, 0.f, offset, view).empty() &&
+		heldStackPlacement({0, 0}, cell, offset, Clip{{10.f, 10.f, 5.f, 50.f}}).empty(),
+		"degenerate cells and empty views place nothing");
+}
+
 void slotGeometry()
 {
 	const Clip strip{{0.f, 100.f, 400.f, 144.f}};
@@ -1222,6 +1275,7 @@ int main()
 {
 	slotGeometry();
 	inventoryScreen();
+	heldStackPlacementTest();
 	tooltips();
 	notifications();
 	notificationLifetime();

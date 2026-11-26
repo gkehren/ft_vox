@@ -37,7 +37,7 @@ only map input to commands and present snapshots.
 | `src/Items/ItemEntitySystem.*` | CPU core | dropped-item entities: fixed step, pickup, despawn, cap, id allocator, snapshots + events |
 | `src/Sim/GameSimulation.*` | CPU core | single owner: inventory + item system + interaction commands + persistence capture/restore |
 | `src/World/WorldSave.*` / `WorldPersistence.*` | CPU core | `inventory.state` (FTVI) + `items.state` (FTVJ) formats and atomic I/O |
-| `src/Engine/GameUIInventory.cpp` + `InventoryUi.hpp` | graphical host | hotbar HUD + inventory panel (snapshot-only displays, command callbacks) |
+| `src/Engine/GameUiInventoryScreen.cpp` + `InventoryUi.hpp` | graphical host | native inventory screen + shared slot contract: typed slot identities, pure whole/half click planning, one Engine command per completed gesture (since #304; issue #229 legacy ImGui panel retired) |
 | `src/Renderer/ItemEntityRenderer.*` | derived render | instanced atlas cubes fed by id-sorted snapshots |
 | `src/Headless/` | CPU runner | gameplay script grammar + digest coverage (issue #230) |
 
@@ -339,17 +339,20 @@ rebuilt from resident neighbors on reload.
 
 ## 7. Presentation boundary (derived only)
 
-- **Hotbar HUD + inventory panel** (`GameUIInventory.cpp`, issue #229):
-  always-on 9-slot HUD + `E` panel (27 + 9 grid). **Snapshot-only displays**
-  issuing command callbacks (`GameUIFrame` pattern). Left-click move/swap,
-  right-click half-split; the **drag cursor is UI-local presentation**,
-  discarded on close (no duplication — authoritative moves happen only
-  through commands). Item icons are per-atlas-layer ImGui descriptors over
-  the block atlas (no new assets), dropped eagerly on resource-pack apply
-  (device idle) and revalidated against the atlas version before next use
-  (the lazy version-mismatch check remains as a safety net). Pure
-  layout/cursor/click logic lives in `InventoryUi.hpp`
-  (headless-testable, `test_ui_shell`).
+- **Native HUD + inventory screen** (native since #304; historical:
+  `GameUIInventory.cpp` ImGui panel, issue #229, retired by PR #316):
+  the always-on `PlayerHud` hotbar (shared `SlotView` slots) and the `E`
+  `GameUiInventoryScreen` (27 + 9 grid). **Snapshot-only displays**: the
+  screen plans whole/half gestures through the pure
+  `InventoryUi.hpp` planner and emits one existing Engine command per
+  completed gesture (solo sim result immediately; remote through the
+  shared `submitRemoteInventoryAction` adapter with per-slot pending
+  state and authoritative confirmation). Left-click move/swap, right-click
+  half-split, keyboard focus navigation; the held stack is UI-local
+  presentation, discarded on close (no duplication — authoritative moves
+  happen only through commands). Item icons sample the generation-tagged
+  atlas (no new assets). The planner stays headless-testable
+  (`test_ui_shell`).
 - **`ItemEntityRenderer`** (issue #229): one shared atlas-textured unit cube,
   one instanced indexed draw for the frustum-culled visible population
   (bounded by the sim cap). Previous/current interpolation is done

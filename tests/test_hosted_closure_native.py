@@ -30,7 +30,10 @@ def run_phase(client: Path, server: Path, root: Path, phase: str) -> None:
                                            stderr=subprocess.STDOUT, env=env)
                 processes.append((role, process, logs_path))
 
-            deadline = time.monotonic() + 100
+            # The inventory matrix mines 65 blocks through acknowledged
+            # break actions; every acceptance revalidates the client
+            # baseline, so the whole shaft takes a few minutes.
+            deadline = time.monotonic() + 900
             while time.monotonic() < deadline:
                 codes = [process.poll() for _, process, _ in processes]
                 if any(code not in (None, 0) for code in codes):

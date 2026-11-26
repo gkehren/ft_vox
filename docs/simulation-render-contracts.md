@@ -239,7 +239,7 @@ graphics stack at all ([`headless-runner.md`](headless-runner.md)).
 | `Chunk` | `src/Chunk/Chunk.hpp` | Derived (render handle) | GPU arena ranges, draw caches, pending mesh payloads, entity light caches, dirty sections, visibility. Binds to a `WorldChunk` (world-owned in game; privately owned for standalone tests/tools) and forwards every voxel read/write. The bridge's per-chunk render record. | C (#207) — **landed** (mesh/light payloads owned by the bridge) |
 | `WorldCollisionView` | `src/World/WorldCollisionView.hpp` | **Authoritative query seam (CPU-only)** | Implements `physics::VoxelCollisionWorld` over `VoxelWorld` with the exact historical collision semantics (scoped shared lock, 16-entry cache, boundary envelope, unknown cells, pending-edit overlay). In `ft_vox_core`. | B (#206) — **landed** |
 | `WorldMobView` | `src/World/WorldMobView.hpp` | **Authoritative mob seam (CPU-only)** | Implements `entities::MobWorld` over `WorldCollisionView` + `TerrainGenerator`; `surface()` keeps the exact biome + grass eligibility scan. Replaces the removed `ChunkMobWorld` adapter; derived entity light sampling is NOT here (the host samples the bridge after the mob snapshot). In `ft_vox_core`'s include closure. | D (#208) — **landed** |
-| `GameUI` | `src/Engine/GameUI.*` | Derived | ImGui panels; reads sim snapshots + render settings + `WorldPersistence::Status` via a plain frame struct (`GameUIFrame`). Biome-map requests/results are validated against the world generation + seed. Epic #223 F (#229) added the gameplay surfaces (`GameUIInventory.cpp` + `InventoryUi.hpp`): always-on hotbar HUD + `E` inventory panel — snapshot-only displays issuing command callbacks; the drag cursor is UI-local presentation discarded on close; item icons are per-atlas-layer ImGui descriptors. Render/UI-only. | E (#209) — **landed**; Epic #223 F (#229) gameplay surfaces |
+| `GameUI` | `src/Engine/GameUI.*` | Derived | ImGui panels; reads sim snapshots + render settings + `WorldPersistence::Status` via a plain frame struct (`GameUIFrame`). Biome-map requests/results are validated against the world generation + seed. The #229-era ImGui gameplay surfaces (`GameUIInventory.cpp`, historical) were replaced by the native Game UI (Epic #298): `PlayerHud` (#303) draws the live hotbar from the solo sim snapshot or the confirmed private remote inventory, and the native inventory screen (`GameUiInventoryScreen.cpp` + `InventoryUi.hpp`, #304) plans whole/half gestures and emits one existing Engine command per completed gesture — snapshot-only presentation, UI-local held stack discarded on close. Render/UI-only. | E (#209) — **landed**; Epic #223 F (#229) → Epic #298 Phase E/F (#303/#304) |
 | `WorldPersistence` / `SaveService` | `src/World/WorldPersistence.*` | **Authoritative (CPU-only)** | Save facade + async I/O worker; **owned by `VoxelWorld`** (moved out of `ChunkManager` in Phase B — the key inversion the epic required). Epic #223 Phase E (#228) added the gameplay state files `inventory.state` (FTVI) + `items.state` (FTVJ, incl. the entity-id allocator high-water) with the exact `WorldSave` discipline (atomic writes, strict validation, missing-fresh/corrupt-loud). In `ft_vox_core`. | B (#206) — **landed**; Epic #223 E (#228) gameplay files |
 | `MobSystem` | `src/Entities/MobSystem.*` | **Authoritative (CPU-only)** | Fixed-step 60 Hz passive mobs over `entities::MobWorld`. In `ft_vox_core`; owned by `GameSimulation` since Phase D. `MobRenderState` snapshots are derived. | D (#208) — **landed** |
 | `items::Inventory` | `src/Items/Inventory.*` | **Authoritative (CPU-only)** | Fixed 36-slot container (hotbar 0..8) + selected hotbar index; deterministic slot operations with `items::ItemResult` codes; trivially copyable, no heap churn. Owned by `GameSimulation` (Epic #223 B); mutations through commands only; `restore` is a lifecycle-only persistence seam. In `ft_vox_core`. | Epic #223 A/B (#224/#225) — **landed** |
@@ -1053,21 +1053,30 @@ panel and dropped-item rendering. Strict boundary (epic §5): these surfaces
 consume bounded snapshots and issue explicit commands through callbacks —
 **no gameplay rule in `GameUI`, `Engine` or the renderer**.
 
-- **`GameUIFrame` extensions**: a `sim::InventorySnapshot` value (filled by
-  `Engine::drawUi`), `std::function` command callbacks (`selectHotbarSlot`,
-  `moveStack`, `swapStacks`, `splitStack`, `dropFromSlot`), the host-owned
-  inventory-panel flag (`E`, from #227) and an `atlasVersion` counter for icon
-  revalidation. Display names resolve through the registry on the UI side.
-- **Hotbar HUD** (`GameUIInventory.cpp`): always visible in the gameplay view
+- **`GameUIFrame` extensions** (historical, #229): the ImGui panel consumed a
+  `sim::InventorySnapshot` value (filled by `Engine::drawUi`),
+  `std::function` command callbacks (`selectHotbarSlot`, `moveStack`,
+  `swapStacks`, `splitStack`, `dropFromSlot`), the host-owned
+  inventory-panel flag (`E`, from #227) and an `atlasVersion` counter for
+  icon revalidation. Display names resolve through the registry on the UI
+  side. Since #304 the native screen instead reads
+  `Engine::playerInventoryView()` (the typed `gameui::InventoryView`:
+  availability, confirmed snapshot + selected slot, pending slots and
+  session feedback) and Engine owns submission; the callbacks and flag left
+  `GameUIFrame` with the retired ImGui panel.
+- **Hotbar HUD** (native `PlayerHud` since #303; the historical
+  `GameUIInventory.cpp` ImGui panel is retired): always visible in the gameplay view
   (benchmarks keep the stock UI closed); 9 slots, selection highlight, stack
-  counts, icons = registry `ItemId → placeableBlock → block-atlas layer` via
-  per-layer 2D views registered with ImGui (no new texture assets). Read-only.
-- **Inventory panel** (`E`): 27 main + 9 hotbar grid; click-to-move/swap and
-  right-click-to-split **through command callbacks only**. The drag cursor is
+  counts, icons = registry `ItemId → placeableBlock → block-atlas layer`
+  sampled from the generation-tagged atlas (no new texture assets). Read-only.
+- **Native inventory screen** (#304, `E`): 27 main + 9 hotbar grid; whole
+  move / swap, half split, merges and drops **only through Engine commands**
+  (solo sim or the shared remote submission adapter). The held stack is
   UI-local presentation (a VIEW of the source slot via `InventoryUi.hpp`),
   discarded on close — authoritative moves happen only through commands, so
-  closing mid-drag never duplicates items. Pure layout/cursor/click logic is
-  headless-testable (`test_ui_shell`).
+  closing mid-gesture never duplicates items. Pure layout/cursor/click logic
+  is headless-testable (`test_ui_shell`). (Historical: the #229 ImGui panel
+  used `GameUIFrame` command callbacks and per-layer icon descriptors.)
 - **`ItemEntityRenderer`** (`src/Renderer/`, derived): fed by the host from the
   id-sorted `sim::ItemEntitySnapshot`s after the sim advance (the mob snapshot
   pattern): interpolated position, registry atlas layer, presentation spin/bob

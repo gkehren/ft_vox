@@ -146,6 +146,9 @@ private:
 	gameui::WidgetSet m_widgets;
 	gameui::InventoryView m_inventoryView;
 	gameui::InventoryLayout m_inventoryLayout;
+	/// Last meaningful interaction device on the inventory screen (F05): the
+	/// held stack follows it; reset by every gesture cancellation.
+	gameui::InventoryModality m_inventoryModality{gameui::InventoryModality::Pointer};
 	inventoryui::Interaction m_inventoryInteraction;
 	struct InventoryPress { gameui::ControlId control{}; Uint8 button{}; };
 	std::optional<InventoryPress> m_inventoryPress;

@@ -40,7 +40,9 @@ void GameUiSample::setInventoryView(InventoryView view)
 	const auto *snapshot = view.snapshot ? &*view.snapshot : nullptr;
 	if (m_inventoryInteraction.observe(snapshot, view.epoch, view.enabled()) &&
 		m_inventoryPress && m_inventoryPress->control != kClose)
+	{
 		m_inventoryPress.reset();
+	}
 	m_inventoryView = view;
 }
 
@@ -48,6 +50,9 @@ void GameUiSample::cancelInventoryGesture()
 {
 	m_inventoryPress.reset();
 	m_inventoryInteraction.cancel();
+	// F05 (#316): modality is transient presentation state. It resets with the
+	// gesture on screen close, session reset, focus loss and workspace handoff.
+	m_inventoryModality = InventoryModality::Pointer;
 }
 
 ControlId GameUiSample::inventoryControlAt(glm::vec2 point) const
@@ -84,6 +89,10 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 	{
+		// F05 (#316): a real pointer press is the only pointer edge that pulls
+		// the presentation back to the pointer. Passive motion can still route
+		// here but never reaches this branch, so it cannot cause visual jumps.
+		m_inventoryModality = InventoryModality::Pointer;
 		const auto button = event.button.button;
 		if (button != SDL_BUTTON_LEFT && button != SDL_BUTTON_RIGHT)
 			return {};
@@ -122,6 +131,10 @@ Action GameUiSample::handleInventoryEvent(const SDL_Event &event)
 
 	auto focus = m_screens.focus();
 	const auto key = event.key.key;
+	// F05 (#316): a key delivered to the screen switches the presentation to
+	// keyboard anchoring. Switching DOES NOT reactivate or cancel an armed
+	// gesture — the drag cursor only changes its anchor point.
+	m_inventoryModality = InventoryModality::Keyboard;
 	const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 	const bool modified = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI | SDL_KMOD_ALT)) != 0;
 	if (modified)
@@ -255,10 +268,23 @@ void GameUiSample::paintInventory(Clip scene, glm::vec2 pointer, std::optional<u
 	}
 	if (drag.active())
 	{
+		// F03/F05 (#316): the held stack follows the active input modality —
+		// the pointer while the player interacts by pointer, the focused
+		// destination slot while the player navigates by keyboard (falling
+		// back to the source slot when no valid destination has focus). Each
+		// anchor goes through heldStackPlacement, which flips the offset near
+		// the right/bottom edge of the available game view and clamps the
+		// rectangle fully inside it (dock area included).
 		const float cell = layout.main.cell;
-		const auto anchor = hit(scene, pointer) ? pointer :
-			glm::vec2(layout.slot(focused.valid() ? focused : drag.sourceSlot).rect);
-		paint.slot(rectangle(anchor + glm::vec2(10.f * layout.scale), {cell, cell}),
+		const auto anchorRect = layout.slot(focused.valid() ? focused : drag.sourceSlot);
+		glm::vec2 anchor;
+		if (m_inventoryModality == InventoryModality::Keyboard)
+			anchor = glm::vec2(anchorRect.rect) + size(anchorRect) * 0.5f;
+		else if (hit(scene, pointer))
+			anchor = pointer;
+		else
+			anchor = glm::vec2(anchorRect.rect);
+		paint.slot(heldStackPlacement(anchor, cell, 10.f * layout.scale, scene),
 			makeItemSlot(cursorStack(drag, snapshot->slots), atlasGeneration));
 	}
 	else if (const auto hovered = controlSlot(hover); hovered.valid())

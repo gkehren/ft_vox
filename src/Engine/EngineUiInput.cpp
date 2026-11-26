@@ -92,7 +92,7 @@ gameui::InputContext Engine::inputContext() const
 		.inventory = inventoryPanelOpen(),
 		.paused = paused || nativePause(),
 		.devKeyboard = pendingDevFocus || (devAvailable &&
-			(mouseCaptured ? imgui->ownsActiveInput() : imgui->wantCaptureKeyboard())),
+			(mouseCaptured ? imgui->ownsActiveInput() : imgui->ownsKeyboard())),
 		.devDialog = devAvailable && (imgui->hasModal() || (gameUi && gameUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
 		.transition = switchingSession() || (m_remote && !m_remote->ready()),
@@ -184,6 +184,14 @@ void Engine::syncUiInput()
 		m_developerSuppressed = suppressed;
 		cancelDeveloperInput();
 	}
+	// F01 (#316): Developer UI ACTIVE input ownership (an open editor, an
+	// armed widget or a popup) forfeits an armed inventory gesture without
+	// waiting for the next event edge. Passive wantCaptureKeyboard — retained
+	// by mere hover focus — must not cancel a gesture the player is typing
+	// into the native screen, so only ownsActiveInput() gates here.
+	if (m_playerUi && inventoryPanelOpen() && developerUiAvailable() && !suppressed &&
+		imgui && imgui->ownsActiveInput())
+		m_playerUi->cancelInventoryGesture();
 	auto policy = inputContext();
 	const bool movement = policy.allowsMovement() && (!m_remote || mouseCaptured);
 	if (m_movementAllowed && !movement)
@@ -266,7 +274,16 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		// transition so the captured mouse can be freed before Multiplayer >
 		// Reconnect (issue #303 F03). It changes only the host's cursor capture.
 		const bool captureShortcut = key == SDLK_C;
-		if (back && m_playerUi && !policy.devText && developerUiAvailable())
+		const bool closesInventory = back || (inventoryShortcut && policy.inventory);
+		// Passive Developer UI focus (WantCaptureKeyboard retained after the
+		// last click or editor closed) is neutralized for the keys of an open
+		// native screen — including its navigation — the contextual
+		// back/shortcut keys that open or close one — E in either direction,
+		// so a passively focused host panel can never swallow the inventory
+		// toggle — a real owner — an editing field, an active control or a
+		// popup — keeps them away (PR #316 F01).
+		if ((closesInventory || inventoryShortcut || policy.nativeScreen) && m_playerUi &&
+			!policy.devText && developerUiAvailable())
 			policy.devKeyboard = imgui->ownsActiveInput();
 		const auto candidate = policy.choose(InputKind::Key, global, back, inventoryShortcut, captureShortcut);
 		auto scan = event.key.scancode;
@@ -368,7 +385,11 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 	else if (owner == DeveloperUi && imgui && !policy.modal)
 	{
 		const bool press = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-		if (policy.inventory && (press || policy.devDialog || policy.devText))
+		// F01 (#316): the Developer UI taking a key while the inventory is
+		// open forfeits the armed gesture and the held stack, exactly like a
+		// developer press or a dialog claiming the surface.
+		if (policy.inventory && (press || (event.type == SDL_EVENT_KEY_DOWN && (policy.devKeyboard || policy.devText)) ||
+			policy.devDialog || policy.devText))
 			m_playerUi->cancelInventoryGesture();
 		const bool takingTextInput = press && m_playerUi && m_playerUi->yieldTextInput(window);
 		if (takingTextInput)

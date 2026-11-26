@@ -467,6 +467,14 @@ bool ImGuiLayer::ownsActiveInput() const
 	return (!m_yieldThroughEvent && g.ActiveId != 0) || hasOpenPopup();
 }
 
+bool ImGuiLayer::ownsKeyboard() const
+{
+	// Both halves already respect the keyboard-yield boundary: a yield marks
+	// the release frame in wantCaptureKeyboard and gates ActiveId in
+	// ownsActiveInput, so neither reports ownership across the handoff.
+	return wantCaptureKeyboard() || ownsActiveInput();
+}
+
 bool ImGuiLayer::pendingKeyboard() const
 {
 	if (!m_initialized || !m_pendingPressEvent)

@@ -38,6 +38,12 @@ public:
 	bool hasModal() const;
 	bool hasOpenPopup() const;
 	bool ownsActiveInput() const;
+	/// True when the Developer UI owns the keyboard through any channel
+	/// (PR #316 F01): an active widget, keyboard navigation focus, an open
+	/// popup or an editing text field. Engine combines this with its pending-
+	/// press reservation because WantCaptureKeyboard alone may also retain a
+	/// passive focus after the last interaction was handed away.
+	bool ownsKeyboard() const;
 	bool pendingKeyboard() const;
 	enum class PointerHit { PassThrough, Occludes, Interactive };
 	PointerHit pointerHit(float x, float y) const;

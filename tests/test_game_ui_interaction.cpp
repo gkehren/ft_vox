@@ -44,6 +44,23 @@ void routing()
 	CHECK(inventory.choose(Key) == PlayerUi && inventory.choose(Key, false, true) == PlayerUi &&
 		inventory.choose(Pointer) == PlayerUi && !inventory.allowsMovement(),
 		"native inventory owns pointer and keyboard and blocks movement");
+	// PR #316 F01: explicit Developer UI keyboard ownership binds an open
+	// inventory. Navigation keys reach only the owning interface, and the
+	// policy hands everything — back keys included — to the developer layer.
+	const InputContext inventoryFocus{.nativeScreen = true, .inventory = true, .devKeyboard = true};
+	CHECK(inventoryFocus.choose(Key) == DeveloperUi && inventoryFocus.choose(Key, false, true) == DeveloperUi &&
+		inventoryFocus.choose(Key, true) == Global,
+		"developer keyboard ownership wins over an open inventory without touching globals");
+	CHECK(inventoryFocus.choose(Pointer) == PlayerUi && !inventoryFocus.allowsMovement(),
+		"developer keyboard ownership leaves the native pointer surface to the inventory");
+	// After the player clicks a slot the host neutralizes the retained passive
+	// focus and the same keys return to the native screen.
+	const InputContext inventoryRestored{.nativeScreen = true, .inventory = true};
+	CHECK(inventoryRestored.choose(Key) == PlayerUi && inventoryRestored.choose(Key, false, true) == PlayerUi,
+		"with developer ownership released, native navigation returns to the inventory");
+	const InputContext hudFocus{.devKeyboard = true};
+	CHECK(hudFocus.choose(Key) == DeveloperUi && hudFocus.choose(Key, false, false, true) == DeveloperUi,
+		"developer keyboard ownership answers the inventory shortcut too");
 	CHECK(paused.choose(Key) == PlayerUi && connected.choose(Pointer) == PlayerUi &&
 		!paused.allowsMovement() && !connected.allowsMovement(), "both menus stop local gameplay input");
 	CHECK(modal.choose(Key, true) == PlayerUi && modal.choose(Text) == PlayerUi &&

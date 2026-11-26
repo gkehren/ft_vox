@@ -260,6 +260,12 @@ private:
 	void setInventoryOpen(bool open);
 	gameui::InventoryView playerInventoryView() const;
 	void submitInventoryAction(inventoryui::Action action);
+	/// PR #316 F04: the one submission adapter for remote inventory actions —
+	/// HUD shortcuts (`selectHotbarSlot`/`dropSelectedItem`) and the native
+	/// inventory's gestures route through it. Publishes `pendingInventoryAction`
+	/// only after a successful submission so a failed send never leaves stale
+	/// slot feedback; the result/reconnect/resync paths clear it.
+	bool submitRemoteInventoryAction(inventoryui::Action action);
 	void syncUiInput();
 	void cancelDeveloperInput();
 	void cancelGameUiPointer();
