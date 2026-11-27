@@ -1,11 +1,11 @@
-// ImGuiFileDialog (reached through GameUI.hpp) defines
+// ImGuiFileDialog (reached through DeveloperUi.hpp) defines
 // IMGUI_DEFINE_MATH_OPERATORS after imgui.h has already been included,
 // which makes a later imgui_internal.h include fail its guard. Defining it
 // here first lets imgui.h implement the operators and satisfies both.
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
-#include "Engine/GameUI.hpp"
+#include "Engine/DeveloperUi.hpp"
 
 #include <Engine/BuildInfo.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
@@ -45,24 +45,24 @@ void helpRow(const char *keys, const char *action)
 {
 	ImGui::TableNextRow();
 	ImGui::TableNextColumn();
-	ImGui::TextUnformatted(keys);
+	ImGui::TextWrapped("%s", keys);
 	ImGui::TableNextColumn();
-	ImGui::TextUnformatted(action);
+	ImGui::TextWrapped("%s", action);
 }
 } // namespace
 
-GameUI::~GameUI()
+DeveloperUi::~DeveloperUi()
 {
 	shutdown();
 }
 
-void GameUI::init(VkContext &context, ImmediateCommands &imm)
+void DeveloperUi::init(VkContext &context, ImmediateCommands &imm)
 {
 	m_vk = &context;
 	m_imm = &imm;
 }
 
-void GameUI::shutdown()
+void DeveloperUi::shutdown()
 {
 	if (m_mapJob.cancel)
 		m_mapJob.cancel->store(true, std::memory_order_relaxed);
@@ -96,7 +96,7 @@ void GameUI::shutdown()
 	m_imm = nullptr;
 }
 
-void GameUI::invalidateBiomeMap()
+void DeveloperUi::invalidateBiomeMap()
 {
 	supersedeBiomeMapRequest();
 
@@ -111,7 +111,7 @@ void GameUI::invalidateBiomeMap()
 	m_mapPan = {};
 }
 
-void GameUI::onImGuiVulkanBackendRecreate()
+void DeveloperUi::onImGuiVulkanBackendRecreate()
 {
 	// The old descriptor belonged to the backend pool destroyed during reinit.
 	// The sampled image and sampler are application-owned and remain valid.
@@ -123,73 +123,29 @@ void GameUI::onImGuiVulkanBackendRecreate()
 		m_mapPresentation.hasTexture = false;
 }
 
-bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
+void DeveloperUi::handlePanelShortcut(int key, bool openingWorkspace)
 {
-	// Intentionally global (issue #76): function keys no text field can
-	// produce, so they work even while ImGui captures the keyboard.
-	switch (sdlKeycode)
+	bool *panel = nullptr;
+	switch (key)
 	{
-	case SDLK_F1:
-		// Issue #184: F1 owns the Status Overlay density — cycling through
-		// Off / Minimal / Detailed for the developer diagnostics overlay.
-		m_debug.panels.statusOverlay =
-			playerui::nextStatusOverlayDensity(m_debug.panels.statusOverlay);
-		return true;
-	case SDLK_F2:
-		leaveLayoutTilesHidden();
-		m_debug.panels.rendering = !m_debug.panels.rendering;
-		return true;
-	case SDLK_F3:
-		leaveLayoutTilesHidden();
-		m_debug.panels.streaming = !m_debug.panels.streaming;
-		return true;
-	case SDLK_F4:
-		leaveLayoutTilesHidden();
-		m_debug.panels.world = !m_debug.panels.world;
-		return true;
-	case SDLK_F5:
-		leaveLayoutTilesHidden();
-		m_debug.panels.help = !m_debug.panels.help;
-		return true;
-	case SDLK_F6:
-		// Hints are gameplay overlay, not a layout tile: no hidden-mode exit.
-		m_debug.panels.overlayHints = !m_debug.panels.overlayHints;
-		return true;
-	case SDLK_F7:
-		leaveLayoutTilesHidden();
-		m_debug.panels.performance = !m_debug.panels.performance;
-		return true;
-	case SDLK_F8:
-		leaveLayoutTilesHidden();
-		m_debug.panels.overview = !m_debug.panels.overview;
-		return true;
-	case SDLK_F9:
-		leaveLayoutTilesHidden();
-		m_debug.panels.chunkInspector = !m_debug.panels.chunkInspector;
-		return true;
-	case SDLK_F10:
-		// VSync is a device setting, not a tile: no hidden-mode exit.
-		if (frame.render && frame.setVSync)
-		{
-			frame.render->vsyncEnabled = !frame.render->vsyncEnabled;
-			frame.setVSync(frame.render->vsyncEnabled);
-		}
-		return true;
-	case SDLK_F11:
-		leaveLayoutTilesHidden();
-		m_debug.panels.memory = !m_debug.panels.memory;
-		return true;
-	case SDLK_F12:
-		leaveLayoutTilesHidden();
-		m_debug.panels.renderDebug = !m_debug.panels.renderDebug;
-		return true;
-	default:
-		break;
+	case SDLK_F2: panel = &m_debug.panels.rendering; break;
+	case SDLK_F3: panel = &m_debug.panels.streaming; break;
+	case SDLK_F4: panel = &m_debug.panels.world; break;
+	case SDLK_F5: panel = &m_debug.panels.help; break;
+	case SDLK_F7: panel = &m_debug.panels.performance; break;
+	case SDLK_F8: panel = &m_debug.panels.overview; break;
+	case SDLK_F9: panel = &m_debug.panels.chunkInspector; break;
+	case SDLK_F11: panel = &m_debug.panels.memory; break;
+	case SDLK_F12: panel = &m_debug.panels.renderDebug; break;
+	default: return;
 	}
-	return false;
+	leaveLayoutTilesHidden();
+	*panel = openingWorkspace || !*panel;
+	if (key == SDLK_F5 && *panel)
+		m_helpTabRequest = ui::HelpTabRequest::Controls;
 }
 
-void GameUI::toggleLayoutTiles()
+void DeveloperUi::toggleLayoutTiles()
 {
 	if (!m_layoutTilesHidden)
 	{
@@ -208,44 +164,26 @@ void GameUI::toggleLayoutTiles()
 	}
 }
 
-bool GameUI::handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame)
-{
-	// Gameplay state changes (issue #76): the caller gates these behind
-	// !wantCaptureKeyboard() so typing in an ImGui text field is inert.
-	switch (sdlKeycode)
-	{
-	case SDLK_P:
-		if (frame.paused)
-		{
-			*frame.paused = !*frame.paused;
-			return true;
-		}
-		break;
-	case SDLK_H:
-		toggleLayoutTiles();
-		return true;
-	default:
-		break;
-	}
-	return false;
-}
-
-bool GameUI::isFileDialogOpen() const
+bool DeveloperUi::isFileDialogOpen() const
 {
 	return ImGuiFileDialog::Instance()->IsOpened();
 }
 
-void GameUI::draw(GameUIFrame &frame)
+void DeveloperUi::draw(DeveloperUiFrame &frame)
 {
 	// Refresh debug snapshots/histories/health first (issue #179). Throttled
 	// internally; heavy sampling only runs while a consumer panel is open.
-	debugui::updateDebugUiState(m_debug, frame, ImGui::GetTime());
+	const double now = static_cast<double>(SDL_GetTicksNS()) * 1e-9;
+	if (m_lastDrawAt < 0.0 || now - m_lastDrawAt > 0.5)
+		m_debug.interruptSampling();
+	m_lastDrawAt = now;
+	debugui::updateDebugUiState(m_debug, frame, now);
 
 	const ui::ShellToggles toggles{
 		&m_debug.panels.statusOverlay, &m_debug.panels.playerPanel,
 		&m_debug.panels.multiplayer,
 		&m_debug.panels.rendering, &m_debug.panels.streaming,
-		&m_debug.panels.world, &m_debug.panels.help, &m_debug.panels.overlayHints,
+		&m_debug.panels.world, &m_debug.panels.help, frame.hudHints,
 		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.playerDiagnostics,
 		&m_debug.panels.renderDebug,
 		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
@@ -254,23 +192,24 @@ void GameUI::draw(GameUIFrame &frame)
 		[this]() { leaveLayoutTilesHidden(); },
 		m_layoutTilesHidden};
 
-	m_shell.beginFrame(ui::Workspace::Visible);
+	m_shell.beginFrame();
 	m_shell.drawMainMenuBar(frame, toggles);
 
-	// The GameUI-owned windows below have no internal visibility guard; every
+	// The DeveloperUi-owned windows below have no internal visibility guard; every
 	// debugui:: panel self-guards on its own flag (see DebugPanels.hpp), so
 	// draw() submits them unconditionally and cannot drift out of sync.
 	if (m_debug.panels.statusOverlay != playerui::StatusOverlayDensity::Off)
 		drawStatusOverlay(frame);
 	if (m_debug.panels.playerPanel)
 		drawPlayerPanel(frame);
-	if (m_debug.panels.multiplayer && frame.joinPreferences)
+	if (m_debug.panels.multiplayer)
 		drawMultiplayerPanel(frame);
+	// Capture controls can clear the histories before Overview draws them.
+	debugui::drawPerformance(m_debug, frame);
 	debugui::drawOverview(m_debug, frame);
 	debugui::drawRendering(m_debug, frame);
 	debugui::drawRenderDebug(m_debug, frame);
 	debugui::drawStreaming(m_debug, frame);
-	debugui::drawPerformance(m_debug, frame);
 	debugui::drawPlayerDiagnostics(m_debug, frame);
 	debugui::drawChunkInspector(m_debug, frame);
 	debugui::drawMemory(m_debug, frame);
@@ -291,12 +230,7 @@ void GameUI::draw(GameUIFrame &frame)
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
 }
 
-void GameUI::maintainDockspace()
-{
-	m_shell.beginFrame(ui::Workspace::Hidden);
-}
-
-void GameUI::drawStatusOverlay(GameUIFrame &frame)
+void DeveloperUi::drawStatusOverlay(DeveloperUiFrame &frame)
 {
 	// True gameplay overlay (issue #184): compact, read-only, semi-
 	// transparent and non-interactive — it never steals gameplay mouse or
@@ -331,7 +265,7 @@ void GameUI::drawStatusOverlay(GameUIFrame &frame)
 	{
 		const playerui::PlayerSnapshot &p = frame.player;
 		ImGui::Text("XYZ %.1f / %.1f / %.1f", p.position.x, p.position.y, p.position.z);
-		if (frame.multiplayerStatus)
+		if (frame.remote.multiplayerStatus)
 			ImGui::Text("Chunk %d / %d", p.chunkX, p.chunkZ);
 		else
 			ImGui::Text("Chunk %d / %d · %s", p.chunkX, p.chunkZ,
@@ -373,7 +307,7 @@ void GameUI::drawStatusOverlay(GameUIFrame &frame)
 	ImGui::End();
 }
 
-void GameUI::drawPlayerPanel(GameUIFrame &frame)
+void DeveloperUi::drawPlayerPanel(DeveloperUiFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), ui::scaled(440.f, scale)),
@@ -384,7 +318,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 		return;
 	}
 
-	if (!frame.camera)
+	if (!frame.hasWorld)
 	{
 		ImGui::TextUnformatted("Enter a world to use player controls.");
 		ImGui::End();
@@ -399,7 +333,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 	// — the panel never touches the Camera or player controller directly.
 	// Raw physics counters live in the developer console's Player
 	// Diagnostics window now.
-	ui::sectionHeader("Movement");
+	ui::sectionHeader("Debug movement");
 	ImGui::BeginDisabled(benchmarkActive || !frame.setPlayerFlight);
 	bool flight = p.flight;
 	if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
@@ -429,12 +363,8 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 		if (ImGui::SliderFloat("Zoom", &zoom, 16.f, 256.f) && frame.setIsometricZoom)
 			frame.setIsometricZoom(zoom);
 	}
-	float sensitivity = p.mouseSensitivity;
-	if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.02f, 0.5f, "%.3f") &&
-		frame.setMouseSensitivity)
-		frame.setMouseSensitivity(sensitivity);
 
-	ui::sectionHeader("Interaction");
+	ui::sectionHeader("Creative selection and target");
 	if (frame.selectedTexture)
 	{
 		// Stable alphabetical palette built once per process (issue #184 §7:
@@ -455,7 +385,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 			ImGui::EndCombo();
 		}
 	}
-	if (frame.render && !frame.multiplayerStatus)
+	if (frame.render && !frame.remote.multiplayerStatus)
 		ImGui::SliderInt("Raycast distance", &frame.render->raycastDistance, 2, 32);
 	if (frame.highlight)
 	{
@@ -488,7 +418,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 	ImGui::End();
 }
 
-void GameUI::drawWorld(GameUIFrame &frame)
+void DeveloperUi::drawWorld(DeveloperUiFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(380.f, scale), ui::scaled(560.f, scale)),
@@ -499,7 +429,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		return;
 	}
 
-	if (!frame.camera && !frame.multiplayerStatus)
+	if (!frame.hasWorld && !frame.remote.multiplayerStatus)
 	{
 		ImGui::TextUnformatted("Enter a world to inspect terrain.");
 		ImGui::End();
@@ -510,7 +440,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	// overlays reflect this frame's state. The tick only consumes accepted
 	// results and (re)dispatches superseded requests — no synchronous
 	// generation or GPU work here (issue #186 §12).
-	if (!frame.multiplayerStatus)
+	if (!frame.remote.multiplayerStatus)
 		tickBiomeMap(frame);
 
 	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
@@ -542,7 +472,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	if (presentation.showProminentError)
 		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
 						   frame.worldSave.lastError.c_str());
-	if (frame.multiplayerStatus)
+	if (frame.remote.multiplayerStatus)
 	{
 		ImGui::End();
 		return;
@@ -732,7 +662,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 			const float chunkPx =
 				static_cast<float>(CHUNK_SIZE) / grid.step * pxPerMapPx;
 			draw->AddRect(chunkMin, ImVec2(chunkMin.x + chunkPx, chunkMin.y + chunkPx),
-						  IM_COL32(255, 230, 120, 110), 0.f, 0.f, 1.2f);
+						  IM_COL32(255, 230, 120, 110), 0.f, ImDrawFlags_None, 1.2f);
 		}
 
 		// Live player marker (the baked dot from the last accepted result
@@ -842,7 +772,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::End();
 }
 
-void GameUI::drawHelp(GameUIFrame &frame)
+void DeveloperUi::drawHelp(DeveloperUiFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(560.f, scale), ui::scaled(500.f, scale)), ImGuiCond_FirstUseEver);
@@ -867,10 +797,11 @@ void GameUI::drawHelp(GameUIFrame &frame)
 			ImGui::TextWrapped("ft_vox — Vulkan voxel sandbox engine. Press C to free the mouse and use the UI.");
 			ImGui::Spacing();
 
+			const float keyWidth = std::min(ui::scaled(140.f, scale), ImGui::GetContentRegionAvail().x * 0.45f);
 			ui::sectionHeader("Movement");
 			if (ImGui::BeginTable("keys_move", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 			{
-				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, keyWidth);
 				ImGui::TableSetupColumn("Action");
 				ImGui::TableHeadersRow();
 				helpRow("W A S D", "Move");
@@ -883,7 +814,7 @@ void GameUI::drawHelp(GameUIFrame &frame)
 			ui::sectionHeader("Interaction");
 			if (ImGui::BeginTable("keys_gameplay", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 			{
-				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, keyWidth);
 				ImGui::TableSetupColumn("Action");
 				ImGui::TableHeadersRow();
 				helpRow("LMB / RMB", "Break / place (walk: items; flight: creative)");
@@ -898,7 +829,7 @@ void GameUI::drawHelp(GameUIFrame &frame)
 			ui::sectionHeader("UI / debug shortcuts");
 			if (ImGui::BeginTable("keys_ui", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 			{
-				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, keyWidth);
 				ImGui::TableSetupColumn("Action");
 				ImGui::TableHeadersRow();
 				for (const ui::ShortcutRef &ref : ui::kShortcuts)
@@ -944,7 +875,7 @@ void GameUI::drawHelp(GameUIFrame &frame)
 	ImGui::End();
 }
 
-void GameUI::ensureBiomeTexture(int size)
+void DeveloperUi::ensureBiomeTexture(int size)
 {
 	if (!m_vk)
 		return;
@@ -988,7 +919,7 @@ void GameUI::ensureBiomeTexture(int size)
 	m_mapImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
-void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing)
+void DeveloperUi::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing)
 {
 	if (m_mapImage.image == VK_NULL_HANDLE)
 		return;
@@ -1064,7 +995,7 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 	m_mapLastPublishedAt = SDL_GetTicks() / 1000.0;
 }
 
-void GameUI::tickBiomeMap(GameUIFrame &frame)
+void DeveloperUi::tickBiomeMap(DeveloperUiFrame &frame)
 {
 	// Invalidate if active world generation or seed changed
 	if (frame.worldGenerationId != m_currentWorldGenId || frame.seed != m_currentSeed)
@@ -1147,7 +1078,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 		m_mapJob.cancel = cancelToken;
 
 		// Sequential/small-map scratch retains dense capacity across refreshes,
-		// bounded by kMaxDenseDomainPoints and owned by GameUI. Parallel tiles
+		// bounded by kMaxDenseDomainPoints and owned by DeveloperUi. Parallel tiles
 		// use separate thread-local scratch with only tiled-sized retention.
 		if (!m_mapScratch)
 		{

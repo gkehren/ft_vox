@@ -350,8 +350,10 @@ struct PostProcessSettings
 	/// True when every preset-controlled field of `current` equals the canonical
 	/// pack values (issue #185 Custom detection). Deliberately ignores
 	/// ssaoDebugView and underwater runtime state: debug views and submersion are
-	/// not part of quality-pack semantics.
-	[[nodiscard]] static bool matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset);
+	/// not part of quality-pack semantics. Developer UI excludes FXAA from
+	/// its comparison because Engine resolves the effective player setting.
+	[[nodiscard]] static bool matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset,
+											bool compareFxaa = true);
 };
 
 /// Effective SSAO debug view for the renderer: with SSAO off there is no AO
@@ -489,13 +491,14 @@ inline PostProcessSettings PostProcessSettings::presetValues(GraphicsQualityPres
 	return pp;
 }
 
-inline bool PostProcessSettings::matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset)
+inline bool PostProcessSettings::matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset,
+												bool compareFxaa)
 {
 	// Exact == on floats is correct: canonical values come from the very
 	// literals applyPresetBody writes, so any hand-edited field diverges
 	// (issue #185 Custom detection must not hide a stale pack behind epsilon).
 	const PostProcessSettings canon = presetValues(preset);
-	return current.shadowMapSize == canon.shadowMapSize && current.fxaaEnabled == canon.fxaaEnabled &&
+	return current.shadowMapSize == canon.shadowMapSize && (!compareFxaa || current.fxaaEnabled == canon.fxaaEnabled) &&
 		   current.bloomEnabled == canon.bloomEnabled && current.bloomThreshold == canon.bloomThreshold &&
 		   current.bloomIntensity == canon.bloomIntensity &&
 		   current.bloomBlurIterations == canon.bloomBlurIterations && current.ssaoEnabled == canon.ssaoEnabled &&
@@ -651,12 +654,11 @@ inline void resetGraphicsWater(ShaderParameters &sp, PostProcessSettings &pp)
 
 /// Restores the Post category to the CURRENT pack's canonical values without
 /// re-applying the whole preset (issue #185): shadowMapSize belongs to the
-/// Shadows category, ssaoDebugView belongs to Render Debug, and the
-/// underwater runtime state plus the qualityPreset tag are not post settings.
+/// Shadows category, ssaoDebugView belongs to Render Debug, and Engine owns
+/// FXAA. The reset preserves underwater runtime state and the qualityPreset tag.
 inline void resetGraphicsPost(PostProcessSettings &pp)
 {
 	const PostProcessSettings preset = PostProcessSettings::presetValues(pp.qualityPreset);
-	pp.fxaaEnabled = preset.fxaaEnabled;
 	pp.bloomEnabled = preset.bloomEnabled;
 	pp.bloomThreshold = preset.bloomThreshold;
 	pp.bloomIntensity = preset.bloomIntensity;

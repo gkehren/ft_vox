@@ -24,20 +24,13 @@ namespace playerui
 
 // --- Status overlay density (single state home: debugui::PanelState) -------
 
-/// Density of the read-only Status Overlay (F1 cycles; View menu radios).
+/// Density of the read-only Status Overlay, selected from the developer View menu.
 enum class StatusOverlayDensity : int
 {
 	Off = 0,
 	Minimal = 1,
 	Detailed = 2
 };
-
-/// F1 cycle order: Off -> Minimal -> Detailed -> Off.
-inline constexpr StatusOverlayDensity nextStatusOverlayDensity(StatusOverlayDensity d)
-{
-	return static_cast<StatusOverlayDensity>(
-		(static_cast<int>(d) + 1) % (static_cast<int>(StatusOverlayDensity::Detailed) + 1));
-}
 
 /// Field-selection policy: Minimal is the frame-health line only; Detailed
 /// adds world/player context (position, chunk/biome, selection, target).
@@ -100,7 +93,7 @@ struct PlayerSnapshot
 	bool submergedLava{false};
 
 	// Camera view state, snapshot-only (issue #184 review): UI surfaces
-	// display these values and mutate through GameUIFrame commands instead
+	// display these values and mutate through DeveloperUiFrame commands instead
 	// of reading/writing Camera directly.
 	CameraViewMode cameraViewMode{CameraViewMode::Perspective};
 	float cameraMovementSpeed{0.f};

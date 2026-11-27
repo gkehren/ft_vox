@@ -1,4 +1,5 @@
 #include <Engine/EngineMultiplayer.hpp>
+#include <Engine/EngineMultiplayerActions.hpp>
 #include <Engine/GameUiSample.hpp>
 
 #include <algorithm>
@@ -44,7 +45,7 @@ void Engine::pumpPlayerMultiplayer()
 	if (!m_playerUi)
 		return;
 	// Gameplay boundary (correction F14): without an active multiplayer
-	// screen there is no presentation to update — no GameUIFrame and no
+	// screen there is no presentation to update — no action adapters and no
 	// MultiplayerView are built during normal gameplay, and no profile,
 	// world or endpoint collection is copied. A request queued before the
 	// player left the flow is an intentional cancellation, consumed without
@@ -65,10 +66,8 @@ void Engine::pumpPlayerMultiplayer()
 			m_playerMultiplayerEpoch, m_hostSnapshot.launch, m_multiplayerNoticeServer))
 		m_multiplayerNotice.reset();
 
-	GameUIFrame frame{};
-	populateJoinUi(frame);
-	if (m_remote)
-		populateRemoteUi(frame);
+	const auto actions = multiplayerActions();
+	const auto remote = remoteSessionView();
 	if (intent)
 	{
 		// A newly evaluated request supersedes the previous feedback (F08).
@@ -76,28 +75,28 @@ void Engine::pumpPlayerMultiplayer()
 		const auto host = m_hostServer.snapshot();
 		gameui::MultiplayerContext context;
 		context.sessionEpoch = m_playerMultiplayerEpoch;
-		context.switchingSession = frame.switchingSession;
+		context.switchingSession = actions.switchingSession;
 		context.joinPending = m_joinRequest.has_value();
-		context.joinPreferencesLoaded = frame.joinPreferences != nullptr;
-		context.joinTransitionInProgress = gameui::joinTransitionInProgress(frame.multiplayerStatus);
+		context.joinPreferencesLoaded = actions.joinPreferencesLoaded;
+		context.joinTransitionInProgress = gameui::joinTransitionInProgress(remote.multiplayerStatus);
 		auto outcome = gameui::evaluateMultiplayerRequest(*intent, context, host);
 		// The Engine adapters stay authoritative: a missing adapter means the
 		// action cannot run in this state at all (correction F03).
-		const auto hasAdapter = [this, &frame](gameui::MultiplayerAction action) {
+		const auto hasAdapter = [&actions](gameui::MultiplayerAction action) {
 			switch (action)
 			{
-			case gameui::MultiplayerAction::Connect: return bool(frame.connectServer);
-			case gameui::MultiplayerAction::Reconnect: return bool(frame.joinServer);
-			case gameui::MultiplayerAction::Disconnect: return bool(frame.leaveServer);
-			case gameui::MultiplayerAction::ReturnToSolo: return bool(frame.returnToSolo);
-			case gameui::MultiplayerAction::SelectProfile: return bool(frame.selectJoinProfile);
-			case gameui::MultiplayerAction::CreateProfile: return bool(frame.createJoinProfile);
-			case gameui::MultiplayerAction::Favorite: return bool(frame.toggleFavorite);
-			case gameui::MultiplayerAction::StartHost: return bool(frame.startHostedServer);
-			case gameui::MultiplayerAction::JoinHost: return bool(frame.joinHostedServer);
-			case gameui::MultiplayerAction::StopHost: return bool(frame.stopHostedServer);
-			case gameui::MultiplayerAction::ForceStop: return bool(frame.forceStopHostedServer);
-			case gameui::MultiplayerAction::Administer: return bool(frame.administerHostedServer);
+			case gameui::MultiplayerAction::Connect: return bool(actions.connectServer);
+			case gameui::MultiplayerAction::Reconnect: return bool(actions.joinServer);
+			case gameui::MultiplayerAction::Disconnect: return bool(actions.leaveServer);
+			case gameui::MultiplayerAction::ReturnToSolo: return bool(actions.returnToSolo);
+			case gameui::MultiplayerAction::SelectProfile: return bool(actions.selectJoinProfile);
+			case gameui::MultiplayerAction::CreateProfile: return bool(actions.createJoinProfile);
+			case gameui::MultiplayerAction::Favorite: return bool(actions.toggleFavorite);
+			case gameui::MultiplayerAction::StartHost: return bool(actions.startHostedServer);
+			case gameui::MultiplayerAction::JoinHost: return bool(actions.joinHostedServer);
+			case gameui::MultiplayerAction::StopHost: return bool(actions.stopHostedServer);
+			case gameui::MultiplayerAction::ForceStop: return bool(actions.forceStopHostedServer);
+			case gameui::MultiplayerAction::Administer: return bool(actions.administerHostedServer);
 			}
 			return false;
 		};
@@ -117,28 +116,28 @@ void Engine::pumpPlayerMultiplayer()
 			using enum gameui::MultiplayerAction;
 			switch (intent->action)
 			{
-			case Connect: frame.connectServer(std::move(intent->join)); break;
-			case Reconnect: frame.joinServer(); break;
-			case Disconnect: frame.leaveServer(); break;
-			case ReturnToSolo: frame.returnToSolo(); break;
-			case SelectProfile: frame.selectJoinProfile(intent->profile); break;
-			case CreateProfile: frame.createJoinProfile(intent->profile); break;
-			case Favorite: frame.toggleFavorite(intent->join.endpoint); break;
+			case Connect: actions.connectServer(std::move(intent->join)); break;
+			case Reconnect: actions.joinServer(); break;
+			case Disconnect: actions.leaveServer(); break;
+			case ReturnToSolo: actions.returnToSolo(); break;
+			case SelectProfile: actions.selectJoinProfile(intent->profile); break;
+			case CreateProfile: actions.createJoinProfile(intent->profile); break;
+			case Favorite: actions.toggleFavorite(intent->join.endpoint); break;
 			case StartHost:
 				// A hosting validation failure keeps its precise option-level
 				// message on m_hostError (the Host screen shows it); the typed
 				// notice is reserved for refused intents.
 				m_hostError = hosting::validate(intent->options);
 				if (m_hostError.empty())
-					frame.startHostedServer(std::move(intent->options), intent->autoJoin, intent->profile);
+					actions.startHostedServer(std::move(intent->options), intent->autoJoin, intent->profile);
 				break;
-			case JoinHost: frame.joinHostedServer(intent->profile); break;
-			case StopHost: frame.stopHostedServer(); break;
-			case ForceStop: frame.forceStopHostedServer(); break;
+			case JoinHost: actions.joinHostedServer(intent->profile); break;
+			case StopHost: actions.stopHostedServer(); break;
+			case ForceStop: actions.forceStopHostedServer(); break;
 			case Administer:
 			{
 				const auto &action = *intent->administration;
-				m_hostError = frame.administerHostedServer(action.launch, action.operation,
+				m_hostError = actions.administerHostedServer(action.launch, action.operation,
 					action.subject ? action.subject->id : sim::PlayerId{}, action.profile);
 				break;
 			}
@@ -162,15 +161,15 @@ void Engine::pumpPlayerMultiplayer()
 	view.profiles = m_joinProfiles;
 	view.worlds = m_hostWorlds;
 	view.sessionEpoch = m_playerMultiplayerEpoch;
-	view.pending = frame.switchingSession || m_joinRequest.has_value() ||
+	view.pending = actions.switchingSession || m_joinRequest.has_value() ||
 		(m_remote && (m_remote->joinRequested || m_remote->leaveRequested));
-	view.endpoint = frame.multiplayerEndpoint;
-	view.sessionProfile = frame.multiplayerProfile;
-	view.connection = frame.multiplayerStatus;
-	view.network = frame.networkStats;
-	view.reconnect = bool(frame.joinServer);
-	view.disconnect = bool(frame.leaveServer);
-	view.returnToSolo = bool(frame.returnToSolo);
+	view.endpoint = remote.multiplayerEndpoint;
+	view.sessionProfile = remote.multiplayerProfile;
+	view.connection = remote.multiplayerStatus;
+	view.network = remote.networkStats;
+	view.reconnect = bool(actions.joinServer);
+	view.disconnect = bool(actions.leaveServer);
+	view.returnToSolo = bool(actions.returnToSolo);
 	view.playable = m_remote && m_remote->ready();
 	view.joinError = m_joinError;
 	view.preferencesError = m_joinPreferencesError;

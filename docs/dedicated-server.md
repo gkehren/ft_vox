@@ -36,7 +36,7 @@ dedicated format. Keep a copy for use with the solo editor or an older build.
 
 ## Host from the game
 
-Open **Multiplayer → Show panel → Host**. Select a saved server world or
+Open **Multiplayer → Host server** from the main menu or the Escape Game Menu. Select a saved server world or
 type a new name. Hosted worlds use `server-saves/` relative to the game's
 working directory. Names can contain up to 48 ASCII letters, digits,
 spaces, dashes, or underscores. A CLI server with `--saves-root ./server-saves`
@@ -45,9 +45,7 @@ uses the same world storage and lock.
 Choose a port, player limit, interest radius, terrain workers, and streaming
 preset. Port **0** requests a free port from the OS. The player limit counts
 network seats, including the local graphical client when it joins. Create
-profiles under **Join**, then choose or type the existing profile to use in
-**Host**. The **Host** field starts with the saved selection and can be
-edited independently. Starting a new world binds its primary owner to the
+profiles under **Profiles** in Multiplayer, then select a saved profile in **Host server**. Starting a new world binds its primary owner to the
 profile shown when you click **Start server**, with or without auto-join.
 Existing worlds keep their current role state. When the child reports
 readiness, **Host** shows the bound address and assigned port. The profile
@@ -151,7 +149,7 @@ Linux home.
 
 ### Multiplayer Administration
 
-Open **Multiplayer → Administration** in the app that launched the server.
+Open **Multiplayer → Host server → Administration** in the app that launched the server.
 The panel shows the authority verified for that launch, registered player
 IDs and roles, moderation results, and the latest 64 committed audit
 entries. Use **Refresh players and audit** after a new profile joins.
@@ -266,11 +264,8 @@ item and **E** to inspect or rearrange the inventory. The status HUD shows
 pending and accepted or rejected actions. Chunk and inventory displays
 follow the server's updates.
 
-Release the cursor with **C**, then use **Multiplayer → Disconnect** and
-**Multiplayer → Reconnect**. The player HUD states the same steps when a
-session ends: with the developer workspace hidden its recovery line asks for
-`Ctrl+Shift+D` first, then `C` if the mouse is still captured, and always ends
-at **Multiplayer → Reconnect**. The other client should lose the departing
+Press **Escape**, then open **Multiplayer → Join server** to disconnect or
+reconnect. The player HUD points to the Game Menu when a session ends. The other client should lose the departing
 avatar, then see the same player return. The reconnecting client's
 position and inventory resume after the new session synchronizes. Walk far enough to leave and re-enter
 the server's interest radius and check that terrain and entities return
@@ -280,8 +275,8 @@ stays open and offers reconnect to the configured endpoint.
 
 ### Join from the game
 
-Start `ft_vox` normally, release the cursor with **C**, and choose
-**Multiplayer → Show panel → Join**.
+Start `ft_vox` and choose **Multiplayer → Join server** from the main menu
+or the Escape Game Menu.
 
 1. Enter the server's numeric IPv4 address and port, such as
    `127.0.0.1:7777`. An optional expected seed checks that you reached
@@ -554,14 +549,13 @@ teleports start a fresh path. Playback holds the last pose under loss
 with zero extrapolation and hides the avatar after 300 ms without a fresh
 snapshot.
 
-Release the mouse with **C**, then choose **Multiplayer → Show panel**.
-The dockable window is available from solo play and CLI connections.
-**Join** shows the current server endpoint, connection state, and the
-same Disconnect/Reconnect actions as the menu. **Network** shows this
-client's ping estimate and sample age, snapshot age and estimated loss,
-receive/send throughput, pending predicted inputs, corrections, and hard
-resets. Hover a metric for its definition. Players and Administration
-are placeholders for future server features.
+Open Developer UI with **F1**, release a captured mouse with **C**, and
+choose **Developer → Network / server monitoring**. The dockable panel
+shows the current endpoint, connection state, and detailed client metrics.
+Hover a metric for its definition. Local hosts also see fresh server samples
+and the admitted roster. For connection actions, use **Escape → Multiplayer
+→ Join server**. The native Multiplayer screens also provide player-facing
+diagnostics, hosting controls and verified local administration.
 
 Ping comes from unambiguous Hello/Welcome or Action/ACK exchanges. A hotbar
 selection or block action can refresh the estimate, and the sample age

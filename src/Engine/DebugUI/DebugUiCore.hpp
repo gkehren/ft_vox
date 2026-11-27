@@ -5,8 +5,8 @@
 // sustained-condition health logic. Kept free of engine/ImGui includes so
 // the aggregation helpers are unit-testable without Vulkan or a window.
 //
-// Data flow: Engine fills GameUIFrame once per frame (as before);
-// updateDebugUiState() (DebugUiEngine.hpp, defined in DebugUiCore.cpp)
+// Data flow: Engine fills DeveloperUiFrame once per frame (as before);
+// updateDebugUiState() (DebugUiEngine.hpp, defined in DebugUiState.cpp)
 // samples it into the snapshots below at a throttled rate, and the domain
 // panels (DebugPanels.hpp) render from UiState. Panels keep direct access to
 // the settings structs (RenderSettings / ShaderParameters /
@@ -14,10 +14,11 @@
 // settings API, not debug state.
 
 #include <Core/WorkloadTelemetry.hpp>
-#include <Engine/GameUIResourcePack.hpp>
+#include <Engine/DeveloperUiResourcePack.hpp>
 #include <Engine/PlayerUi.hpp>
 
 #include <array>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -45,8 +46,9 @@ public:
 	void push(float v);
 	void clear() { m_count = 0; }
 	size_t count() const { return m_count; }
-	/// Chronological (oldest first) view for plotting; empty when no sample.
-	const float *data() const { return m_samples.data(); }
+	/// Raw ring for CPU timing statistics. Use copyOrdered() for plots.
+	const auto &storage() const { return m_samples; }
+	size_t nextWrite() const { return m_write; }
 	float latest() const { return m_count ? m_samples[(m_write + kMetricHistorySize - 1) % kMetricHistorySize] : 0.f; }
 	/// Value from roughly `back` samples ago (0 = latest), clamped.
 	float back(size_t backIndex) const;
@@ -94,6 +96,7 @@ struct FrameDebugSnapshot
 	/// simulation delta — they diverge whenever pacing clamps dt or a stall
 	/// is absorbed by the frame clock (issue #179 review).
 	float cpuFrameMs{0.f};
+	bool cpuCaptureEnabled{true};
 	/// Paced simulation delta fed to gameplay ticks, kept separate so the
 	/// two can never be conflated again.
 	float simulationDtMs{0.f};
@@ -199,14 +202,13 @@ struct PlayerDebugSnapshot
 	float isometricZoom{0.f};
 };
 
-// --- Console state owned by GameUI ---
+// --- Console state owned by DeveloperUi ---
 
 struct PanelState
 {
-	/// Read-only Status Overlay density (issue #184): F1 cycles, the View
-	/// menu offers the same three states. Replaces the old catch-all HUD.
+	/// Read-only Status Overlay density selected from the View menu.
 	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Off};
-	/// Interactive Player / Gameplay panel (View menu).
+	/// Creative and debug controls in the Developer menu.
 	bool playerPanel{false};
 	bool multiplayer{false};
 	bool overview{false};
@@ -220,7 +222,6 @@ struct PanelState
 	bool benchmark{false};
 	bool world{false};
 	bool help{false};
-	bool overlayHints{true};
 };
 
 /// Per-scope CPU statistics maintained while the Performance panel is open.
@@ -269,7 +270,7 @@ struct DebugHealth
 	void update(const class UiState &state, float dt);
 };
 
-/// Per-domain snapshot container + bounded histories. Owned by GameUI;
+/// Per-domain snapshot container + bounded histories. Owned by DeveloperUi;
 /// refreshed by updateDebugUiState().
 class UiState
 {
@@ -281,7 +282,9 @@ public:
 	MemoryDebugSnapshot memory;
 	PlayerDebugSnapshot player;
 
-	// 10 Hz bounded histories (sampled only while a consumer panel is open).
+	// Presentation histories cover the current visible interval.
+	MetricHistory cpuFrameTimes; // previous completed frames at frame cadence
+	// 10 Hz histories sampled while a consumer panel is open.
 	MetricHistory cpuMs;
 	MetricHistory gpuMs;
 	MetricHistory pendingMesh;
@@ -301,27 +304,31 @@ public:
 	std::array<ScopeStats, kMaxScopeStats> scopeStats{};
 	size_t scopeStatCount{0};
 	int selectedScopeGraph{-1}; // row highlighted/plotted, -1 = none
-	/// Profiler capture epoch at the last scope-stat sample. A change
-	/// (Clear history button, world reload, any Profiler::clearHistory)
-	/// resets the accumulated table so avg/peak/history never blend two
-	/// capture windows.
-	uint64_t lastProfilerEpoch{0};
+	uint64_t lastProfilerEpoch{};
+	uint64_t lastCpuFrameSerial{};
+	bool cpuStatsPending{};
+	bool scopeHistoryPending{};
+	bool cpuHealthHasBaseline{};
+
+	// GPU timing is global. The Overview ring stores distinct reads made
+	// during the visible interval, including delayed measurements.
+	std::optional<uint64_t> gpuCaptureGeneration;
+	uint64_t lastGpuObservationSerial{};
 
 	// Chunk inspector selection (chunk coordinates; Y is always 0 today).
 	glm::ivec3 inspectCoord{0, 0, 0};
 	bool inspectHasTarget{false};
-	bool eventTraceEnabled{false}; // mirrors RenderWorldBridge's opt-in trace
 
 	// Previous telemetry sample, for "since last refresh" event deltas.
 	bool hasPrevEvents{false};
 	std::array<uint64_t, telemetry::EventCount> prevEvents{};
 	std::array<uint64_t, telemetry::EventCount> eventDelta{};
 	double lastTelemetrySample{-1.0};
-	double lastHistorySample{-1.0};
-	float dtSinceLastSample{0.f};
+	bool samplingInterrupted{};
+	void interruptSampling() { samplingInterrupted = true; }
 
 	// Recent-event health bookkeeping (cumulative counters -> last-seen time).
-	size_t prevPoolRejects{0};
+	std::optional<size_t> prevPoolRejects;
 	double lastPoolRejectIncrease{-100.0};
 	double lastStagingFailureAt{-100.0};
 

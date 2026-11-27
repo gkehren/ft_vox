@@ -1,5 +1,5 @@
 // Biome map generation lifetime, concurrency safety, cancellation, and stale/superseded rejection tests.
-#include <Engine/GameUIBiomeMap.hpp>
+#include <Engine/DeveloperUiBiomeMap.hpp>
 #include <Core/ThreadPool.hpp>
 #include <chrono>
 #include <algorithm>
@@ -453,7 +453,7 @@ static void test_biome_map_center_preview_reanchor()
 }
 
 // Published-grid lifecycle invariant (issue #191 review round 2), tested as
-// FRAME PHASES through the exact pure state GameUI owns
+// FRAME PHASES through the exact pure state DeveloperUi owns
 // (BiomeMapPresentationState): the UI build (drawWorld) always reads
 // publishedGrid, while a freshly accepted result waits in `pending` and is
 // published by the post-ImGui GPU recording. At every point:

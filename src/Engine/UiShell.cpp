@@ -1,9 +1,9 @@
 #include "Engine/UiShell.hpp"
 
 // Direct dependency: the menu items below call ui::toggleLayoutTile /
-// ui::openLayoutTile; do not rely on the transitive include via GameUI.hpp.
+// ui::openLayoutTile; do not rely on the transitive include via DeveloperUi.hpp.
 #include <Engine/LayoutTiles.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/UiShortcuts.hpp>
 #include <Engine/UiStatus.hpp>
 #include <Engine/UiTheme.hpp>
@@ -18,32 +18,18 @@
 
 namespace ui
 {
-void UiShell::beginFrame(Workspace workspace)
+void UiShell::beginFrame()
 {
-	m_workspace = workspace;
-	// Persistent root dockspace. The passthru central node keeps the game
-	// view visible and clickable; it survives resize / swapchain recreation
-	// because it is recreated from the main viewport every frame. The user's
-	// docking state persists through the normal imgui.ini settings.
-	//
-	// Hidden workspace (issue #303 F01): the SAME identity is still submitted,
-	// with ImGuiDockNodeFlags_KeepAliveOnly. Removing the node instead — or
-	// skipping the submission — would drop the split tree and every docked
-	// window's association, so bringing the workspace back would rebuild a
-	// default layout. KeepAliveOnly keeps the node alive while rendering nothing
-	// and claiming no pointer input; docked windows simply stay hidden until the
-	// workspace returns.
-	ImGuiDockNodeFlags flags = ImGuiDockNodeFlags_PassthruCentralNode;
-	if (keepDockSpaceAliveOnly(workspace))
-		flags |= ImGuiDockNodeFlags_KeepAliveOnly;
+	// The central node remains transparent over the scene. While the
+	// workspace is hidden Engine skips ImGui frames, preserving the tree
+	// and window associations in the live context and imgui.ini.
+	const ImGuiDockNodeFlags flags = ImGuiDockNodeFlags_PassthruCentralNode;
 	const ImGuiID dockspaceId =
 		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), flags);
 	m_dockspaceId = dockspaceId;
 
 	// Dock-builder operations must run while the dockspace node exists, so
-	// menu actions apply next frame; startup queuing applies on the first —
-	// including a launch with --no-dev-ui, where the queued default developer
-	// layout has to be ready before the workspace is ever shown.
+	// menu and first-run defaults apply on the next visible frame.
 	if (m_resetLayoutQueued)
 	{
 		m_resetLayoutQueued = false;
@@ -58,14 +44,6 @@ void UiShell::beginFrame(Workspace workspace)
 
 ui::UiRect UiShell::gameViewRect() const
 {
-	// A hidden workspace has no docked panels at all, and the dock node is not
-	// updated in this frame: the game view is the whole work area.
-	if (keepDockSpaceAliveOnly(m_workspace))
-	{
-		const ImGuiViewport *viewport = ImGui::GetMainViewport();
-		return {viewport->WorkPos, viewport->WorkSize};
-	}
-
 	// The central passthru node is exactly the region not claimed by docked
 	// panels, so gameplay overlays anchored there always sit over the 3D
 	// render. Requires imgui_internal (dock builder API); fall back to the
@@ -132,7 +110,7 @@ void UiShell::applyDefaultDeveloperLayout(ImGuiID dockspaceId)
 	ImGui::MarkIniSettingsDirty();
 }
 
-void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
+void UiShell::drawMainMenuBar(DeveloperUiFrame &frame, const ShellToggles &toggles)
 {
 	if (!ImGui::BeginMainMenuBar())
 		return;
@@ -183,32 +161,11 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::EndMenu();
 	}
 
-	if (frame.joinPreferences && ImGui::BeginMenu("Multiplayer"))
-	{
-		layoutTileMenuItem("Show panel", nullptr, toggles.multiplayer);
-		ImGui::Separator();
-		if (frame.joinServer && ImGui::MenuItem("Reconnect"))
-			frame.joinServer();
-		if (frame.leaveServer && ImGui::MenuItem("Disconnect"))
-			frame.leaveServer();
-		if (frame.multiplayerStatus)
-		{
-			ImGui::Separator();
-			ImGui::TextUnformatted(frame.multiplayerStatus->label);
-			if (frame.multiplayerStatus->detail)
-				ImGui::TextWrapped("%s", frame.multiplayerStatus->detail);
-			if (hasLiveNetworkStats(frame.multiplayerStatus->state))
-				drawMultiplayerNetworkStats(frame.networkStats);
-		}
-		ImGui::EndMenu();
-	}
-
 	if (ImGui::BeginMenu("View"))
 	{
 		if (ImGui::BeginMenu("Status overlay"))
 		{
-			// Single state home (issue #184): the density. F1 cycles through
-			// the same three states from anywhere.
+			// Status density is a developer overlay setting.
 			const char *densityNames[] = {"Off", "Minimal", "Detailed"};
 			static_assert(IM_ARRAYSIZE(densityNames) ==
 							  static_cast<int>(playerui::StatusOverlayDensity::Detailed) + 1);
@@ -219,16 +176,11 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 				if (ImGui::MenuItem(densityNames[d], nullptr, selected))
 					*toggles.statusOverlay = static_cast<playerui::StatusOverlayDensity>(d);
 			}
-			ImGui::Separator();
-			if (ImGui::MenuItem("Cycle density", shortcutKeyName(SDLK_F1)))
-				*toggles.statusOverlay =
-					playerui::nextStatusOverlayDensity(*toggles.statusOverlay);
 			ImGui::EndMenu();
 		}
-		layoutTileMenuItem("Player / Gameplay", nullptr, toggles.playerPanel);
 		layoutTileMenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
 		layoutTileMenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
-		layoutTileMenuItem(frame.multiplayerStatus ? "World" : "World / biome map",
+		layoutTileMenuItem(frame.remote.multiplayerStatus ? "World" : "World / biome map",
 			shortcutKeyName(SDLK_F4), toggles.world);
 		// Clickable toggle (review §4.8, same ignored-return class).
 		if (toggles.overlayHints &&
@@ -276,6 +228,8 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 	if (ImGui::BeginMenu("Developer"))
 	{
 		layoutTileMenuItem("Overview", shortcutKeyName(SDLK_F8), toggles.overview);
+		layoutTileMenuItem("Creative / debug controls", nullptr, toggles.playerPanel);
+		layoutTileMenuItem("Network / server monitoring", nullptr, toggles.multiplayer);
 		ImGui::Separator();
 		layoutTileMenuItem("Performance", shortcutKeyName(SDLK_F7), toggles.performance);
 		layoutTileMenuItem("Player diagnostics", nullptr, toggles.playerDiagnostics);
@@ -299,7 +253,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		// the dockspace identity survives so the docking layout comes back.
 		if (frame.toggleDeveloperWorkspace &&
 			ImGui::MenuItem("Hide developer workspace",
-				shortcutKeyName(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT)))
+				shortcutKeyName(SDLK_F1)))
 			frame.toggleDeveloperWorkspace();
 		ImGui::EndMenu();
 	}

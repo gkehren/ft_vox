@@ -28,7 +28,7 @@
 #include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Core/ThreadPool.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/Benchmark.hpp>
@@ -49,6 +49,8 @@ class GameUiSample;
 namespace gameui { struct HudView; }
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
+struct MultiplayerActions;
+
 class Engine
 {
 public:
@@ -60,7 +62,7 @@ public:
 	void run();
 	void enableGameUi(bool standalone = false, bool previewStrip = true);
 	void enableUiSpike() { enableGameUi(true); }
-	/// Start-with / restore the developer workspace (`--no-dev-ui`). Runtime
+	/// Set initial developer workspace visibility (`--dev-ui`). Runtime
 	/// changes go through setDeveloperWorkspaceVisible so developer-owned input
 	/// is cancelled and the dockspace identity survives (issue #303 F01/F04).
 	void setShowDeveloperUi(bool visible) { m_showDeveloperUi = visible; }
@@ -81,11 +83,7 @@ public:
 	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
 
 	void setVSync(bool enabled);
-	void setPlayerSettingsOverrides(bool vsync, bool fxaa)
-	{
-		m_playerVSyncOverride = vsync;
-		m_playerFxaaOverride = fxaa;
-	}
+	void setPlayerSettingsOverrides(bool vsync, std::optional<GraphicsQualityPreset> quality);
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
 	int worldSeed() const;
@@ -204,9 +202,10 @@ private:
 	void requestPlayerVSync(bool enabled, bool persist);
 	void finishPlayerVSync(bool applied);
 	void applyPlayerMouseSensitivity(int percent);
+	void applyPlayerFxaa();
 	void resetPlayerSettingsDefaults(bool resetWindow);
 	void loadHosting();
-	void populateHostingUi(GameUIFrame &frame);
+	void populateHostingActions(MultiplayerActions &actions);
 	void tickHosting();
 	void queueHostedJoin(const hosting::Snapshot &server, const std::string &profile);
 	void requestExit();
@@ -228,6 +227,8 @@ private:
 	void noteSessionFramePresented() { m_sessionProgressPresented |= m_playerSessionRequest.has_value(); }
 	void completePlayerSession();
 	void failPlayerSession(std::string message, bool retryable = true);
+	void createRenderBridge(VoxelWorld *world, uint64_t generation);
+	void setChunkTraceEnabled(bool enabled);
 	void finishSoloBootstrap(glm::dvec3 center, bool resident);
 	struct SoloWorkResult
 	{
@@ -248,7 +249,7 @@ private:
 	bool m_waitingForHostExit{}, m_hostExitFailed{}, m_deferredQuit{}, m_retryablePlayerFailure{};
 	bool m_sessionProgressPresented{}, m_leavingToMenu{}, m_useMainMenu{};
 	void persistJoinPreferences();
-	void populateJoinUi(GameUIFrame &frame);
+	MultiplayerActions multiplayerActions();
 	void applySessionRequests();
 	void prepareRemoteJoin(const client::JoinRequest &request);
 	struct NamedProfile
@@ -266,7 +267,7 @@ private:
 	void updateRemoteCamera();
 	void traceRemoteMotion(double frameDt);
 	void updateRemoteEntities();
-	void populateRemoteUi(GameUIFrame &frame);
+	ui::RemoteSessionView remoteSessionView() const;
 	sim::VoxelTargetTrace remoteTarget() const;
 	VoxelWorld *viewWorld() const;
 	void selectHotbarSlot(int slot);
@@ -297,7 +298,7 @@ private:
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
 	void drawUi();
 	/// Push the developer-key overlay toggles (chunk borders, demo players) to
-	/// the overlay layer. Called by every UI path, including the dockspace-only
+	/// the overlay layer. Called with the Developer UI visible or hidden.
 	/// frame that draws no developer surface (issue #303 F09).
 	void applyOverlayToggles();
 	void tickBenchmark(double dt);
@@ -329,11 +330,12 @@ private:
 	void clearGameplayInput();
 	bool nativePause() const;
 	bool suppressDeveloperUi() const;
-	/// ImGui can build a frame outside exclusive player modals and proof views.
-	/// A hidden workspace still submits its KeepAliveOnly dockspace.
-	bool developerUiPresent() const;
-	/// The visible workspace may own pointer and keyboard input.
+	/// Only visible developer surfaces build ImGui frames and receive input.
+	/// A native modal temporarily suppresses developer drawing and input.
 	bool developerUiAvailable() const;
+	bool developerInputReady() const { return !m_uiGeometryPending && developerUiAvailable(); }
+	void invalidateUiGeometry();
+	void noteUiFramePresented() { m_uiGeometryPending = false; }
 	gameui::HudView playerHudView() const;
 	gameui::InputContext inputContext() const;
 	ImGuiLayer::PointerHit developerPointerAt(float x, float y) const;
@@ -471,17 +473,20 @@ private:
 	std::unique_ptr<ImmediateCommands> immediate;
 	std::unique_ptr<WorldRenderer> worldRenderer;
 	std::unique_ptr<ImGuiLayer> imgui;
-	std::unique_ptr<GameUI> gameUi;
+	std::unique_ptr<DeveloperUi> developerUi;
 	std::unique_ptr<GameUiSample> m_playerUi;
 	gameui::InputRouter m_inputRouter;
 	std::optional<bool> m_captureBeforeScreen;
 	uint64_t m_uiScreenRevision{};
-	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
+	bool m_developerSuppressed{}, m_developerComposed{}, m_uiGeometryPending{};
+	bool m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
 	bool m_uiSpike{false};
-	bool m_showDeveloperUi{true};
+	bool m_showDeveloperUi{};
+	bool m_showHudHints{true};
 	bool m_showPlayerHud{true};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
+	bool m_chunkTraceEnabled{};
 	// Authoritative simulation + derived render projection (Epic #204,
 	// issues #208/#209). GameSimulation owns the TerrainGenerator,
 	// VoxelWorld, PlayerController and MobSystem (CPU-only ft_vox_core); the
@@ -512,7 +517,8 @@ private:
 	std::string m_playerUiError;
 	std::string m_playerSettingsNotice;
 	bool m_playerUiDirty{};
-	bool m_playerVSyncOverride{}, m_playerFxaaOverride{};
+	bool m_playerVSyncOverride{};
+	std::optional<bool> m_playerFxaaOverride;
 	// Present while a settings-originated request awaits swapchain recreation.
 	// True means a successful application is also an explicit disk edit.
 	std::optional<bool> m_playerVSyncRequest;

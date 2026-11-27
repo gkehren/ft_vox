@@ -6,8 +6,9 @@
 // controls moved to the dedicated Benchmark panel.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/DebugUI/DebugUiEngine.hpp>
 #include <Engine/UiScale.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/GpuProfile.hpp>
@@ -31,7 +32,7 @@ float historyMax(const MetricHistory &h, float floorMax)
 }
 } // namespace
 
-void drawPerformance(UiState &s, GameUIFrame &frame)
+void drawPerformance(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.performance)
 		return;
@@ -47,15 +48,22 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 
 	bool capturing = prof.enabled();
 	if (ImGui::Checkbox("Capture", &capturing))
+	{
 		prof.setEnabled(capturing);
+		syncDebugCpuCapture(s, prof);
+	}
 	ImGui::SameLine();
 	if (ImGui::Button("Clear history"))
 	{
 		prof.clearHistory();
-		if (frame.gpu) frame.gpu->syncCapture(prof.captureEpoch());
+		const auto epoch = prof.captureEpoch();
+		if (frame.gpu)
+			frame.gpu->syncCapture(epoch);
+		syncDebugCpuCapture(s, prof);
+		syncDebugGpuCapture(s, frame.gpu, epoch);
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("CPU scopes · previous frame");
+	ImGui::TextDisabled(capturing ? "CPU capture running" : "CPU capture paused");
 
 	if (frame.gameUiStats)
 	{
@@ -69,42 +77,24 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 			static_cast<unsigned long long>(ui.compositionBytes / 1024));
 	}
 
-	const float frameMs = prof.lastFrameMs();
-	const float avgMs = prof.avgFrameMs();
-	const float fpsEst = prof.fpsEstimate();
-	const float p1 = prof.onePercentLowMs();
+	const float frameMs = s.frame.cpuFrameMs;
+	const float avgMs = s.frame.avgMs;
+	const float fpsEst = avgMs > 0.f ? 1000.f / avgMs : 0.f;
+	const float p1 = s.frame.onePercentLowMs;
 
-	ImGui::SeparatorText("CPU frame");
+	ImGui::SeparatorText("CPU frame (visible workspace)");
 	ImGui::Text("%.1f FPS  |  %.2f ms  |  avg %.2f ms", fpsEst, frameMs, avgMs);
 	if (p1 > 0.f)
-		ImGui::Text("1%% low (slow frames): %.2f ms  (~%.0f FPS)", p1, p1 > 1e-4f ? 1000.f / p1 : 0.f);
+		ImGui::Text("1%% low (slow frames): %.2f ms  (~%.0f FPS)", p1, 1000.f / p1);
 
-	// Frame-time history graph (chronological order, from the profiler's
-	// own 240-frame ring — per-frame resolution, unlike the 10 Hz console
-	// histories).
 	{
-		const int n = prof.historyCount();
-		std::vector<float> ordered;
-		ordered.reserve(static_cast<size_t>(n > 0 ? n : 1));
-		if (n > 0)
-		{
-			const float *hist = prof.frameHistory();
-			const int write = prof.historyWriteIndex();
-			const int start = (n < Profiler::kHistorySize) ? 0 : write;
-			for (int i = 0; i < n; ++i)
-				ordered.push_back(hist[(start + i) % Profiler::kHistorySize]);
-		}
-		else
-		{
-			ordered.push_back(frameMs);
-		}
-
-		float maxY = 16.7f;
-		for (float v : ordered)
-			maxY = std::max(maxY, v * 1.1f);
-		maxY = std::max(maxY, 33.3f);
-
-		ImGui::PlotLines("##ft", ordered.data(), static_cast<int>(ordered.size()), 0,
+		std::array<float, kMetricHistorySize> ordered;
+		const auto count = s.cpuFrameTimes.count();
+		s.cpuFrameTimes.copyOrdered(ordered.data());
+		float maxY = 33.3f;
+		for (size_t i = 0; i < count; ++i)
+			maxY = std::max(maxY, ordered[i] * 1.1f);
+		ImGui::PlotLines("##ft", ordered.data(), static_cast<int>(count), 0,
 						 nullptr, 0.f, maxY, ImVec2(-1.f, ui::scaled(80.f, scale)));
 		ImGui::TextDisabled("Graph scale 0–%.0f ms  (16.7 = 60 FPS, 33.3 = 30 FPS)", maxY);
 	}
@@ -267,14 +257,19 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 
 	// --- GPU ---
 	ImGui::SeparatorText("GPU frame / passes");
+	ImGui::TextDisabled("Global Engine capture. Delayed results can include hidden frames.");
 	if (frame.gpu)
 	{
 		auto &gpu = *frame.gpu;
 		bool enabled = gpu.enabled();
-		if (ImGui::Checkbox("GPU timestamps", &enabled)) gpu.setEnabled(enabled);
+		if (ImGui::Checkbox("GPU timestamps", &enabled))
+		{
+			gpu.setEnabled(enabled);
+			syncDebugGpuCapture(s, &gpu, prof.captureEpoch());
+		}
 		ImGui::TextDisabled("%s", gpu.status());
 		const GpuFrameSample &latest = gpu.latest();
-		if (latest.serial)
+		if (s.frame.gpuValid)
 		{
 			float maxPass = 0.001f;
 			for (size_t i = 0; i < kGpuPassCount; ++i)

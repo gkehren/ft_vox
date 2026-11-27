@@ -2,9 +2,9 @@
 
 #include <string>
 
-struct GameUIFrame;
+struct DeveloperUiFrame;
 
-/// State for the Graphics → Resource pack panel (owned by GameUI).
+/// State for the Graphics → Resource pack panel (owned by DeveloperUi).
 struct ResourcePackUiState
 {
 	char pathBuf[512]{};
@@ -16,7 +16,7 @@ struct ResourcePackUiState
 };
 
 /// Draw path field, Browse, Apply, Use bundled inside an already-open Graphics window.
-void drawResourcePackSection(GameUIFrame &frame, ResourcePackUiState &state, bool &showGraphics);
+void drawResourcePackSection(DeveloperUiFrame &frame, ResourcePackUiState &state, bool &showGraphics);
 
 /// Process ImGuiFileDialog for pack directory selection (call every frame).
 void displayResourcePackFileDialog(ResourcePackUiState &state, bool &showGraphics);

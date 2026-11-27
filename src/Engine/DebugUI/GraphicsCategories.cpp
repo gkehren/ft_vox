@@ -6,7 +6,7 @@
 
 #include <Engine/DebugUI/GraphicsUi.hpp>
 
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/UiTheme.hpp>
 
@@ -49,7 +49,7 @@ const char *categoryName(Category c)
 	return "?";
 }
 
-void drawCategory(Category c, debugui::UiState &s, GameUIFrame &frame)
+void drawCategory(Category c, debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	switch (c)
 	{
@@ -64,7 +64,7 @@ void drawCategory(Category c, debugui::UiState &s, GameUIFrame &frame)
 	}
 }
 
-void drawGeneral(debugui::UiState &s, GameUIFrame &frame)
+void drawGeneral(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &pp = frame.worldRenderer->postSettings();
@@ -72,22 +72,22 @@ void drawGeneral(debugui::UiState &s, GameUIFrame &frame)
 	ImGui::SeparatorText("Quality");
 	const char *presetNames[] = {"Low", "Medium", "High", "Cinematic"};
 	int presetIdx = static_cast<int>(pp.qualityPreset);
-	if (ImGui::Combo("Quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)))
-		pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
+	if (ImGui::Combo("Quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)) && frame.applyGraphicsQuality)
+		frame.applyGraphicsQuality(static_cast<GraphicsQualityPreset>(presetIdx));
 
 	// Issue #185: surface drift from the selected pack instead of hiding it —
 	// matchesPreset ignores the runtime underwater state + debug views.
 	// Stacked vertically (no SameLine chain) so the reset button stays
 	// visible at 360 px docked width.
-	const bool custom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
+	const bool custom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset, /*compareFxaa=*/false);
 	if (custom)
 	{
 		ImGui::Text("Preset: Custom (based on %s)", presetName(pp.qualityPreset));
 		char resetLabel[48];
 		std::snprintf(resetLabel, sizeof(resetLabel), "Reset to %s",
 					  presetName(pp.qualityPreset));
-		if (ImGui::Button(resetLabel))
-			pp.applyPreset(pp.qualityPreset);
+		if (ImGui::Button(resetLabel) && frame.applyGraphicsQuality)
+			frame.applyGraphicsQuality(pp.qualityPreset);
 	}
 	else
 	{
@@ -95,16 +95,15 @@ void drawGeneral(debugui::UiState &s, GameUIFrame &frame)
 		ImGui::SameLine();
 		ui::statusBadge(presetName(pp.qualityPreset), ui::StatusKind::Ok);
 	}
-	ui::helpMarker("Presets control shadow resolution, FXAA, bloom, SSAO, god rays, film "
+	ui::helpMarker("Presets control shadow resolution, bloom, SSAO, god rays, film "
 				   "grain, vignette, post grade and the exposure/tonemap baseline. The pack "
 				   "also drives runtime water tiers in the renderer (SSR march budget, "
 				   "water shadows / caustics). Lighting, atmosphere, water appearance, "
-				   "display, resource packs, UI scale and debug views are never touched.");
-	ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain / spatial AA "
-						"(Low: off) plus the runtime water quality tier.");
+				   "display, player FXAA, resource packs, UI scale and debug views are unchanged.");
+	ImGui::TextDisabled("FXAA follows the Game Menu setting or the command-line quality choice.");
 }
 
-void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
+void drawDisplay(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	if (!frame.render)
@@ -115,35 +114,16 @@ void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
 	auto &rs = *frame.render;
 
 	ImGui::SeparatorText("Presentation");
-	// Single settings home for VSync (issue #185).
-	// F10 remains the global quick action.
-	bool vsync = rs.vsyncEnabled;
-	// "(applying)" must also cover the frame where the toggle just happened:
-	// vsyncPending is filled by drawUi before the panel draws, so a fresh
-	// toggle would otherwise show stale feedback for one frame.
-	bool applying = frame.vsyncPending;
-	if (ImGui::Checkbox("VSync", &vsync) && frame.setVSync)
-	{
-		frame.setVSync(vsync);
-		applying = true;
-	}
-	if (!rs.vsyncEnabled)
-	{
-		ImGui::SameLine();
-		ui::helpMarker("No pacing or FPS cap — tearing is possible.");
-	}
-	ImGui::SameLine();
-	ui::helpMarker("F10 toggles VSync from anywhere.");
-
+	ImGui::TextUnformatted("Change VSync in Game Menu > Settings or press F10.");
 	char present[96];
 	std::snprintf(present, sizeof(present), "%s%s",
 				  frame.presentModeName ? frame.presentModeName
 										: (rs.vsyncEnabled ? "FIFO" : "Immediate"),
-				  applying ? " (applying)" : "");
+				  frame.vsyncPending ? " (applying)" : "");
 	ui::metric("Present mode", "%s", present);
 }
 
-void drawLighting(debugui::UiState &s, GameUIFrame &frame)
+void drawLighting(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &sp = *frame.shader;
@@ -206,7 +186,7 @@ void drawLighting(debugui::UiState &s, GameUIFrame &frame)
 		resetGraphicsLighting(sp);
 }
 
-void drawAtmosphere(debugui::UiState &s, GameUIFrame &frame)
+void drawAtmosphere(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &sp = *frame.shader;
@@ -233,7 +213,7 @@ void drawAtmosphere(debugui::UiState &s, GameUIFrame &frame)
 	ImGui::SliderFloat("Base Y", &sp.fogBaseY, 0.f, 200.f);
 }
 
-void drawShadows(debugui::UiState &s, GameUIFrame &frame)
+void drawShadows(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &pp = frame.worldRenderer->postSettings();
@@ -261,7 +241,7 @@ void drawShadows(debugui::UiState &s, GameUIFrame &frame)
 	}
 }
 
-void drawWater(debugui::UiState &s, GameUIFrame &frame)
+void drawWater(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &sp = *frame.shader;
@@ -283,7 +263,7 @@ void drawWater(debugui::UiState &s, GameUIFrame &frame)
 		resetGraphicsWater(sp, pp);
 }
 
-void drawPost(debugui::UiState &s, GameUIFrame &frame)
+void drawPost(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	(void)s;
 	auto &pp = frame.worldRenderer->postSettings();
@@ -349,9 +329,9 @@ void drawPost(debugui::UiState &s, GameUIFrame &frame)
 		ImGui::SliderFloat("Intensity##bloom", &pp.bloomIntensity, 0.f, 2.f);
 		ImGui::SliderInt("Blur iterations", &pp.bloomBlurIterations, 1, 5);
 	}
-	ImGui::Checkbox("Spatial AA (FXAA 3.11)", &pp.fxaaEnabled);
+	ImGui::Text("Spatial AA (FXAA 3.11): %s", pp.fxaaEnabled ? "On" : "Off");
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.\nThe Low preset disables AA.");
+		ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.");
 	// Presets and post resets never touch ssaoDebugView (Render Debug owns
 	// it, and the renderer gates stale views via effectiveSsaoDebugView).
 	// Clearing it here is deliberate UX: an explicit SSAO disable also
@@ -395,7 +375,7 @@ void drawPost(debugui::UiState &s, GameUIFrame &frame)
 				   "Shadow resolution (Shadows category) and debug views are untouched.");
 }
 
-void drawResources(debugui::UiState &s, GameUIFrame &frame)
+void drawResources(debugui::UiState &s, DeveloperUiFrame &frame)
 {
 	drawResourcePackSection(frame, s.resourcePackUi, s.panels.rendering);
 }

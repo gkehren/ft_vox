@@ -31,10 +31,7 @@ int main()
 	checkRoute(SDLK_F11, KeyRoute::GlobalShortcut, "F11 global (Memory)");
 	checkRoute(SDLK_F12, KeyRoute::GlobalShortcut, "F12 global (Render debug)");
 
-	// Gameplay shortcuts must be routed behind !wantCaptureKeyboard. P/H are
-	// executed by GameUI; C/B/T/1-9/Q/E are Engine-owned gameplay keys
-	// classified by the same policy (mouse capture, chunk borders, creative
-	// block cycle, hotbar selection, item drop, inventory panel — issue #227).
+	// Letter and digit shortcuts stay under Engine's input ownership policy.
 	checkRoute(SDLK_P, KeyRoute::GameplayShortcut, "P gameplay");
 	checkRoute(SDLK_C, KeyRoute::GameplayShortcut, "C gameplay");
 	checkRoute(SDLK_B, KeyRoute::GameplayShortcut, "B gameplay");
@@ -58,7 +55,7 @@ int main()
 
 	// Escape is special (UI/modal routing first, then possibly quit) and
 	// must never enter the shortcut routes.
-	checkRoute(SDLK_ESCAPE, KeyRoute::NotGameUIShortcut, "Escape not a GameUI shortcut");
+	checkRoute(SDLK_ESCAPE, KeyRoute::NotGameUIShortcut, "Escape not a DeveloperUi shortcut");
 
 	// Anything else (text input, other digits, other letters) stays inert.
 	checkRoute(SDLK_A, KeyRoute::NotGameUIShortcut, "A not a shortcut");

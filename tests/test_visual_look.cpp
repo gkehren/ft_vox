@@ -56,16 +56,16 @@ int main()
 	// out-of-tree build directories cannot break it (issue #165 review).
 	{
 		const std::filesystem::path uiPath =
-			std::filesystem::path(FT_VOX_SOURCE_DIR) / "src/Engine/GameUI.cpp";
+			std::filesystem::path(FT_VOX_SOURCE_DIR) / "src/Engine/DeveloperUi.cpp";
 		std::ifstream ui(uiPath);
 		if (!ui)
-			ok = fail("GameUI.cpp not found via FT_VOX_SOURCE_DIR (CMake misconfiguration)");
+			ok = fail("DeveloperUi.cpp not found via FT_VOX_SOURCE_DIR (CMake misconfiguration)");
 		else
 		{
 			std::string uiSrc((std::istreambuf_iterator<char>(ui)), std::istreambuf_iterator<char>());
 			if (uiSrc.find("lightLevels") != std::string::npos ||
 				uiSrc.find("Light levels") != std::string::npos)
-				ok = fail("GameUI still exposes the removed lightLevels control (issue #161)");
+				ok = fail("DeveloperUi still exposes the removed lightLevels control (issue #161)");
 		}
 	}
 

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <span>
 
 /// Lightweight hierarchical CPU profiler for the main thread + aggregate worker samples.
 /// Zero external deps; designed for an ImGui panel (F7).
@@ -72,6 +73,7 @@ public:
 	static constexpr int kMaxEntries = 96;
 	static constexpr int kMaxDepth = 8;
 	static constexpr int kHistorySize = 240;
+	static constexpr int kAverageFrameWindow = 60;
 	// Built-ins (TerrainGen/MeshBuild/MeshLOD/LightCache/queues/BiomeMap)
 	// plus headroom for test-registered dynamic names (issue #172).
 	static constexpr int kMaxWorkerBuckets = 16;
@@ -84,7 +86,8 @@ public:
 	Profiler(Profiler &&) = delete;
 	Profiler &operator=(Profiler &&) = delete;
 
-	void setEnabled(bool v) { m_enabled.store(v, std::memory_order_relaxed); }
+	/// Capture-thread only. Pausing discards any frame already in progress.
+	void setEnabled(bool enabled);
 	bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
 
 	void beginFrame();
@@ -115,6 +118,15 @@ public:
 	void clearHistory();
 
 	// --- UI accessors (read last completed frame) ---
+
+	/// Monotonic publishing sequence. A clear preserves the sequence and
+	/// empties the history, so consumers can distinguish reads from captures.
+	uint64_t completedFrameSerial() const { return m_completedFrameSerial; }
+
+	/// CPU timing definitions shared by independent capture rings. 'next'
+	/// indexes the next write slot, and 'count' is the number of valid slots.
+	static float rollingAverageMs(std::span<const float> ring, size_t count, size_t next);
+	static float percentile99Ms(std::span<const float> ring, size_t count, size_t next);
 
 	float lastFrameMs() const { return m_lastFrameMs; }
 	float avgFrameMs() const { return m_avgFrameMs; }
@@ -178,20 +190,19 @@ private:
 	std::array<ProfileEntry, kMaxEntries> m_lastEntries{};
 	int m_lastEntryCount{0};
 	float m_lastFrameMs{0.f};
+	uint64_t m_completedFrameSerial{};
 
 	// History ring
 	std::array<float, kHistorySize> m_history{};
 	int m_historyWrite{0};
 	int m_historyCount{0};
 
-	// Rolling average (~1s EMA-ish via simple sum window)
+	// Rolling mean of the newest 60 samples
 	float m_avgFrameMs{0.f};
 	// Lazy 1% low cache (review §4.8): mutable because the const accessor
 	// recomputes on demand; main-thread only, like every last-frame read.
 	mutable float m_onePercentLowMs{0.f};
 	mutable bool m_p1Dirty{false};
-	double m_avgAccumMs{0.0};
-	int m_avgSamples{0};
 
 	// Worker aggregates
 	std::array<WorkerBucket, kMaxWorkerBuckets> m_workers{};

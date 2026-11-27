@@ -1,23 +1,19 @@
 #pragma once
 
 #include <Engine/PlayerUi.hpp>
-#include <Engine/UiWorkspace.hpp>
 #include <imgui/imgui.h>
 
 #include <functional>
 
 // Application-level ImGui shell (issue #183): persistent dockspace with a
 // passthru central region, main menu / navigation structure, right-side
-// status strip and layout actions. Panel contents live in GameUI (Status
-// Overlay, Player/Gameplay, World, Help, hints) and in the DebugUI developer
+// status strip and layout actions. Panel contents live in DeveloperUi (Status
+// Overlay, creative controls, World, Help, network monitoring) and in the DebugUI developer
 // panels (issue #179); the shell owns only chrome and navigation.
-struct GameUIFrame;
+struct DeveloperUiFrame;
 
 namespace ui
 {
-struct NetworkStats;
-void drawMultiplayerNetworkStats(const NetworkStats &stats);
-
 /// One-shot request for which Help tab to select the next time the Help
 /// window is drawn (menu entries open the window AND select their tab).
 enum class HelpTabRequest
@@ -29,7 +25,7 @@ enum class HelpTabRequest
 
 /// Canonical window titles. Docking targets and Begin() calls must use the
 /// same constants so default-layout docking cannot drift from the panels
-/// (GameUI + DebugUI).
+/// (DeveloperUi + DebugUI).
 namespace windows
 {
 inline constexpr const char *kGraphics = "Graphics";
@@ -57,12 +53,12 @@ struct UiRect
 	ImVec2 size{0.f, 0.f};
 };
 
-/// Panel visibility toggles (GameUI + DebugUI PanelState), mirrored into the
+/// Panel visibility toggles (DeveloperUi + DebugUI PanelState), mirrored into the
 /// shell menus. The Status Overlay carries its density instead of a bool:
 /// Off is hidden, Minimal/Detailed are the two shown densities (issue #184).
 struct ShellToggles
 {
-	// GameUI-owned surfaces.
+	// DeveloperUi-owned surfaces.
 	playerui::StatusOverlayDensity *statusOverlay;
 	bool *playerPanel; // interactive "Player / Gameplay" panel
 	bool *multiplayer;
@@ -90,7 +86,7 @@ struct ShellToggles
 	/// leave hidden mode first (ui::toggleLayoutTile / ui::openLayoutTile
 	/// in Engine/LayoutTiles.hpp); overlay-only controls are excluded.
 	std::function<void()> leaveLayoutTilesHidden;
-	/// Explicit hidden-mode flag (GameUI::isLayoutTilesHidden): true after H
+	/// Explicit hidden-mode flag (DeveloperUi::isLayoutTilesHidden): true after H
 	/// hid the tiles, restored by the next H. Never derived from panel
 	/// visibility — a closed layout is not necessarily a hidden one.
 	bool layoutTilesHidden{false};
@@ -99,13 +95,8 @@ struct ShellToggles
 class UiShell
 {
 public:
-	/// Create the root dockspace and run queued layout operations. Call once
-	/// per frame before any window is submitted. The hidden state submits the
-	/// SAME dockspace identity with ImGuiDockNodeFlags_KeepAliveOnly, so the
-	/// node tree (and imgui.ini docking) survives without rendering or input
-	/// (issue #303 F01).
-	void beginFrame(Workspace workspace = Workspace::Visible);
-	bool workspaceHidden() const { return keepDockSpaceAliveOnly(m_workspace); }
+	/// Create the root dockspace on a visible frame and run queued layout operations.
+	void beginFrame();
 	/// Identity of the root dockspace node, available after beginFrame has
 	/// submitted it (0 before the first frame). Tests use it to dock windows
 	/// and to read back persisted associations (issue #303 F12).
@@ -113,7 +104,7 @@ public:
 
 	/// Main menu bar: ft_vox / World / View / Developer / Help + right-side
 	/// status strip with graceful degradation at narrow widths.
-	void drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles);
+	void drawMainMenuBar(DeveloperUiFrame &frame, const ShellToggles &toggles);
 
 	/// Screen-space rectangle of the central passthru dock node (the game
 	/// view). Falls back to the main viewport work area while the dockspace
@@ -139,7 +130,6 @@ private:
 
 	/// Current workspace state: pixels are only submitted when visible, but the
 	/// dockspace is submitted in both states.
-	Workspace m_workspace{Workspace::Visible};
 
 	bool m_defaultLayoutQueued{false};
 	bool m_resetLayoutQueued{false};

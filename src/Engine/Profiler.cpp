@@ -42,6 +42,13 @@ void Profiler::registerWorkerName(const char *name)
 	m_workerBucketCount.store(count + 1, std::memory_order_release);
 }
 
+void Profiler::setEnabled(bool enabled)
+{
+	if (!enabled && m_inFrame)
+		m_discardFrame = true;
+	m_enabled.store(enabled, std::memory_order_relaxed);
+}
+
 void Profiler::beginFrame()
 {
 	if (!enabled())
@@ -184,8 +191,6 @@ void Profiler::clearHistory()
 	m_avgFrameMs = 0.f;
 	m_onePercentLowMs = 0.f;
 	m_p1Dirty = false;
-	m_avgAccumMs = 0.0;
-	m_avgSamples = 0;
 	m_spikeCount = 0;
 	m_spikes = {};
 }
@@ -244,47 +249,48 @@ void Profiler::updateAverages(float frameMs)
 	if (m_historyCount < kHistorySize)
 		++m_historyCount;
 
-	// Rolling mean over last ~60 samples (or all if fewer)
-	const int window = std::min(m_historyCount, 60);
-	float sum = 0.f;
-	for (int i = 0; i < window; ++i)
-	{
-		int idx = m_historyWrite - 1 - i;
-		if (idx < 0)
-			idx += kHistorySize;
-		sum += m_history[static_cast<size_t>(idx)];
-	}
-	m_avgFrameMs = window > 0 ? sum / static_cast<float>(window) : frameMs;
+	m_avgFrameMs = rollingAverageMs(m_history, m_historyCount, m_historyWrite);
 
-	// 1% low: 99th percentile of history (slow frames). Recomputed LAZILY
-	// on read (review §4.8): the old full sort of 240 floats ran every
-	// frame even with every panel closed.
+	// Defer the percentile selection until a consumer requests the result.
 	m_p1Dirty = true;
+}
+
+float Profiler::rollingAverageMs(std::span<const float> ring, size_t count, size_t next)
+{
+	const size_t window = std::min({count, ring.size(), size_t(kAverageFrameWindow)});
+	if (!window)
+		return 0.f;
+	float sum = 0.f;
+	for (size_t i = 0; i < window; ++i)
+	{
+		next = next ? next - 1 : ring.size() - 1;
+		sum += ring[next];
+	}
+	return sum / static_cast<float>(window);
+}
+
+float Profiler::percentile99Ms(std::span<const float> ring, size_t count, size_t next)
+{
+	const size_t window = std::min({count, ring.size(), size_t(kHistorySize)});
+	if (!window)
+		return 0.f;
+	std::array<float, kHistorySize> ordered;
+	for (size_t i = 0; i < window; ++i)
+	{
+		next = next ? next - 1 : ring.size() - 1;
+		ordered[i] = ring[next];
+	}
+	// Nearest-rank p99, in milliseconds. Preserve the Engine definition for
+	// short windows and select only the required element.
+	const size_t p99 = static_cast<size_t>(std::ceil(static_cast<float>(window) * 0.99f)) - 1;
+	std::nth_element(ordered.begin(), ordered.begin() + p99, ordered.begin() + window);
+	return ordered[p99];
 }
 
 void Profiler::recomputeOnePercentLow() const
 {
+	m_onePercentLowMs = percentile99Ms(m_history, m_historyCount, m_historyWrite);
 	m_p1Dirty = false;
-	if (m_historyCount <= 0)
-	{
-		m_onePercentLowMs = 0.f;
-		return;
-	}
-	std::array<float, kHistorySize> tmp{};
-	const int n = m_historyCount;
-	for (int i = 0; i < n; ++i)
-	{
-		int idx = m_historyWrite - 1 - i;
-		if (idx < 0)
-			idx += kHistorySize;
-		tmp[static_cast<size_t>(i)] = m_history[static_cast<size_t>(idx)];
-	}
-	// 1% low FPS ≈ high frame times: the value at the 99th percentile (slow
-	// end). nth_element is O(n) average — only the p99 slot needs ordering,
-	// not the whole window.
-	const int p99 = std::clamp(static_cast<int>(std::ceil(n * 0.99f)) - 1, 0, n - 1);
-	std::nth_element(tmp.begin(), tmp.begin() + p99, tmp.begin() + n);
-	m_onePercentLowMs = tmp[static_cast<size_t>(p99)];
 }
 
 void Profiler::recordSpike(float frameMs)
@@ -330,4 +336,5 @@ void Profiler::finalizeFrame(float frameMs)
 	snapshotWorkers();
 	updateAverages(frameMs);
 	recordSpike(frameMs);
+	++m_completedFrameSerial;
 }

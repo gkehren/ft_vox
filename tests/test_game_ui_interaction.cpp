@@ -103,8 +103,6 @@ void workspaceVisibility()
 	using enum ui::Workspace;
 	CHECK(ui::toggled(Visible) == Hidden && ui::toggled(Hidden) == Visible,
 		"the workspace toggle is reversible without restarting the application");
-	CHECK(ui::keepDockSpaceAliveOnly(Hidden) && !ui::keepDockSpaceAliveOnly(Visible),
-		"only the hidden workspace uses the dockspace maintenance path: the identity never changes");
 
 	// Hidden workspace, inventory closed: no developer surface owns input, so
 	// gameplay keeps the pointer, the keyboard and movement.
@@ -133,8 +131,15 @@ void workspaceVisibility()
 	// visibility: it removes the developer layer entirely.
 	CHECK(!ui::developerUiAvailable(true, true, Visible),
 		"a native player screen removes developer input even with the workspace visible");
-	CHECK(ui::developerUiPresent(true, false) && !ui::developerUiPresent(true, true),
-		"hiding the workspace keeps the ImGui frame, a native screen does not");
+
+	const InputContext waiting{.nativeScreen = true, .modal = true, .pointerGeometryPending = true};
+	CHECK(waiting.choose(Pointer) == Blocked && waiting.choose(Key, false, true) == PlayerUi,
+		"geometry refresh blocks pointers while native modal keyboard routing stays live");
+	InputRouter transition;
+	CHECK(transition.button(1, true, waiting.choose(Pointer)) == Blocked &&
+		transition.button(1, false, Gameplay) == Blocked &&
+		transition.button(1, true, Gameplay) == Gameplay,
+		"a press during refresh keeps its blocked release after composition resumes");
 
 	// Hiding ends developer-owned input: a held developer key is quarantined and
 	// still has to be released, so nothing leaks back into the hidden state.

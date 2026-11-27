@@ -1,6 +1,129 @@
 # Game UI migration and parity
 
-Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Phase A adds an isolated preview. A normal launch still follows the existing solo, Join and Host paths and the existing ImGui controls.
+Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Normal play starts in the native Game UI. The Developer UI is available on demand. The sections below record the earlier migration checkpoints and the current ownership split.
+
+## Developer UI separation (#308)
+
+**F1** shows or hides Developer UI. **Ctrl+Shift+D** remains an alias. Pass
+`--dev-ui` to request the workspace on launch. Developer panel shortcuts
+**F2–F5**, **F7–F9**, **F11** and **F12** open their tool directly from hidden.
+**H** hides and restores the current layout tiles within the workspace.
+**F6** toggles native HUD hints and **F10** requests a session-only VSync
+change at the swapchain boundary.
+
+The Vulkan scene projects across the full output. Native HUD, Inventory
+and Pause use the central dock area when the workspace is visible. With
+the workspace hidden they use the full window. ImGui submits over the
+native layer. **C** releases or recaptures a gameplay cursor. Showing
+Developer UI preserves the current cursor state. Hiding it cancels ImGui
+pointer presses, text input and open popups. Inventory drops its held
+gesture when its layout changes. Full-window native screens and
+confirmations keep input and suppress ImGui drawing. F1 updates the
+workspace visibility to apply on dismissal. Connected Pause remains
+local and the server continues to tick.
+
+Pointer input waits for the next successful presentation after a composition,
+window-size or display-scale change. Engine invalidates native layout and
+quarantines held buttons until release, so a click queued with F1 or modal
+dismissal cannot hit old rectangles or pass through to the world. Global
+keyboard shortcuts still run during the transition. When Developer UI
+relinquishes the cursor, SDL restores its default cursor and the ImGui cursor
+cache is cleared. SDL relative mode retains its current state.
+
+Engine builds `DeveloperUiFrame` only for a visible workspace or an explicit
+biome-map benchmark. Hidden frames skip ImGui frame construction. The live
+context and existing window IDs preserve dock associations, and
+`imgui.ini` persists layout and developer scale between launches.
+ImGui initialization, swapchain recreation and shutdown stay independent
+of visibility. Native presentation receives bounded view models and submits
+typed intents. Developer network and server views receive read-only
+diagnostics. Native join, hosting and administration keep the existing
+Engine adapters and verification checks. The developer roster displays fresh
+entries through the existing clipper and keeps no selection or admin state.
+
+Engine resolves effective FXAA from the native preference or the launch-time
+`--quality` override. Developer preset selection and preset reset apply the
+pack's rendering values and preserve effective FXAA. Reset Post restores the
+pack's post fields and leaves FXAA alone. Native Settings displays the effective
+value and the override status. Only a native preference change writes FXAA to
+disk.
+
+Chunk Inspector's trace checkbox sends an Engine command. The Engine-owned
+setting is off by default and is applied when a render bridge is constructed,
+before bootstrap or resident chunk attachment. The bounded event ring can
+continue collecting during hidden play and the setting survives world and
+session transitions.
+
+Developer panel histories and sustained alerts cover the current visible
+sampling interval. After hiding, modal suppression or a long presentation gap,
+they restart with fresh counter baselines. ImGui resumes with a fresh frame
+delta. Engine profiler and benchmark captures keep their independent timeline.
+
+Performance and Overview fold each completed CPU frame at most once. They use
+the same definitions as the Engine profiler, with a rolling mean over up to
+60 valid frames and a nearest-rank p99 over up to 240. Overview and scope plots
+sample fresh values at up to 10 Hz. Pausing Capture freezes the statistics
+and clears the slow-frame warning baseline. Clear history and other CPU
+capture epoch changes clear the CPU plots, average, p99, scope table and
+warning baseline. Reopening starts a new local interval while Engine capture
+continues.
+
+GPU timestamps and the Performance GPU graph belong to the global Engine
+capture. Overview records distinct results it observes while visible. A
+result may arrive after a delay and describe a frame rendered while the
+workspace was hidden. GPU disablement or a capture reset clears observations
+from the old capture. The Overview reuses published measurements without
+reading query pools or adding Vulkan waits.
+
+| Surface | Route and parity |
+| --- | --- |
+| Graphics and Resource Packs | F2, including quality presets, per-pass controls and pack browse/apply/reset. Game Menu → Settings is the editable home for FXAA and VSync. Developer Graphics reports their live state. |
+| Streaming and workload | F3, F11 and Developer → Memory. Streaming budgets, memory, queues and live workload remain available. |
+| World and biome map | F4. Solo map, overlays and navigation remain available. Remote World continues to display the connected view. |
+| Help and About | F5 opens developer Controls. The Game Menu provides its own Settings → Controls and About. |
+| Performance, Overview, Chunk Inspector, Render Debug | F7, F8, F9 and F12. Developer also exposes Player Diagnostics. |
+| Creative and debugging | Developer → Creative / debug controls. Retains solo flight, camera, creative block, target, demo players and passive mobs, with chunk borders available from Developer or B. Mouse sensitivity and inversion are in native Settings. |
+| Status density and layout | View → Status overlay (Off, Minimal, Detailed). View → Reset layout / Apply default developer layout. |
+| Benchmark and report | Developer → Benchmark for interactive profiling and reports. CLI benchmark and explicit `--benchmark-map` remain available. |
+| Network and server monitoring | Developer → Network / server monitoring. Keeps client prediction and traffic metrics, fresh server counters and the hosted roster. |
+| Player HUD, Inventory, Join, Host and administration | Native HUD, E and Escape → Multiplayer. Connection, profiles, hosting, stop and verified administration commands live in that flow. The retired ImGui forms shared those actions and kept separate drafts and confirmation state. |
+
+### Verification on Windows and Vulkan
+
+Captured the same seed and camera with [Developer UI visible](images/developer-ui/developer-workspace.png)
+and [Developer UI hidden](images/developer-ui/player-hud.png) at 1280 × 720
+on an NVIDIA GeForce RTX 4070 Ti (Vulkan 1.4.357). Both images use the engine
+scene and UI composition path. The visible shot places the same native
+hotbar inside the center dock area. The HUD proof confirmed that the ImGui
+frame counter stayed fixed during the hidden interval and that the dock
+tree resumed when reopened.
+
+| Check | Result |
+| --- | --- |
+| Windows Release graphics-off build and CTest | 55/55 passed, including CoreIncludeGuard and HeadlessDeps. |
+| Windows Release graphical build and focused CTest | All graphical targets built. 10/10 selected UI, graphics and biome-map tests passed. |
+| Vulkan HUD/workspace proof | 80 checks passed, including same-batch pointer quarantine on F1 and modal dismissal, the SDL cursor, timing on resume, resize and display scale, docking restoration, and hidden-world bootstrap tracing. |
+| Vulkan presentation and Settings | Presentation passed 39 checks. Settings passed 49 checks and restart passed 10, including developer preset resets, FXAA persistence, both CLI FXAA override values, and display rollback. |
+| Graphical join and native hosted flows | Join smoke passed 65 checks, including F1 during connected play and trace inheritance across remote connection and solo restoration. The native session menu passed 35 checks, including hidden world creation. Native Host/Join passed for owner and guest on an isolated retry after one missed guest menu click. Hosted closure passed the inventory matrix, checkpoint and restart. |
+| Production CLI benchmark | Wrote reports for the standard hidden run and the explicit `--benchmark-map 0.5` run. |
+| Vulkan validation | The successful GPU runs reported the documented RTSS swapchain diagnostics. The HUD proof counted 28 such messages and zero additional errors. |
+
+The separate solo inventory proof exercised F1 while a real ImGui text editor
+owned the keyboard. Its ten known pointer and inventory assertions and the
+showcase proof's two known slider assertions reproduced on this desktop.
+Those twelve failures are tracked separately from the correction checks.
+The hosted inventory matrix passed all ten operations and conserved the
+117-item budget. The Vulkan proofs injected SDL events.
+
+### Profiling review corrections (F07–F09)
+
+| Local check | Result |
+| --- | --- |
+| Graphics-off Release suite | 55/55 passed, including `ProfilerWorkerConsistency`. |
+| Focused graphical Release suite | 12/12 passed, including `DebugUiCore`, `ProfilerWorkerConsistency` and `GpuProfile`. The new deterministic fixtures cover CPU publication and capture epochs, partial and wrapped timing windows, slow-frame alerts, and GPU observation serials and generations. |
+| Vulkan workspace proof on RTX 4070 Ti | 87 checks passed. SDL clicks drove the actual Capture and Clear history controls. Two F1 cycles verified that global CPU and GPU capture continued while local histories restarted and hidden ImGui frames stayed at zero. Validation reported 28 known RTSS messages and zero additional errors. |
+| Production CLI benchmarks | Standard hidden and explicit `--benchmark-map 0.5` runs both wrote reports. |
+| Additional strict Vulkan resource smoke | GPU timestamp recycling, partial-query handling, reset and toggle passed. The strict overall validation assertion failed with the same 21 RTSS swapchain diagnostics on the baseline and revised builds. |
 
 ## Native player inventory (#304)
 

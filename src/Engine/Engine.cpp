@@ -128,8 +128,8 @@ Engine::Engine(std::string resourcePackRoot)
 	imgui = std::make_unique<ImGuiLayer>();
 	imgui->init(window, *vkContext, *swapchain);
 
-	gameUi = std::make_unique<GameUI>();
-	gameUi->init(*vkContext, *immediate);
+	developerUi = std::make_unique<DeveloperUi>();
+	developerUi->init(*vkContext, *immediate);
 
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
@@ -164,7 +164,7 @@ Engine::Engine(std::string resourcePackRoot)
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
 	std::cout << "  WASD move · Space jump/swim up · Shift sprint/swim down · V flight\n";
 	std::cout << "  Mouse look · LMB/RMB break/place · 1-9 hotbar · Q drop · B borders\n";
-	std::cout << "  C free mouse · E inventory · F5 controls · F6 HUD hints · F10 VSync\n";
+	std::cout << "  C free mouse · E inventory · F1 Developer UI · F5 developer controls · F6 HUD hints · F10 VSync\n";
 	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
 
@@ -204,7 +204,7 @@ Engine::~Engine()
 	// quiesces its derived jobs and releases its handles first; it never closes
 	// the world's persistence (issue #207 review) — the host closes the
 	// authoritative simulation exactly once, here, before it tears down.
-	gameUi.reset();
+	developerUi.reset();
 	renderBridge.reset();
 	m_remote.reset();
 	if (sim)
@@ -284,8 +284,8 @@ void Engine::resetWorldProjection()
 	m_uiBiomeColumn = {std::numeric_limits<int>::min(), std::numeric_limits<int>::min()};
 	m_uiBiomeWorldGen = 0;
 	m_uiBiome = -1;
-	if (gameUi)
-		gameUi->invalidateBiomeMap();
+	if (developerUi)
+		developerUi->invalidateBiomeMap();
 	if (m_remote)
 		jumpPressed = false;
 }
@@ -339,14 +339,26 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	finishSoloBootstrap(bootstrapCenter, false);
 }
 
+void Engine::createRenderBridge(VoxelWorld *world, uint64_t generation)
+{
+	renderBridge = std::make_unique<RenderWorldBridge>(world, threadPool.get(), chunkPool.get(),
+		generation, m_chunkTraceEnabled);
+}
+
+void Engine::setChunkTraceEnabled(bool enabled)
+{
+	m_chunkTraceEnabled = enabled;
+	if (renderBridge)
+		renderBridge->setChunkEventTraceEnabled(enabled);
+}
+
 void Engine::finishSoloBootstrap(glm::dvec3 bootstrapCenter, bool resident)
 {
 	if (!chunkPool)
 		chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	camera.setPosition(glm::vec3(bootstrapCenter));
-	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get(), sim->worldGenerationId());
+	createRenderBridge(sim->world(), sim->worldGenerationId());
 
 	// Synchronous terrain bootstrap: authoritative voxels + render binding,
 	// meshing and upload in one step (the bridge drains the world's Loaded
@@ -406,7 +418,10 @@ void Engine::setGraphicsQualityPreset(GraphicsQualityPreset preset)
 	// Apply immediately when the renderer exists (GUI/tool callers); CLI
 	// parsing runs before init, so park it and apply at the top of run().
 	if (worldRenderer)
+	{
 		worldRenderer->postSettings().applyPreset(preset);
+		applyPlayerFxaa();
+	}
 	else
 		m_pendingQualityPreset = preset;
 	// Tag benchmark reports with the quality tier (issue #138): the parked
@@ -573,12 +588,6 @@ bool Engine::reloadWorld(int newSeed)
 
 	vkContext->waitIdle();
 	resourceRetire.flush();
-	// Carry the opt-in chunk lifecycle trace across the reload (issue #179
-	// review round 2): re-apply it to the new bridge BEFORE
-	// generateInitialArea() so bootstrap events are not lost — the UI-side
-	// sync in updateDebugUiState only runs later in the frame.
-	const bool chunkTraceEnabled =
-		renderBridge && renderBridge->chunkEventTraceEnabled();
 	renderBridge.reset();
 	// The simulation owns the authoritative transition (issue #208). The
 	// persistent world was already closed through the bridge above (or none
@@ -588,9 +597,7 @@ bool Engine::reloadWorld(int newSeed)
 	// stays authoritative and the fresh bridge is deliberately re-projected
 	// onto it so the aborted reload leaves a renderable session.
 	const bool reloaded = sim->reload(newSeed);
-	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get(), sim->worldGenerationId());
-	renderBridge->setChunkEventTraceEnabled(chunkTraceEnabled);
+	createRenderBridge(sim->world(), sim->worldGenerationId());
 	if (!reloaded)
 		return false;
 
@@ -725,8 +732,8 @@ bool Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	worldRenderer->onSwapchainRecreate(*swapchain);
 	if (m_playerUi)
 		m_playerUi->renderer().setOutput(swapchain->getImageFormat(), swapchain->getColorSpace());
-	if (imgui && imgui->onSwapchainRecreate(*swapchain) && gameUi)
-		gameUi->onImGuiVulkanBackendRecreate();
+	if (imgui && imgui->onSwapchainRecreate(*swapchain) && developerUi)
+		developerUi->onImGuiVulkanBackendRecreate();
 
 	windowWidth = static_cast<int>(swapchain->getExtent().width);
 	windowHeight = static_cast<int>(swapchain->getExtent().height);
@@ -943,14 +950,6 @@ void Engine::updateHighlight()
 
 void Engine::handleEvents()
 {
-	// Shortcut-routing frame built ONCE per event batch (review §4.8): the
-	// ~45-field GameUIFrame with its std::function callbacks used to be
-	// reconstructed for every single key event.
-	GameUIFrame shortcutFrame{};
-	shortcutFrame.render = &renderSettings;
-	shortcutFrame.paused = sim ? &paused : nullptr;
-	shortcutFrame.setVSync = [this](bool v) { setVSync(v); };
-
 	SDL_Event event;
 	syncUiInput();
 	while (SDL_PollEvent(&event))
@@ -1051,12 +1050,22 @@ void Engine::handleEvents()
 			// toggle overlays.
 			if (keyRoute == KeyRoute::GlobalShortcut)
 			{
-				// An explicit tool shortcut also brings back the workspace
-				// when the game was launched without the developer shell.
-				if (key != SDLK_F6 && key != SDLK_F10 && !m_benchmark.isActive())
-					setDeveloperWorkspaceVisible(true);
-				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), shortcutFrame))
-					break;
+				if (!m_benchmark.isActive())
+				{
+					if (key == SDLK_F6)
+						m_showHudHints = !m_showHudHints;
+					else if (key == SDLK_F10)
+					{
+						if (!m_pendingVSync)
+							setVSync(!renderSettings.vsyncEnabled);
+					}
+					else if (developerUi)
+					{
+						developerUi->handlePanelShortcut(key, !m_showDeveloperUi);
+						setDeveloperWorkspaceVisible(true);
+					}
+				}
+				break;
 			}
 
 			if (key == SDLK_ESCAPE)
@@ -1087,20 +1096,18 @@ void Engine::handleEvents()
 				break;
 			}
 
-			if (keyRoute == KeyRoute::GameplayShortcut)
+			if (key == SDLK_P && sim)
 			{
-				if (key == SDLK_P && m_playerUi && !m_remote)
-				{
+				if (m_playerUi)
 					m_playerUi->openPause();
-					break;
-				}
-				if (gameUi->handleGameplayShortcut(static_cast<int>(key), shortcutFrame))
-					break;
-
-				// Engine-owned gameplay keys (C/B/T/1-9/Q/E) fall through here:
-				// classified by the policy, executed by Engine because their
-				// host state (mouseCaptured, overlays, camera) lives here;
-				// the gameplay keys issue simulation commands (issue #227).
+				else
+					paused = !paused;
+				break;
+			}
+			if (key == SDLK_H && developerUiAvailable())
+			{
+				developerUi->toggleLayoutTiles();
+				break;
 			}
 
 			if (key == SDLK_C)
@@ -1389,7 +1396,7 @@ void Engine::tickBenchmark(double dt)
 	{
 		const BenchmarkConfig &cfg = m_benchmark.config();
 		if (cfg.biomeMapZoom > 0.0f)
-			gameUi->configureBenchmarkMap(cfg.biomeMapZoom);
+			developerUi->configureBenchmarkMap(cfg.biomeMapZoom);
 		if (cfg.forceVsyncOff && renderSettings.vsyncEnabled)
 		{
 			m_benchmark.markForceVsync(true);
@@ -1630,24 +1637,17 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	// Keep the dock tree alive while the workspace is hidden.
-	if (!gameUi || !developerUiPresent())
+	if (!developerUiAvailable())
 		return;
 
-	if (!m_showDeveloperUi)
-	{
-		gameUi->maintainDockspace();
-		applyOverlayToggles();
-		return;
-	}
-
+	bool hideWorkspace = false;
 	const bool prevCapture = mouseCaptured;
 	bool presentedCapture = mouseCaptured;
 	bool presentedPause = paused || nativePause();
 	const bool prevPause = presentedPause;
 
-	GameUIFrame f{};
-	f.camera = viewWorld() ? &camera : nullptr;
+	DeveloperUiFrame f{};
+	f.hasWorld = viewWorld() != nullptr;
 	// Read-only player snapshot for the UI (issue #184): biome/chunk resolved
 	// here via the canonical queries so panels never touch the generator or
 	// the simulation's player controller directly. The kinematic/diagnostic
@@ -1667,7 +1667,7 @@ void Engine::drawUi()
 	// when the voxel column or the world generation changed (the player can
 	// spend many frames inside one column).
 	f.player.biome = -1;
-	if (m_showDeveloperUi && sim && sim->terrainGenerator() && gameUi->needsPlayerBiome())
+	if (sim && sim->terrainGenerator() && developerUi->needsPlayerBiome())
 	{
 		const glm::ivec2 column =
 			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
@@ -1710,14 +1710,14 @@ void Engine::drawUi()
 			camera.setMode(mode);
 		};
 	}
-	if (f.camera)
-		f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
 	if (sim)
 	{
 		f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
 		f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	}
-	f.chunks = renderBridge.get();
+		f.chunks = renderBridge.get();
+	f.chunkTraceEnabled = m_chunkTraceEnabled;
+	f.setChunkTraceEnabled = [this](bool enabled) { setChunkTraceEnabled(enabled); };
 	f.pool = renderBridge ? renderBridge->getChunkPool() : nullptr;
 	f.generator = sim ? sim->terrainGenerator() : nullptr;
 	f.worldRenderer = worldRenderer.get();
@@ -1730,7 +1730,7 @@ void Engine::drawUi()
 	f.timing = &renderTiming;
 	f.staging = &stagingRing;
 	// Commands-only sim surface (review M6).
-	if (f.camera)
+	if (f.hasWorld)
 	{
 		f.highlight = &highlight;
 		f.mouseCaptured = &presentedCapture;
@@ -1738,9 +1738,17 @@ void Engine::drawUi()
 	}
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
-	populateJoinUi(f);
+	f.hostedServer = &m_hostSnapshot;
+	f.remote = remoteSessionView();
 	if (m_remote)
-		populateRemoteUi(f);
+	{
+		if (const auto *player = m_remote->localPlayer())
+		{
+			f.player.grounded = (player->flags & net::wire::PlayerState::grounded) != 0;
+			f.player.waitingForTerrain = (player->flags & net::wire::PlayerState::waitingForTerrain) != 0;
+			f.player.speed = glm::length(glm::vec3(player->velocity[0], player->velocity[1], player->velocity[2]));
+		}
+	}
 	else if (sim)
 	{
 		f.selectedTexture = &sim->selectedBlock();
@@ -1804,7 +1812,8 @@ void Engine::drawUi()
 		f.vkApiVersion = vkContext->getDeviceProperties().apiVersion;
 		f.validation = vkContext->isValidationEnabled();
 	}
-	f.setVSync = [this](bool v) { setVSync(v); };
+	f.hudHints = &m_showHudHints;
+	f.applyGraphicsQuality = [this](GraphicsQualityPreset preset) { setGraphicsQualityPreset(preset); };
 	// Graphics ▸ Display "(applying)" marker (issue #185): true until the
 	// deferred swapchain recreate consumed the pending toggle.
 	f.vsyncPending = m_pendingVSync.has_value();
@@ -1815,10 +1824,10 @@ void Engine::drawUi()
 	}
 	f.requestExit = [this]() { requestExit(); };
 	// Runtime workspace visibility (issue #303 F04): the same action the
-	// Ctrl+Shift+D shortcut performs, reachable from the Developer menu.
-	f.toggleDeveloperWorkspace = [this]() { setDeveloperWorkspaceVisible(!m_showDeveloperUi); };
+	// F1 performs, reachable from the Developer menu.
+	f.toggleDeveloperWorkspace = [&hideWorkspace]() { hideWorkspace = true; };
 	f.resourcePackRoot = &m_resourcePackRoot;
-	f.applyResourcePack = [this](const std::string &path) -> GameUIFrame::ResourcePackUiResult {
+	f.applyResourcePack = [this](const std::string &path) -> DeveloperUiFrame::ResourcePackUiResult {
 		const ResourcePackApplyResult r = applyResourcePack(path);
 		return {r.atlasOk, r.isError, r.isWarning, r.message};
 	};
@@ -1841,7 +1850,7 @@ void Engine::drawUi()
 		};
 	}
 
-	gameUi->draw(f);
+	developerUi->draw(f);
 
 	if (presentedPause != prevPause)
 	{
@@ -1860,7 +1869,8 @@ void Engine::drawUi()
 	}
 	if (presentedCapture != prevCapture)
 		setMouseCaptured(presentedCapture);
-	applyOverlayToggles();
+	if (hideWorkspace)
+		setDeveloperWorkspaceVisible(false);
 }
 
 void Engine::applyOverlayToggles()
@@ -1958,7 +1968,7 @@ gameui::HudView Engine::playerHudView() const
 	using gameui::style::Status;
 	gameui::HudView view;
 	view.captured = mouseCaptured && windowFocused && !m_captureFailed;
-	view.hints = gameUi ? gameUi->showOverlayHints() : true;
+	view.hints = m_showHudHints;
 	if (switchingSession())
 	{
 		view.status = "Switching worlds";
@@ -2062,9 +2072,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 				cancelGameUiPointer();
 		}
 		gameui::Clip view{};
-		if (gameUi && m_showDeveloperUi && developerOverlay)
+		if (developerOverlay)
 		{
-			const auto area = gameUi->shell().gameViewRect();
+			const auto area = developerUi->shell().gameViewRect();
 			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
 			const float x = area.pos.x - origin.x, y = area.pos.y - origin.y;
 			view = {{x, y, x + area.size.x, y + area.size.y}};
@@ -2072,7 +2082,7 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 		std::optional<gameui::HudView> hud;
 		if (!m_uiSpike && m_playerUi->hudVisible() && !paused &&
 			m_playerUi->screens().top() == gameui::Screen::Hud &&
-			!(developerOverlay && (imgui->hasOpenPopup() || gameUi->isFileDialogOpen())))
+			!(developerOverlay && (imgui->hasOpenPopup() || developerUi->isFileDialogOpen())))
 			hud = playerHudView();
 		if (inventoryPanelOpen())
 		{
@@ -2123,10 +2133,10 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 		// next frame's UI build. Mesh uploads stay in preRecord —
 		// nothing in ImGui samples them in the same frame.
 		[&](VkCommandBuffer cmd) {
-			if (gameUi && gameUi->hasPendingBiomeMapUpload())
+			if (developerUi && developerUi->hasPendingBiomeMapUpload())
 			{
 				PROFILE_SCOPE("BiomeMapUpload");
-				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
+				developerUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 			}
 		}, &frameCtx->gpuProfiler(), gpuTag.value_or(m_benchmark.gpuCaptureTag()),
 		buildPlayerUi ? &m_playerUi->renderer() : nullptr);
@@ -2191,7 +2201,7 @@ void Engine::run()
 	running = true;
 	if (m_pendingQualityPreset)
 	{
-		worldRenderer->postSettings().applyPreset(*m_pendingQualityPreset);
+		setGraphicsQualityPreset(*m_pendingQualityPreset);
 		m_pendingQualityPreset.reset();
 	}
 	if (m_perfFrequency == 0)
@@ -2219,10 +2229,10 @@ void Engine::run()
 	// First run on this machine (no imgui.ini yet): start with the default
 	// developer layout instead of an empty workspace. Benchmark runs keep the
 	// stock UI closed so open panels cannot perturb scores (issue #183).
-	if (imgui && gameUi && !imgui->hadExistingIni() && !m_exitAfterBenchmark && !m_uiSpike)
+	if (imgui && developerUi && !imgui->hadExistingIni() && !m_exitAfterBenchmark && !m_uiSpike)
 	{
-		gameUi->shell().queueDefaultLayout();
-		gameUi->enableDefaultDeveloperPanels();
+		developerUi->shell().queueDefaultLayout();
+		developerUi->enableDefaultDeveloperPanels();
 	}
 
 	while (running)
@@ -2362,7 +2372,7 @@ void Engine::run()
 		stagingRing.beginFrame(frameIndex);
 
 		// (12) ImGui build from sim/render snapshots (CPU only; draw later).
-		if (imgui && !m_uiSpike)
+		if (developerUiAvailable())
 		{
 			PROFILE_SCOPE("DevUIBuild");
 			imgui->beginFrame();
@@ -2370,6 +2380,8 @@ void Engine::run()
 			imgui->endFrame();
 			syncUiInput();
 		}
+
+		applyOverlayToggles();
 
 		// (13) Presentation uniforms (underwater sample + frame UBO).
 		const auto renderExtent = swapchain->getExtent();
@@ -2391,6 +2403,7 @@ void Engine::run()
 				requestSwapchainRecreate();
 			else
 			{
+				noteUiFramePresented();
 				notePlayerDisplayFramePresented();
 				noteSessionFramePresented();
 			}

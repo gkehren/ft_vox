@@ -38,7 +38,7 @@ and automated visual-regression testing.
 ### Engine
 - Player controller on a shared voxel collision solver
 - Passive wildlife (cow, pig, sheep, chicken) with ambient wander AI
-- ImGui tooling: graphics, streaming, world map and chunk inspector panels
+- Optional Developer UI with graphics, streaming, world map and chunk inspector panels (F1 or `--dev-ui`)
 - CPU workload telemetry and GPU frame profiling
 - Automated offscreen visual-regression tests
 

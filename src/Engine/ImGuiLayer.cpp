@@ -294,6 +294,17 @@ void ImGuiLayer::cancelInput()
 	ImGui::ClearDragDrop();
 }
 
+void ImGuiLayer::suspendPresentation()
+{
+	if (!m_initialized)
+		return;
+	if (!ImGui::GetCurrentContext()->OpenPopupStack.empty())
+		ImGui::ClosePopupToLevel(0, false);
+	ImGui::FocusWindow(nullptr);
+	ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+	ImGui_ImplSDL3_SuspendPresentation();
+}
+
 void ImGuiLayer::stopTextInput()
 {
 	auto &context = *ImGui::GetCurrentContext();

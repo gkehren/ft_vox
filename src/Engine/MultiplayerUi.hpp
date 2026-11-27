@@ -107,6 +107,14 @@ struct NetworkStats
 	}
 };
 
+struct RemoteSessionView
+{
+	std::optional<MultiplayerStatus> multiplayerStatus;
+	std::string_view multiplayerEndpoint;
+	std::string_view multiplayerProfile;
+	NetworkStats networkStats;
+};
+
 inline bool hasLiveNetworkStats(MultiplayerState state)
 {
 	using enum MultiplayerState;

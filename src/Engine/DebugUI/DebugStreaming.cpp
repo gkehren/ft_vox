@@ -10,7 +10,7 @@
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/UiTheme.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 
 #include <imgui/imgui.h>
@@ -58,7 +58,7 @@ void warningRow(const char *label, const char *hint)
 }
 } // namespace
 
-void drawStreaming(UiState &s, GameUIFrame &frame)
+void drawStreaming(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.streaming)
 		return;
@@ -185,9 +185,9 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 		  s.health.lightBacklog.active() || s.health.uploadBacklog.active()))
 		ImGui::TextColored(ui::statusColor(ui::StatusKind::Ok), "Streaming nominal");
 
-	if (frame.camera && ImGui::Button("Inspect chunk under player (F9)"))
+	if (frame.hasWorld && ImGui::Button("Inspect chunk under player (F9)"))
 	{
-		const glm::vec3 p = frame.camera->getPosition();
+		const glm::vec3 p = frame.player.position;
 		s.inspectCoord = glm::ivec3(int(std::floor(p.x / CHUNK_SIZE)), 0,
 									int(std::floor(p.z / CHUNK_SIZE)));
 		s.inspectHasTarget = true;

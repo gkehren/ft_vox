@@ -6,7 +6,7 @@
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
 
-struct GameUIFrame;
+struct DeveloperUiFrame;
 
 namespace graphics
 {
@@ -25,16 +25,16 @@ enum class Category : int
 constexpr int kCategoryCount = 8;
 
 const char *categoryName(Category c);
-void drawCategory(Category c, debugui::UiState &s, GameUIFrame &frame);
+void drawCategory(Category c, debugui::UiState &s, DeveloperUiFrame &frame);
 
 // Per-category implementations (GraphicsCategories.cpp):
-void drawGeneral(debugui::UiState &s, GameUIFrame &frame);
-void drawDisplay(debugui::UiState &s, GameUIFrame &frame);
-void drawLighting(debugui::UiState &s, GameUIFrame &frame);
-void drawAtmosphere(debugui::UiState &s, GameUIFrame &frame);
-void drawShadows(debugui::UiState &s, GameUIFrame &frame);
-void drawWater(debugui::UiState &s, GameUIFrame &frame);
-void drawPost(debugui::UiState &s, GameUIFrame &frame);
-void drawResources(debugui::UiState &s, GameUIFrame &frame);
+void drawGeneral(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawDisplay(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawLighting(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawAtmosphere(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawShadows(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawWater(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawPost(debugui::UiState &s, DeveloperUiFrame &frame);
+void drawResources(debugui::UiState &s, DeveloperUiFrame &frame);
 
 } // namespace graphics

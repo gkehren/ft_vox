@@ -192,7 +192,7 @@ public:
 	/// stamp makes the pairing explicit for tests and diagnostics.
 	/// Standalone worlds/tests may leave it 0.
 	RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool,
-					  uint64_t worldGenerationId = 0);
+					  uint64_t worldGenerationId = 0, bool traceChunkEvents = false);
 	~RenderWorldBridge();
 
 	RenderWorldBridge(const RenderWorldBridge &) = delete;

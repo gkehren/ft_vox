@@ -13,7 +13,7 @@
 #include <Camera/Camera.hpp>
 #include <Core/ThreadPool.hpp>
 #include <World/WorldPersistence.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <World/WorldSave.hpp>
 
 #include <algorithm>

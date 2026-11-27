@@ -706,12 +706,27 @@ static void ImGui_ImplSDL3_UpdateMouseData()
     }
 }
 
+// ft_vox keeps the backend alive while the developer workspace is hidden.
+void ImGui_ImplSDL3_SuspendPresentation()
+{
+    ImGui_ImplSDL3_Data* bd = ImGui_ImplSDL3_GetBackendData();
+    bd->Time = 0;
+    bd->MouseLastCursor = nullptr;
+    if (SDL_Cursor* cursor = SDL_GetDefaultCursor())
+        SDL_SetCursor(cursor);
+    if (!SDL_GetWindowRelativeMouseMode(bd->Window))
+        SDL_ShowCursor();
+}
+
 static void ImGui_ImplSDL3_UpdateMouseCursor()
 {
     ImGuiIO& io = ImGui::GetIO();
     if (io.ConfigFlags & ImGuiConfigFlags_NoMouseCursorChange)
         return;
     ImGui_ImplSDL3_Data* bd = ImGui_ImplSDL3_GetBackendData();
+
+    if (SDL_GetWindowRelativeMouseMode(bd->Window))
+        return;
 
     ImGuiMouseCursor imgui_cursor = ImGui::GetMouseCursor();
     if (io.MouseDrawCursor || imgui_cursor == ImGuiMouseCursor_None)
@@ -897,7 +912,9 @@ void ImGui_ImplSDL3_NewFrame()
     Uint64 current_time = SDL_GetPerformanceCounter();
     if (current_time <= bd->Time)
         current_time = bd->Time + 1;
-    io.DeltaTime = bd->Time > 0 ? (float)((double)(current_time - bd->Time) / frequency) : (float)(1.0f / 60.0f);
+    const double elapsed = double(current_time - bd->Time) / frequency;
+    // A stalled or minimized window can also skip presentation without a visibility toggle.
+    io.DeltaTime = bd->Time > 0 && elapsed <= 0.5 ? (float)elapsed : (1.0f / 60.0f);
     bd->Time = current_time;
 
     if (bd->MousePendingLeaveFrame && bd->MousePendingLeaveFrame >= ImGui::GetFrameCount() && bd->MouseButtonsDown == 0)

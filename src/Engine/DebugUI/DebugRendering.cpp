@@ -13,7 +13,7 @@
 #include <Engine/DebugUI/GraphicsUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/GpuProfile.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
 
@@ -25,7 +25,7 @@
 namespace debugui
 {
 
-void drawRendering(UiState &s, GameUIFrame &frame)
+void drawRendering(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.rendering)
 		return;
@@ -67,7 +67,7 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 	ImGui::End();
 }
 
-void drawRenderDebug(UiState &s, GameUIFrame &frame)
+void drawRenderDebug(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.renderDebug)
 		return;
@@ -151,7 +151,7 @@ void drawRenderDebug(UiState &s, GameUIFrame &frame)
 	// qualityPreset still drives runtime tiers (water SSR budget, caustics)
 	// even after the post knobs drift — so a Custom state names the BASE
 	// pack instead of claiming the values are the pack's (issue #185).
-	const bool presetCustom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
+	const bool presetCustom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset, /*compareFxaa=*/false);
 	ImGui::Text("%s: %s   |   shadow map %u (active %u)",
 				presetCustom ? "Base quality pack" : "Quality",
 				presetNames[int(pp.qualityPreset)], uint32_t(pp.shadowMapSize),

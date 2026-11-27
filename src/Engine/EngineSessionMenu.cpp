@@ -159,8 +159,8 @@ void Engine::queuePlayerSession(gameui::SessionRequest request)
 	default: return;
 	}
 	cancelDeveloperInput();
-	if (gameUi)
-		gameUi->cancelDeveloperDialogs();
+	if (developerUi)
+		developerUi->cancelDeveloperDialogs();
 	setInventoryOpen(false);
 	if (action == Quit || action == Leave)
 		m_hostAutoProfile.reset();
@@ -304,8 +304,7 @@ void Engine::pumpPlayerSession()
 			}
 			else
 			{
-				renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-					chunkPool.get(), sim->worldGenerationId());
+				createRenderBridge(sim->world(), sim->worldGenerationId());
 				renderBridge->meshResidentArea(camera.getPosition(), sim::GameSimulation::kBootstrapRadiusChunks,
 					vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 			}

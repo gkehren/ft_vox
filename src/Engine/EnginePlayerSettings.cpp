@@ -54,12 +54,11 @@ void Engine::loadPlayerUiPreferences()
 	}
 	if (m_playerUi)
 		m_playerUi->setScalePolicy(m_playerUiSettings.scale);
+	applyPlayerFxaa();
 	if (!hasCurrentRecord)
 		return;
 
 	applyPlayerMouseSensitivity(m_playerUiSettings.sensitivity);
-	if (!m_playerFxaaOverride)
-		worldRenderer->postSettings().fxaaEnabled = m_playerUiSettings.fxaa;
 	auto vsync = m_pendingVSync;
 	if (!vsync && !m_playerVSyncOverride)
 		vsync = m_playerUiSettings.vsync;
@@ -106,6 +105,20 @@ void Engine::persistPlayerUiPreferences()
 	m_playerUiError = saved ? "" : "Could not save player settings. Changes apply for this run.";
 	if (!saved)
 		std::cerr << "[ui] " << m_playerUiError << '\n';
+}
+
+void Engine::setPlayerSettingsOverrides(bool vsync, std::optional<GraphicsQualityPreset> quality)
+{
+	m_playerVSyncOverride = vsync;
+	m_playerFxaaOverride = quality
+		? std::optional{PostProcessSettings::presetValues(*quality).fxaaEnabled} : std::nullopt;
+	applyPlayerFxaa();
+}
+
+void Engine::applyPlayerFxaa()
+{
+	if (worldRenderer)
+		worldRenderer->postSettings().fxaaEnabled = m_playerFxaaOverride.value_or(m_playerUiSettings.fxaa);
 }
 
 void Engine::applyPlayerMouseSensitivity(int percent)
@@ -206,7 +219,8 @@ void Engine::resetPlayerSettingsDefaults(bool resetWindow)
 	m_playerUiSettings.sensitivity = defaults.sensitivity;
 	applyPlayerMouseSensitivity(defaults.sensitivity);
 	if (!m_playerFxaaOverride)
-		worldRenderer->postSettings().fxaaEnabled = m_playerUiSettings.fxaa = defaults.fxaa;
+		m_playerUiSettings.fxaa = defaults.fxaa;
+	applyPlayerFxaa();
 	if (!m_playerVSyncOverride && swapchain->isVSync() == defaults.vsync)
 		m_playerUiSettings.vsync = defaults.vsync;
 	if (m_playerVSyncOverride || m_playerFxaaOverride)
@@ -276,7 +290,8 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 	{
 		if (!m_playerFxaaOverride)
 		{
-			worldRenderer->postSettings().fxaaEnabled = m_playerUiSettings.fxaa = fxaa->enabled;
+			m_playerUiSettings.fxaa = fxaa->enabled;
+			applyPlayerFxaa();
 			persistPlayerUiPreferences();
 		}
 	}
@@ -449,7 +464,7 @@ void Engine::publishPlayerSettingsView()
 	view.pendingVSync = m_pendingVSync;
 	view.vsyncOverridden = m_playerVSyncOverride;
 	view.fxaa = worldRenderer->postSettings().fxaaEnabled;
-	view.fxaaOverridden = m_playerFxaaOverride;
+	view.fxaaOverridden = m_playerFxaaOverride.has_value();
 	view.sensitivity = static_cast<int>(std::lround(camera.getMouseSensitivity() * 100.f / kDefaultCameraSensitivity));
 	view.invertY = m_playerUiSettings.invertY;
 	view.saveFailed = m_playerUiDirty;

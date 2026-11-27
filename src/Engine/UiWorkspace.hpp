@@ -1,23 +1,6 @@
 #pragma once
 
-// Developer workspace visibility policy (issue #303 F01/F04).
-//
-// The developer workspace is the ImGui chrome plus every docked developer/game
-// panel. Gameplay (scene, native HUD and inventory) lives outside it, so the
-// workspace can be shown and hidden at runtime without restarting the
-// application or losing the persisted layout.
-//
-// Two separate questions, deliberately kept apart:
-//   * Is the workspace visible?  -> `Workspace`
-//   * May ImGui own input?       -> `developerUiAvailable`
-// The dockspace is submitted in BOTH states; hiding it only switches the
-// ImGuiDockNodeFlags_KeepAliveOnly maintenance path, which keeps the dock node
-// tree (and therefore imgui.ini) alive without rendering or input.
-//
-// Pure and header-only (no ImGui, no SDL): the visibility transitions and the
-// input-ownership rule are unit-tested by tests/test_ui_shell and
-// tests/test_game_ui_interaction, matching the UiScale.hpp / LayoutTiles.hpp
-// policy-header pattern.
+// Visibility and input policy shared by Engine and the UI tests.
 
 namespace ui
 {
@@ -37,26 +20,10 @@ inline constexpr bool visible(Workspace workspace)
 	return workspace == Workspace::Visible;
 }
 
-/// The dockspace is never removed, only submitted in maintenance mode: same
-/// dockspace id, same split tree, no rendering and no pointer input.
-inline constexpr bool keepDockSpaceAliveOnly(Workspace workspace)
+/// Hidden and suppressed workspaces skip both frame submission and input.
+inline constexpr bool developerUiAvailable(bool imguiReady, bool nativeScreenSuppressed, Workspace workspace)
 {
-	return workspace == Workspace::Hidden;
-}
-
-/// ImGui may build a frame. Native player screens, the inspection view, the
-/// --ui-spike proof and an active benchmark remove the developer layer
-/// entirely; hiding the workspace does not.
-inline constexpr bool developerUiPresent(bool imguiReady, bool nativeScreenSuppressed)
-{
-	return imguiReady && !nativeScreenSuppressed;
-}
-
-/// Only the visible workspace owns developer pointer and keyboard input.
-inline constexpr bool developerUiAvailable(bool imguiReady, bool nativeScreenSuppressed,
-										   Workspace workspace)
-{
-	return developerUiPresent(imguiReady, nativeScreenSuppressed) && visible(workspace);
+	return imguiReady && !nativeScreenSuppressed && visible(workspace);
 }
 
 /// Hiding the workspace must end every developer interaction it owned: focused

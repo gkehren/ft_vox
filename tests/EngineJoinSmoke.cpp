@@ -1,3 +1,4 @@
+#include <Engine/EngineMultiplayerActions.hpp>
 #include <Engine/EngineMultiplayer.hpp>
 #include <Engine/GameUiSample.hpp>
 #include <Hosting/RoleCredentials.hpp>
@@ -59,13 +60,11 @@ struct EngineJoinProbe
 	explicit EngineJoinProbe(Engine &engine) : engine(engine) {}
 	Engine &engine;
 
-	GameUIFrame frame()
+	struct SessionProbe : MultiplayerActions, ui::RemoteSessionView {};
+
+	SessionProbe frame()
 	{
-		GameUIFrame state;
-		engine.populateJoinUi(state);
-		if (engine.m_remote)
-			engine.populateRemoteUi(state);
-		return state;
+		return {engine.multiplayerActions(), engine.remoteSessionView()};
 	}
 
 	void pump()
@@ -278,9 +277,13 @@ struct EngineJoinProbe
 		engine.resourceRetire.beginFrame(engine.frameNumber);
 		engine.worldRenderer->arenas().beginFrame(engine.frameNumber);
 		engine.stagingRing.beginFrame(frameIndex);
-		engine.imgui->beginFrame();
-		engine.drawUi();
-		engine.imgui->endFrame();
+		if (engine.developerUiAvailable())
+		{
+			engine.imgui->beginFrame();
+			engine.drawUi();
+			engine.imgui->endFrame();
+		}
+		engine.applyOverlayToggles();
 		const auto seconds = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
 		engine.updateFrameUniforms(frameIndex, width, height, seconds);
 		engine.recordFrame(frameIndex, image, engine.uploadBudgetThisFrame);
@@ -289,6 +292,7 @@ struct EngineJoinProbe
 			engine.requestSwapchainRecreate();
 			return false;
 		}
+		engine.noteUiFramePresented();
 		++engine.frameNumber;
 		return true;
 	}
@@ -1174,7 +1178,6 @@ struct EngineJoinProbe
 		engine.initializeNoiseGenerator(host ? 13 : 19);
 		engine.enableGameUi(false, false);
 		auto *const solo = engine.sim.get();
-		engine.gameUi->showHostPanel();
 		if (!restoring)
 			frame().createJoinProfile(profile);
 
@@ -1510,7 +1513,7 @@ struct EngineJoinProbe
 				"owner did not publish the grant", std::chrono::seconds(600));
 			const auto ui = frame();
 			const auto error = ui.administerHostedServer(1, Operation::Stop, {}, "");
-			CHECK(ui.hostedServer && !ui.hostedServer->active() && !ui.hostedServer->administration && !error.empty(),
+			CHECK(!engine.m_hostSnapshot.active() && !engine.m_hostSnapshot.administration && !error.empty(),
 				"forging a graphical callback cannot give a remote delegate local stop access");
 			publish(round / "guest-verified.txt", "no local controls");
 		}
@@ -1664,9 +1667,13 @@ struct EngineJoinProbe
 		frame().createJoinProfile("bob");
 		frame().connectServer({"localhost:1", "alice", ""});
 		pump();
-		CHECK(engine.sim.get() == solo && !frame().joinError.empty(), "invalid join leaves solo running");
+		CHECK(engine.sim.get() == solo && !engine.m_joinError.empty(), "invalid join leaves solo running");
 
+		engine.setChunkTraceEnabled(true);
 		join(first, "alice", "42");
+		CHECK(engine.renderBridge && engine.renderBridge->chunkEventTraceEnabled() &&
+			!engine.renderBridge->chunkDebugEvents().empty(),
+			"remote projection traces chunk arrivals while the Developer UI is hidden");
 		engine.tickDayCycle(1.0);
 		const auto aliceId = engine.m_remote->welcome->player;
 		const auto firstScope = engine.m_remote->scope;
@@ -1714,15 +1721,8 @@ struct EngineJoinProbe
 		pump();
 		checkRetiredProjection();
 		until([&] { return static_cast<bool>(frame().joinServer); }, "Disconnect did not complete");
-		// Recovery through the real input path (issue #303 F03/F12). The blocked row
-		// the player just read asks for the workspace chord and the mouse release;
-		// both arrive here as SDL events and must reach their owner while the
-		// session is blocked. The reconnect itself then invokes the same
-		// GameUIFrame::joinServer callback the Developer > Multiplayer menu item
-		// calls (UiShell::drawMainMenuBar), because driving the ImGui menu bar by
-		// synthetic pointer positions is not reproducible here. What the input path
-		// owns — the chord, the cursor release and the state the row describes — is
-		// therefore validated end to end, and the callback is the documented seam.
+		// Exercise F1 in a disconnected session, then reconnect through the
+		// same native request used by the Game Menu.
 		focus();
 		engine.setDeveloperWorkspaceVisible(false);
 		engine.setInventoryOpen(false);
@@ -1742,23 +1742,45 @@ struct EngineJoinProbe
 		tap(SDLK_Q);
 		CHECK(!engine.m_remote->actionPending, "disconnected inventory submits no action");
 		tap(SDLK_E);
-		tap(SDLK_D, SDL_KMOD_CTRL | SDL_KMOD_SHIFT);
+		tap(SDLK_F1);
 		CHECK(engine.developerWorkspaceVisible(),
-			"Ctrl+Shift+D reaches the workspace while the session is blocked");
+			"F1 reaches the workspace while the session is blocked");
 		tap(SDLK_C);
 		CHECK(!engine.mouseCaptured, "C releases the captured mouse while the session is blocked");
 		const auto reachableHud = engine.playerHudView();
 		CHECK(reachableHud.recovery == gameui::recoveryInstruction(),
 			"the recovery line follows the state the player just reached");
-		CHECK(static_cast<bool>(frame().joinServer),
-			"the Multiplayer Reconnect action is reachable after the recovery steps");
-		frame().joinServer();
+		tap(SDLK_F1);
+		CHECK(!engine.developerWorkspaceVisible(), "recovery can continue with Developer UI hidden");
+		auto &playerUi = *engine.m_playerUi;
+		playerUi.openPause();
+		playerUi.openScreen(gameui::Screen::Multiplayer);
+		gameui::MultiplayerRequest reconnect;
+		reconnect.action = gameui::MultiplayerAction::Reconnect;
+		reconnect.sessionEpoch = engine.m_playerMultiplayerEpoch;
+		playerUi.m_multiplayerRequest = std::move(reconnect);
+		engine.pumpPlayerMultiplayer();
+		playerUi.closePause();
 		pump();
 		until([&] { return engine.m_remote->ready(); }, "Reconnect did not restore the session");
 		CHECK(engine.m_remote->welcome->player == aliceId && engine.selectedHotbarSlot() == 4 &&
 			confirmedSlots() == aliceInventory,
 			"recovery restores the same actor, selected slot and authoritative inventory");
 		const auto reconnectedHud = engine.playerHudView();
+		const auto connectedInventory = confirmedSlots();
+		const bool capturedAfterReconnect = engine.mouseCaptured;
+		tap(SDLK_F1);
+		CHECK(engine.developerWorkspaceVisible() && engine.developerUiAvailable() && engine.m_remote->ready() &&
+			engine.mouseCaptured == capturedAfterReconnect && confirmedSlots() == connectedInventory,
+			"F1 opens Developer UI during ready remote play without changing cursor or inventory");
+		tap(SDLK_ESCAPE);
+		CHECK(engine.m_playerUi->screens().top() == gameui::Screen::Pause && !engine.nativePause() &&
+			engine.m_remote->ready(), "connected Pause opens a local menu without pausing the server");
+		tap(SDLK_F1);
+		tap(SDLK_ESCAPE);
+		CHECK(!engine.developerWorkspaceVisible() && engine.m_remote->ready() &&
+			engine.mouseCaptured == capturedAfterReconnect && confirmedSlots() == connectedInventory,
+			"hide Developer UI from connected Pause and resume with the same session");
 		CHECK(reconnectedHud.hotbar.available && reconnectedHud.recovery.empty() &&
 			reconnectedHud.status.empty(),
 			"a reconnected session drops the recovery line and republishes the inventory");
@@ -1781,6 +1803,9 @@ struct EngineJoinProbe
 		    "return restores paused solo position, inventory, time and visible terrain");
 		CHECK(engine.renderBridge && engine.renderBridge->chunkCount() > 0 &&
 			engine.renderBridge->pendingGenJobs() == 0, "solo projection rebinds after workers drain");
+		CHECK(engine.renderBridge->chunkEventTraceEnabled() &&
+			!engine.renderBridge->chunkDebugEvents().empty(),
+			"restoring a suspended solo world keeps tracing and records the initial binds");
 
 		net::udp::Socket silentServer({0x7f000001, 0});
 		frame().connectServer({client::formatEndpoint(silentServer.address()), "bob", ""});

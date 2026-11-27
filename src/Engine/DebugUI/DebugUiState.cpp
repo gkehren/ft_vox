@@ -1,8 +1,7 @@
 // Engine-facing snapshot collection for the developer console (issue #179).
 // Everything here is read-only with respect to the engine: chunk counters
 // are atomic or main-thread-only state, telemetry uses the non-destructive
-// sampleLive() path, and the only cross-thread writer touched is
-// RenderWorldBridge's opt-in event-trace enable flag.
+// sampleLive() path.
 
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 
@@ -15,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace debugui
 {
@@ -60,9 +60,6 @@ void DebugHealth::update(const UiState &state, float dt)
 							 growth > 0.05f * thenLive;
 		gpuMemoryGrowth.update(growing, dt);
 	}
-	// 1% low is itself a 240-frame windowed statistic: > 33 ms means the
-	// recent past held sustained slow frames, not a one-frame spike.
-	slowFrames.update(state.frame.onePercentLowMs > 33.f, dt);
 }
 
 // --- CPU scope table (bounded by kMaxScopeStats) ---
@@ -71,15 +68,8 @@ void DebugHealth::update(const UiState &state, float dt)
 // avgMs, peakMs, frames and depth. Runs every frame while the Performance
 // panel is open and capture is enabled; never touches the 10 Hz histories
 // (issue #179 review round 2).
-static void updateScopeFrameStats(UiState &state)
+static void updateScopeFrameStats(UiState &state, const Profiler &prof)
 {
-	Profiler &prof = GetProfiler();
-	// Never aggregate a frozen last-frame buffer: with capture disabled the
-	// previous frame's entries would otherwise be re-folded into the
-	// averages indefinitely (issue #179 review).
-	if (!prof.enabled())
-		return;
-
 	// Aggregate duplicate names within the frame (summed durations), then
 	// fold into running averages. Keyed on the profiler's static name
 	// pointers; a strcmp fallback keeps the table correct across reloads.
@@ -145,15 +135,13 @@ static void updateScopeFrameStats(UiState &state)
 // on — with capture off nothing new is measured, so nothing new is sampled.
 static void sampleScopeHistories(UiState &state)
 {
-	if (!GetProfiler().enabled())
-		return;
 	for (size_t i = 0; i < state.scopeStatCount; ++i)
 		state.scopeStats[i].history.push(state.scopeStats[i].lastMs);
 }
 
 // --- Per-domain heavy snapshots (10 Hz, sampled independently) ---
 
-static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+static void sampleStreamingDomain(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
 	auto &s = state.streaming;
 	if (frame.chunks)
@@ -183,7 +171,7 @@ static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, doub
 		s.poolAcquired = pool.acquiredCount();
 		s.poolRejects = pool.rejectCount();
 		s.poolGrows = pool.growEvents();
-		if (s.poolRejects > state.prevPoolRejects)
+		if (state.prevPoolRejects && s.poolRejects > *state.prevPoolRejects)
 			state.lastPoolRejectIncrease = nowSeconds;
 		state.prevPoolRejects = s.poolRejects;
 	}
@@ -196,7 +184,7 @@ static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, doub
 	state.activeChunks.push(float(s.loadedChunks));
 }
 
-static void sampleMemoryDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+static void sampleMemoryDomain(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
 	auto &m = state.memory;
 	m.sampledAt = nowSeconds;
@@ -248,38 +236,102 @@ static void sampleMemoryDomain(UiState &state, const GameUIFrame &frame, double 
 
 // --- Per-frame state refresh ---
 
-void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeconds)
+static void resetCpuSampling(UiState &state)
 {
+	state.cpuFrameTimes.clear();
+	state.cpuMs.clear();
+	state.frame.cpuFrameMs = state.frame.avgMs = state.frame.onePercentLowMs = 0.f;
+	state.cpuStatsPending = state.scopeHistoryPending = state.cpuHealthHasBaseline = false;
+	state.health.slowFrames.reset();
+	resetScopeStats(state);
+}
+
+void syncDebugCpuCapture(UiState &state, const Profiler &profiler)
+{
+	const auto epoch = profiler.captureEpoch();
+	if (epoch != state.lastProfilerEpoch)
+	{
+		resetCpuSampling(state);
+		state.lastProfilerEpoch = epoch;
+	}
+	state.frame.cpuCaptureEnabled = profiler.enabled();
+	if (!state.frame.cpuCaptureEnabled)
+	{
+		state.lastCpuFrameSerial = profiler.completedFrameSerial();
+		state.cpuStatsPending = state.scopeHistoryPending = state.cpuHealthHasBaseline = false;
+		state.health.slowFrames.reset();
+	}
+}
+
+void observeGpuCapture(UiState &state, std::optional<uint64_t> generation,
+					   const GpuFrameSample *sample, bool recordObservation)
+{
+	if (state.gpuCaptureGeneration != generation)
+	{
+		state.gpuMs.clear();
+		state.lastGpuObservationSerial = 0;
+		state.gpuCaptureGeneration = generation;
+	}
+	constexpr auto framePass = static_cast<size_t>(GpuPass::Frame);
+	state.frame.gpuValid = generation && sample && sample->serial && sample->present[framePass];
+	state.frame.gpuFrameMs = state.frame.gpuValid ? sample->ms[framePass] : 0.f;
+	if (recordObservation && state.frame.gpuValid && sample->serial > state.lastGpuObservationSerial)
+	{
+		state.gpuMs.push(state.frame.gpuFrameMs);
+		state.lastGpuObservationSerial = sample->serial;
+	}
+}
+
+void syncDebugGpuCapture(UiState &state, const VkGpuProfiler *profiler, uint64_t cpuEpoch,
+						 bool recordObservation)
+{
+	if (profiler && profiler->enabled() && profiler->captureEpoch() == cpuEpoch)
+		observeGpuCapture(state, profiler->captureGeneration(), &profiler->latest(), recordObservation);
+	else
+		observeGpuCapture(state, std::nullopt, nullptr, false);
+}
+
+static void restartSampling(UiState &state, const Profiler &prof)
+{
+	resetCpuSampling(state);
+	// Skip the CPU frame completed while the workspace was absent. GPU
+	// results are observations of a global capture, with their own serial.
+	state.lastCpuFrameSerial = prof.completedFrameSerial();
+
+	for (auto *history : {&state.gpuMs, &state.pendingMesh, &state.pendingLoad, &state.pendingGen,
+		&state.pendingLight, &state.uploadBacklog, &state.activeChunks, &state.gpuLiveBytes,
+		&state.retiredBytes, &state.stagingUsed, &state.arenaUtilization})
+		history->clear();
+
+	state.health = {};
+	state.lastTelemetrySample = -1.0;
+	state.prevPoolRejects.reset();
+	state.lastPoolRejectIncrease = state.lastStagingFailureAt = -100.0;
+	state.hasPrevEvents = false;
+	state.eventDelta.fill(0);
+}
+
+static void summarizeVisibleFrames(UiState &state)
+{
+	const auto &ring = state.cpuFrameTimes;
+	state.frame.avgMs = Profiler::rollingAverageMs(ring.storage(), ring.count(), ring.nextWrite());
+	state.frame.onePercentLowMs = Profiler::percentile99Ms(ring.storage(), ring.count(), ring.nextWrite());
+}
+
+void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
+{
+	const Profiler &prof = GetProfiler();
+	if (std::exchange(state.samplingInterrupted, false))
+		restartSampling(state, prof);
+	syncDebugCpuCapture(state, prof);
+	const auto cpuEpoch = prof.captureEpoch();
+	syncDebugGpuCapture(state, frame.gpu, cpuEpoch);
 	// Cheap frame-level snapshot: every frame, main-thread scalar reads.
 	{
-		// Keep the opt-in chunk lifecycle trace alive across world reloads:
-		// the flag lives in UiState and is re-applied every frame, even with
-		// the inspector closed, so a recreated RenderWorldBridge inherits it
-		// (issue #179 review). Idempotent one-bool store.
-		if (frame.chunks)
-			frame.chunks->setChunkEventTraceEnabled(state.eventTraceEnabled);
-
-		Profiler &prof = GetProfiler();
 		state.frame.fps = frame.fps;
-		// CPU frame time comes from the profiler's full-frame scope, not the
-		// paced simulation delta (GameUIFrame::frameMs): vsync pacing and
-		// stall absorption make the two diverge (issue #179 review).
-		state.frame.cpuFrameMs = prof.lastFrameMs();
 		state.frame.simulationDtMs = frame.frameMs;
-		state.frame.avgMs = prof.avgFrameMs();
-		state.frame.onePercentLowMs = prof.onePercentLowMs();
 		state.frame.vsync = frame.render ? frame.render->vsyncEnabled : false;
 		state.frame.presentMode = frame.presentModeName ? frame.presentModeName : "";
-		state.frame.gpuValid = false;
-		if (frame.gpu)
-		{
-			const GpuFrameSample &gpu = frame.gpu->latest();
-			if (gpu.serial && gpu.present[size_t(GpuPass::Frame)])
-			{
-				state.frame.gpuFrameMs = gpu.ms[size_t(GpuPass::Frame)];
-				state.frame.gpuValid = true;
-			}
-		}
 
 		// Player/physics diagnostics (issue #184): plain scalar copies from
 		// the frame's read-only snapshot — cheap enough to refresh every
@@ -309,24 +361,37 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 		}
 	}
 
-	// Profiler capture lifecycle precedes the throttle: the epoch check and
-	// the frame-resolution scope aggregation must see every frame, while
-	// only the histories are sampled at 10 Hz (issue #179 review round 2).
-	{
-		Profiler &prof = GetProfiler();
-		const uint64_t epoch = prof.captureEpoch();
-		if (epoch != state.lastProfilerEpoch)
-		{
-			resetScopeStats(state);
-			state.lastProfilerEpoch = epoch;
-		}
-		if (state.panels.performance)
-			updateScopeFrameStats(state);
-	}
-
 	const bool needStreaming = state.panels.overview || state.panels.streaming;
 	const bool needMemory = state.panels.overview || state.panels.memory;
 	const bool needPerformance = state.panels.performance;
+
+	// The last completed payload can be read multiple times between
+	// publications. Consume it once and let the 10 Hz sampler use only the
+	// latest fresh frame or scope reading since its previous tick.
+	const auto serial = prof.completedFrameSerial();
+	if (prof.enabled() && prof.historyCount() && serial != state.lastCpuFrameSerial)
+	{
+		state.lastCpuFrameSerial = serial;
+		state.frame.cpuFrameMs = prof.lastFrameMs();
+		if (state.panels.overview || needPerformance)
+		{
+			state.cpuFrameTimes.push(state.frame.cpuFrameMs);
+			state.cpuStatsPending = true;
+		}
+		if (needPerformance)
+		{
+			updateScopeFrameStats(state, prof);
+			state.scopeHistoryPending = true;
+		}
+	}
+	if (!needPerformance)
+		state.scopeHistoryPending = false;
+	if (!state.panels.overview)
+	{
+		state.cpuHealthHasBaseline = false;
+		if (!needPerformance)
+			state.cpuStatsPending = false;
+	}
 
 	if (!(needStreaming || needMemory || needPerformance))
 		return;
@@ -342,10 +407,12 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	const float dt = state.lastTelemetrySample < 0.0
 						 ? 0.016f
 						 : float(std::min(nowSeconds - state.lastTelemetrySample, 1.0));
-	state.dtSinceLastSample = dt;
 	state.lastTelemetrySample = nowSeconds;
 
-	if (needPerformance)
+	const bool sampledCpu = std::exchange(state.cpuStatsPending, false);
+	if (sampledCpu)
+		summarizeVisibleFrames(state);
+	if (std::exchange(state.scopeHistoryPending, false))
 		sampleScopeHistories(state);
 
 	if (needStreaming)
@@ -361,19 +428,15 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	// memory-derived monitors freeze instead of advancing on stale data.
 	if (state.panels.overview)
 	{
-		state.cpuMs.push(GetProfiler().lastFrameMs());
-		if (frame.gpu)
-		{
-			const GpuFrameSample &gpu = frame.gpu->latest();
-			state.gpuMs.push(gpu.serial && gpu.present[size_t(GpuPass::Frame)]
-								 ? gpu.ms[size_t(GpuPass::Frame)]
-								 : 0.f);
-		}
-		else
-		{
-			state.gpuMs.push(0.f);
-		}
 		state.health.update(state, dt);
+		if (sampledCpu)
+		{
+			state.cpuMs.push(state.frame.cpuFrameMs);
+			state.health.slowFrames.update(state.frame.onePercentLowMs > 33.f,
+				state.cpuHealthHasBaseline ? dt : 0.f);
+		}
+		state.cpuHealthHasBaseline = sampledCpu;
+		syncDebugGpuCapture(state, frame.gpu, cpuEpoch, true);
 	}
 	else if (state.panels.streaming)
 	{

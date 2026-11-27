@@ -8,14 +8,14 @@
 #include <Engine/UiScale.hpp>
 #include <Engine/UiTheme.hpp>
 #include <Engine/PlayerUi.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 
 #include <imgui/imgui.h>
 
 namespace debugui
 {
 
-void drawPlayerDiagnostics(UiState &s, GameUIFrame &frame)
+void drawPlayerDiagnostics(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.playerDiagnostics)
 		return;

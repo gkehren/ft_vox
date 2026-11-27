@@ -104,6 +104,7 @@ struct InputContext
 	bool devDialog{};
 	bool devText{};
 	bool nativePointer{};
+	bool pointerGeometryPending{};
 	bool transition{};
 	bool captureFailed{};
 
@@ -114,7 +115,7 @@ struct InputContext
 			return InputOwner::Blocked;
 		if (global && !modal)
 			return InputOwner::Global;
-		if (locked)
+		if (locked || (kind == InputKind::Pointer && pointerGeometryPending))
 			return InputOwner::Blocked;
 		if (modal)
 			return InputOwner::PlayerUi;

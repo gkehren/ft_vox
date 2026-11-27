@@ -33,7 +33,7 @@ int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
 int runGameUiShowcaseProof(Engine &engine);
 int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output);
 int runGameUiPerformance(Engine &engine);
-int runPlayerHudProof(Engine &engine);
+int runPlayerHudProof(Engine &engine, const std::filesystem::path &output);
 int runPlayerInventoryProof(Engine &engine);
 int runPlayerSettingsProof(Engine &engine, const std::filesystem::path &output);
 int runPlayerSettingsRestartProof(Engine &engine, const std::filesystem::path &output);
@@ -99,8 +99,8 @@ int main(int argc, char **argv)
 			return runGameUiShowcaseProof(*engine);
 		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-performance")
 			return runGameUiPerformance(*engine);
-		if (argc == 2 && std::string_view(argv[1]) == "--player-hud-proof")
-			return runPlayerHudProof(*engine);
+		if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--player-hud-proof")
+			return runPlayerHudProof(*engine, argc == 3 ? std::filesystem::path{argv[2]} : std::filesystem::path{});
 		if (argc == 2 && std::string_view(argv[1]) == "--player-inventory-proof")
 			return runPlayerInventoryProof(*engine);
 		if (argc == 3 && std::string_view(argv[1]) == "--player-settings-proof")

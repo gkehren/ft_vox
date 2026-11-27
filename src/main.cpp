@@ -38,7 +38,7 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --ui-spike                  Run the standalone Game UI prototype over a solo scene\n"
 			  << "  --game-ui                   Show the Game UI sample alongside the existing interface\n"
-			  << "  --no-dev-ui                 Start without the developer workspace (F5 / Ctrl+Shift+D opens it)\n"
+			  << "  --dev-ui                    Open the developer workspace at startup (F1 toggles it)\n"
 			  << "  --no-hud                    Start with the player HUD hidden\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
@@ -78,12 +78,12 @@ int main(int argc, char **argv)
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
 	bool uiSpike = false;
-	bool gameUi = false;
-	bool showDeveloperUi = true;
+	bool gameUiPreview = false;
+	bool showDeveloperUi = false;
 	bool showPlayerHud = true;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
-	std::optional<int> qualityPreset;
+	std::optional<GraphicsQualityPreset> qualityPreset;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
 	int benchmarkViewSwitch = 0;
@@ -95,12 +95,12 @@ int main(int argc, char **argv)
 		const std::string arg = argv[i];
 		if (arg == "--game-ui")
 		{
-			gameUi = true;
+			gameUiPreview = true;
 			continue;
 		}
-		if (arg == "--no-dev-ui")
+		if (arg == "--dev-ui" || arg == "--no-dev-ui")
 		{
-			showDeveloperUi = false;
+			showDeveloperUi = arg == "--dev-ui";
 			continue;
 		}
 		if (arg == "--no-hud")
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
 				std::cerr << "Error: --quality accepts low|medium|high|cinematic (or 0-3).\n";
 				return kExitUsage;
 			}
-			qualityPreset = preset;
+			qualityPreset = static_cast<GraphicsQualityPreset>(preset);
 			continue;
 		}
 		if (arg == "--vsync")
@@ -437,10 +437,10 @@ int main(int argc, char **argv)
 			playerKey = client::playerKey(playerProfile, client::ProfileAccess::LoadOrCreate);
 		}
 		const bool directSolo = !worldName.empty() || directSeed || benchmarkDuration > 0.f ||
-			inspection || uiSpike || gameUi;
+			inspection || uiSpike || gameUiPreview;
 		Engine engine(resourcePack);
-		engine.setPlayerSettingsOverrides(vsyncOverride.has_value(), qualityPreset.has_value());
-		engine.setShowDeveloperUi(showDeveloperUi && (directSolo || server.has_value()));
+		engine.setPlayerSettingsOverrides(vsyncOverride.has_value(), qualityPreset);
+		engine.setShowDeveloperUi(showDeveloperUi);
 		engine.setShowPlayerHud(showPlayerHud);
 		if (server)
 			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt, *playerKey);
@@ -458,7 +458,7 @@ int main(int argc, char **argv)
 		if (vsyncOverride)
 			engine.setVSync(*vsyncOverride);
 		if (qualityPreset)
-			engine.setGraphicsQualityPreset(static_cast<GraphicsQualityPreset>(*qualityPreset));
+			engine.setGraphicsQualityPreset(*qualityPreset);
 		if (frontBiasOverride)
 			engine.setStreamFrontBias(*frontBiasOverride);
 		if (shadowMapSizeOverride > 0)
@@ -480,7 +480,7 @@ int main(int argc, char **argv)
 			engine.benchmark().requestStart();
 			engine.setExitAfterBenchmark(true);
 		}
-		if (uiSpike || (gameUi && !inspection && benchmarkDuration == 0.f))
+		if (uiSpike || (gameUiPreview && !inspection && benchmarkDuration == 0.f))
 			engine.enableGameUi(uiSpike);
 		engine.run();
 	}

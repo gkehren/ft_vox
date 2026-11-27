@@ -70,24 +70,17 @@ bool Engine::suppressDeveloperUi() const
 	return m_playerUi && !m_uiSpike && m_playerUi->screens().suppressDeveloper();
 }
 
-bool Engine::developerUiPresent() const
-{
-	// Inspection view, --ui-spike proof and the native player screens remove the
-	// developer layer entirely; hiding the workspace does not (issue #303 F01).
-	const bool nativeSuppressed = m_inspectionView || m_uiSpike || suppressDeveloperUi();
-	return ui::developerUiPresent(imgui != nullptr, nativeSuppressed);
-}
-
 bool Engine::developerUiAvailable() const
 {
 	const bool nativeSuppressed = m_inspectionView || m_uiSpike || suppressDeveloperUi();
-	return ui::developerUiAvailable(imgui != nullptr, nativeSuppressed,
-		m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden);
+	const bool benchmarkMap = m_benchmark.isActive() && m_benchmark.config().biomeMapZoom > 0.f;
+	return ui::developerUiAvailable(imgui && developerUi, nativeSuppressed,
+		(m_showDeveloperUi || benchmarkMap) ? ui::Workspace::Visible : ui::Workspace::Hidden);
 }
 
 gameui::InputContext Engine::inputContext() const
 {
-	const bool devAvailable = developerUiAvailable();
+	const bool devAvailable = developerInputReady();
 	const bool pendingDevFocus = devAvailable && imgui->pendingKeyboard();
 	return {
 		.interactive = windowFocused && !m_windowHidden && !m_windowMinimized,
@@ -98,8 +91,9 @@ gameui::InputContext Engine::inputContext() const
 		.paused = paused || nativePause(),
 		.devKeyboard = pendingDevFocus || (devAvailable &&
 			(mouseCaptured ? imgui->ownsActiveInput() : imgui->ownsKeyboard())),
-		.devDialog = devAvailable && (imgui->hasModal() || (gameUi && gameUi->isFileDialogOpen())),
+		.devDialog = devAvailable && (imgui->hasModal() || (developerUi && developerUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
+		.pointerGeometryPending = m_uiGeometryPending,
 		.transition = m_playerSessionRequest.has_value() || switchingSession() || (m_remote && !m_remote->ready()),
 		.captureFailed = m_captureFailed,
 	};
@@ -108,7 +102,7 @@ gameui::InputContext Engine::inputContext() const
 ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 {
 	using enum ImGuiLayer::PointerHit;
-	if (!developerUiAvailable())
+	if (!developerInputReady())
 		return PassThrough;
 	return mouseCaptured ? (imgui->ownsActiveInput() ? Interactive : PassThrough) : imgui->pointerHit(x, y);
 }
@@ -143,22 +137,21 @@ void Engine::setDeveloperWorkspaceVisible(bool visible)
 	}
 	if (m_showDeveloperUi == visible)
 		return;
-	if (ui::endsDeveloperInput(m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
-			visible ? ui::Workspace::Visible : ui::Workspace::Hidden))
+	m_showDeveloperUi = visible;
+	syncUiInput();
+}
+
+void Engine::invalidateUiGeometry()
+{
+	m_uiGeometryPending = true;
+	cancelGameUiPointer();
+	m_inputRouter.cancelPointer(gameui::InputOwner::Gameplay);
+	cancelDeveloperInput();
+	if (m_playerUi)
 	{
-		// Release developer input and close its dialogs before hiding the workspace.
-		cancelDeveloperInput();
-		if (gameUi)
-			gameUi->cancelDeveloperDialogs();
-	}
-	if (inventoryPanelOpen())
-	{
-		cancelGameUiPointer();
 		m_playerUi->cancelInventoryGesture();
 		m_playerUi->invalidateLayout();
 	}
-	m_showDeveloperUi = visible;
-	syncUiInput();
 }
 
 void Engine::syncUiInput()
@@ -188,10 +181,18 @@ void Engine::syncUiInput()
 		setMouseCaptured(restore);
 	}
 	const bool suppressed = suppressDeveloperUi();
-	if (m_developerSuppressed != suppressed)
+	const bool composed = developerUiAvailable();
+	if (m_developerComposed != composed || m_developerSuppressed != suppressed)
 	{
+		invalidateUiGeometry();
+		if (m_developerComposed && !composed)
+		{
+			developerUi->cancelDeveloperDialogs();
+			developerUi->suspendSampling();
+			imgui->suspendPresentation();
+		}
+		m_developerComposed = composed;
 		m_developerSuppressed = suppressed;
-		cancelDeveloperInput();
 	}
 	// F01 (#316): Developer UI keyboard ownership (an open editor, an
 	// armed widget, a popup or a latched navigation focus) forfeits an
@@ -199,7 +200,7 @@ void Engine::syncUiInput()
 	// Passive wantCaptureKeyboard — retained by mere hover focus — never
 	// latches ownership (round 2), so it cannot cancel a gesture the
 	// player is making in the native screen.
-	if (m_playerUi && inventoryPanelOpen() && developerUiAvailable() && !suppressed &&
+	if (m_playerUi && inventoryPanelOpen() && developerInputReady() &&
 		imgui && imgui->ownsKeyboard())
 		m_playerUi->cancelInventoryGesture();
 	auto policy = inputContext();
@@ -252,10 +253,13 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 				imgui->releaseKeyboardOwnership();
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+			cancelGameUiPointer();
+			break;
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
-			cancelGameUiPointer();
+		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+			invalidateUiGeometry();
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
 		{
@@ -296,14 +300,17 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		// so the contextual keys of an open native screen reach the player
 		// UI unless the Developer UI really owns them. InputContext
 		// (PlayerUiInteraction) keeps the modal and text-input priorities.
-		const auto candidate = policy.choose(InputKind::Key, global, back, inventoryShortcut, captureShortcut);
+		// The workspace toggle changes the requested visibility even under a
+		// native modal. The modal keeps input and suppresses the workspace.
+		const auto candidate = policy.interactive && isWorkspaceToggle(key, event.key.mod)
+			? Global : policy.choose(InputKind::Key, global, back, inventoryShortcut, captureShortcut);
 		auto scan = event.key.scancode;
 		if (scan == SDL_SCANCODE_UNKNOWN)
 			scan = SDL_GetScancodeFromKey(key, nullptr);
 		owner = m_inputRouter.key(size_t(scan), down, event.key.repeat, candidate);
 		// Dev UI uses aggregate modifiers for docking and pointer shortcuts
 		// even when the physical modifier is held for gameplay.
-		if (imgui && !m_inspectionView && policy.interactive && !policy.modal && owner != DeveloperUi)
+		if (developerInputReady() && policy.interactive && owner != DeveloperUi)
 			imgui->observeModifiers(event.key.mod);
 		if (owner == PlayerUi && down && !event.key.repeat && (back || (inventoryShortcut && policy.inventory)))
 		{
@@ -332,7 +339,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		policy.devPointer = devHit == ImGuiLayer::PointerHit::Interactive;
 		policy.devOccludes = devHit == ImGuiLayer::PointerHit::Occludes;
 		const auto press = m_inputRouter.pointerOwner();
-		policy.nativePointer = !mouseCaptured && m_playerUi && !wheel &&
+		policy.nativePointer = !policy.pointerGeometryPending && !mouseCaptured && m_playerUi && !wheel &&
 			(motion ? press == PlayerUi : event.button.button == SDL_BUTTON_LEFT) && m_playerUi->hitsStrip(x, y);
 		const auto candidate = m_captureFailed && mouseCaptured ? Blocked : policy.choose(InputKind::Pointer);
 		const bool continuing = motion ||
@@ -352,10 +359,10 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			m_playerUi->cancelInventoryGesture();
 		// Position feeds ImGui hover bookkeeping. Only Dev-owned button and
 		// wheel edges reach its controls, even when ownership changes mid-press.
-		if (imgui && policy.interactive && !policy.modal && !mouseCaptured &&
+		if (developerInputReady() && policy.interactive && !mouseCaptured &&
 			((motion && owner != DeveloperUi) || (!motion && owner == DeveloperUi)))
 			imgui->observePointer(x, y);
-		if (imgui && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+		if (developerInputReady() && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
 			((event.button.button == SDL_BUTTON_LEFT &&
 				 ((owner == PlayerUi && m_playerUi &&
 					  (policy.nativeScreen ? m_playerUi->canFocusWidget(x, y) : policy.nativePointer)) ||
@@ -388,7 +395,8 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		owner = policy.choose(InputKind::Text);
 		break;
 	default:
-		if (imgui && !policy.modal)
+		if (imgui && (developerUiAvailable() || event.type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
+			event.type == SDL_EVENT_WINDOW_FOCUS_LOST))
 			imgui->processEvent(event);
 		return false;
 	}

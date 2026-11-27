@@ -38,7 +38,7 @@ const char *eventKindName(const char *kind)
 }
 } // namespace
 
-void drawChunkInspector(UiState &s, GameUIFrame &frame)
+void drawChunkInspector(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.chunkInspector)
 		return;
@@ -50,14 +50,14 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 		return;
 	}
 
-	if (!frame.chunks || !frame.camera)
+	if (!frame.chunks || !frame.hasWorld)
 	{
 		ImGui::TextDisabled("Chunk manager not ready.");
 		ImGui::End();
 		return;
 	}
 	RenderWorldBridge &chunks = *frame.chunks;
-	const glm::vec3 camPos = frame.camera->getPosition();
+	const glm::vec3 camPos = frame.player.position;
 
 	// Selection: chunk under the player by default.
 	const glm::ivec3 playerChunk(int(std::floor(camPos.x / CHUNK_SIZE)), 0,
@@ -96,11 +96,10 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 	s.inspectCoord.x = std::clamp(s.inspectCoord.x, -4096, 4096);
 	s.inspectCoord.z = std::clamp(s.inspectCoord.z, -4096, 4096);
 
-	// Opt-in bounded trace. The flag lives in UiState (it survives world
-	// reloads); updateDebugUiState re-applies it to the RenderWorldBridge every
-	// frame — even with this panel closed — so a recreated manager inherits
-	// it. This checkbox only flips the UI-owned flag.
-	ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &s.eventTraceEnabled);
+	bool traceEnabled = frame.chunkTraceEnabled;
+	if (ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &traceEnabled) &&
+		frame.setChunkTraceEnabled)
+		frame.setChunkTraceEnabled(traceEnabled);
 
 	// --- Selected chunk state ---
 	ImGui::SeparatorText("State");
@@ -201,7 +200,7 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 
 	// --- Event trace (filtered to the selected chunk) ---
 	ImGui::SeparatorText("Event trace");
-	if (!s.eventTraceEnabled)
+	if (!traceEnabled)
 	{
 		ImGui::TextDisabled("Enable tracing above to record load/gen/mesh/edit/upload\n"
 							"events (bounded ring, main-thread only).");
