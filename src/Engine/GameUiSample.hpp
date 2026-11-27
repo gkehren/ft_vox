@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Engine/PlayerSettingsUi.hpp>
+
 #include <Engine/PlayerHud.hpp>
 #include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerMultiplayer.hpp>
@@ -48,6 +50,8 @@ public:
 	void finishSessionScreen();
 	void setMultiplayerView(gameui::MultiplayerView view);
 	std::optional<gameui::MultiplayerRequest> takeMultiplayerRequest();
+	void setSettingsView(gameui::SettingsView view);
+	std::optional<gameui::SettingsRequest> takeSettingsRequest();
 	void invalidateLayout();
 	void back();
 	void openPause();
@@ -80,22 +84,11 @@ public:
 	void setScalePolicy(gameui::ScalePolicy policy) { m_scale.setPolicy(policy); }
 	gameui::ScalePolicy scalePolicy() const { return m_scale.policy(); }
 	float playerUiScale() const { return m_scale.effective(); }
-	/// A scale request raised by a player surface (the gallery selector today,
-	/// the settings screen in #307). The host persists it and pushes it back
-	/// through setScalePolicy, so the surface never touches the settings store.
-	std::optional<gameui::ScalePolicy> takeScaleRequest()
+	bool scalePolicyApplied(gameui::ScalePolicy policy) const
 	{
-		auto request = m_scaleRequest;
-		m_scaleRequest.reset();
-		return request;
+		return !m_scale.hasPending() && m_scale.policy() == policy;
 	}
-	/// A player-facing message about the persisted settings store (empty when it
-	/// read and wrote cleanly). Presentation only: the host owns the text and
-	/// the file, the surface just prints it next to the scale selector.
-	void setSettingsNotice(std::string_view notice)
-	{
-		m_settingsNotice.assign(notice.substr(0, 160));
-	}
+	bool scaleAppliedForWindow(SDL_Window *window, gameui::ScalePolicy policy) const;
 
 private:
 	friend struct UiSpikeProbe;
@@ -139,6 +132,16 @@ private:
 	InputResult applyGalleryActivate(gameui::ControlId id);
 
 	bool buildSessionScreen(gameui::Screen screen, gameui::StackLayout &column);
+	void buildSettingsScreen(gameui::Screen screen, gameui::StackLayout &column);
+	void paintSettingsNotice();
+	bool activateSettingsControl(gameui::ControlId id);
+	gameui::SettingsView m_settingsView;
+	gameui::PreviewDisplay m_displayChoice;
+	gameui::ListBox m_controlsList;
+	std::vector<std::string_view> m_controlsRows;
+	std::optional<gameui::SettingsRequest> m_settingsRequest;
+	std::deque<std::string> m_settingsLabels;
+	gameui::Clip m_settingsMessage{};
 	// --- Native multiplayer state (issue #306) ------------------------------
 	// Kept grouped here (correction F09): a future PR may extract a dedicated
 	// MultiplayerScreenController owning this block plus
@@ -249,8 +252,7 @@ private:
 
 	// Player UI scale + player-surface state (issue #302).
 	gameui::ScaleController m_scale;
-	std::optional<gameui::ScalePolicy> m_scaleRequest;
-	std::string m_settingsNotice;
+	std::optional<gameui::ScalePolicy> m_galleryPreviousScale;
 	float m_uiPhase{};
 	uint32_t m_toastSerial{};
 	std::optional<std::chrono::steady_clock::time_point> m_lastFrame;

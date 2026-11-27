@@ -281,7 +281,7 @@ The measured HUD used one draw, 936 vertices, four preallocated descriptor sets,
 | Join, profiles, and client status | `GameUIMultiplayer`, `EngineJoin` and `EngineMultiplayer` own endpoint/expected seed, favorites, named profile creation/selection, private keys, loading/readiness, reconnect, switch, disconnect and return to suspended solo. The public roster and private inventory arrive through the remote client path. | **#306 Multiplayer.** Preserve favorites/profile persistence, unavailable/error states, endpoint validation, two-client roster and local inventory privacy, reconnect identity, and blocked transition on solo save failure. Put actionable status and latency in Game UI and detailed packet, snapshot and motion telemetry in Dev UI. |
 | Host, roster and stop | `EngineHosting` and `ServerSupervisor` enumerate server worlds, launch a sibling server and surface readiness, configuration, endpoint copy, auto/manual join, roster and delayed/failing stop. The engine coordinates app exit and force-stop confirmation. | **#306 Host.** Preserve existing/new world and profile selection, private bind guidance, port/player/interest/worker/streaming options, readiness, copy/join, confirmed graceful stop, Wait/Force Stop and exit recovery. Verify stop and restart with checkpoint persistence. |
 | Local administration | Hosted panel uses server-verified local permissions. The owner and authorized local delegates have different capabilities. Scope and credentials stay with the local control path. Roster, offline IDs, admission policy, moderation, confirmations and audit are already surfaced. | **#306 Administration.** Preserve permissions, target confirmation, audit and server result/error semantics. Cover grants/revocations, authorize-local-control, kick, ban/unban, allowlist membership/mode and unauthorized guest/remote rejection using the existing [hosting closure](multiplayer-hosting-closure.md). |
-| Display, inputs, quality and assets | The Graphics panel owns quality presets, VSync, rendering controls and pack browser/apply/use bundled. The Player panel forwards sensitivity and camera settings. `ImGuiLayer` persists a separate docking/scale configuration in `imgui.ini`. Engine applies VSync at swapchain recreate and handles failure-atomic texture replacement. | **#307 Settings.** Player-facing VSync, quality presets, render distance, sensitivity, player UI scale and resource-pack selection/recovery use typed setters and independent preferences. Preserve deferred apply and current CLI overrides. Keep detailed per-pass knobs, validation/device information, diagnostics, and Dev UI scale/layout under ImGui. |
+| Display, inputs, quality and assets | The Graphics panel owns quality presets, VSync, rendering controls and pack browser/apply/use bundled. The Player panel forwards sensitivity and camera settings. `ImGuiLayer` persists a separate docking/scale configuration in `imgui.ini`. Engine applies VSync at swapchain recreate and handles failure-atomic texture replacement. | **#307 Settings.** Window size, player UI scale, VSync, FXAA, and mouse look use typed requests and independent client preferences. Graphics presets, view distance, resource packs, and per-pass controls remain available in Dev UI. |
 | Player tools and world inspection | Player/Gameplay exposes flight/creative selection, speed boost, camera/isometric zoom, raycast range, borders, demo players, passive-mob toggle and detailed motion. World includes seed/save diagnostics, interactive biome map and map jobs. | **Dev UI.** Keep inspection and creative controls, authority conditions, map movement/zoom and async publication. Player presentation may share read-only context such as world name, biome and save health. |
 | Streaming, rendering and performance | `DebugUI/` has Overview, Graphics, Streaming, Performance, Player Diagnostics, Memory, Chunk Inspector and Render Debug. It samples render settings, timing, GPU data, chunks, queues, arenas and workload. | **Dev UI.** Keep profiling, debug views, full graphics/streaming knobs, resource and player diagnostics, docking layouts and the central scene viewport. Verify the gameplay input path continues when dockspace is visible and no tool owns input. |
 | Benchmark, Help and shell | Benchmark panel and CLI capture streaming, timing and biome-map benchmarks. `UiShell` owns docking/status strip, default/reset layout, menu actions and About. `UiShortcuts` and `InputRouting` define current shortcut policy. | **#308 Developer UI** keeps benchmark panel/CLI, reports, docking and detailed About/runtime data. Game UI makes player controls, About and Exit discoverable through normal navigation. Keep benchmark and visual regression paths independent of Game UI. |
@@ -313,7 +313,7 @@ Phase D surfaces and their owners:
 | Surface | Owner today | Player-facing path |
 | --- | --- | --- |
 | Tokens, typography, components, slot contract | `PlayerUiStyle.hpp`, `PlayerUiText.hpp`, `PlayerUiComponents.*`, `PlayerUiFonts.*` | Consumed by every native screen; the gallery renders each component class. |
-| Player UI scale | `PlayerUiScale.hpp` + `PlayerUiPreferences.*` (Engine loads/persists) | Auto by default, pause → Design system → **Player UI scale** for the persisted override. ImGui scale/layout untouched. |
+| Player UI scale | `PlayerUiScale.hpp` + `PlayerUiPreferences.*` (Engine loads/persists) | Auto by default. **Settings → Preview display changes** previews the selected scale and **Keep changes** saves it. The design gallery also exercises the scale controller. |
 | Component gallery | `Screen::Gallery` (`GameUiGallery.cpp`, layout in `PlayerUiGallery.hpp`) | Pause → **Design system**. |
 | HUD preview | `Screen::HudMock` | Pause → **HUD mock** in the `--game-ui` showcase. #303 uses the live HUD during play. |
 
@@ -410,12 +410,8 @@ existing command lines.
   return to play. A close during loading, saving, leaving, or a queued
   connection change is remembered. A failed transition pauses that quit.
   Retry keeps the quit pending through a successful retry, and Back cancels it.
-- **Multiplayer** and **Settings** are the navigation points for #306 and
-  #307. Their interim controls open the existing Multiplayer and Graphics
-  panels. Showing a panel again keeps the current native screen and focus.
-  The Settings page also links to the native player scale control. Dev world
-  and player actions require a live world. The Graphics and Multiplayer panels
-  are available from the empty menu.
+- **Multiplayer** and **Settings** open native screens from the main and pause
+  menus. Dev world and player actions require a live world.
 
 The native UI queues one typed request per transition. The loop consumes it
 before frame acquisition and presents a loading screen before retiring the
@@ -653,3 +649,93 @@ Remaining manual validation before closing #306 (NOT executed here):
   profiles and hosted worlds, endpoint editing with caret and text
   selection, and a visual check of the three scale screenshots for clipping
   or inaccessible controls.
+
+## Player settings (#307)
+
+Open **Settings** from the main menu or pause menu. Window sizes are logical
+units from 960 × 540 to 1920 × 1080. Click or press Enter on the window size
+or UI scale to cycle the choices, then select **Preview display changes**.
+Engine sends SDL one resize request and uses the acquired framebuffer size
+for Vulkan. The confirmation screen shows the requested and current values.
+**Keep changes** saves the preview. **Revert changes**, Escape or 15 seconds
+without confirmation restore the previous size and scale. The confirmation
+deadline also runs while the window is minimized or hidden. Rollback remains
+pending until the window can render again, and its verification timer only
+accrues while the framebuffer is available. Engine verifies the restored
+logical size, framebuffer and scale before reporting success. A recoverable
+Vulkan configuration refusal rolls back and refreshes all swapchain consumers
+before the next acquisition. If exact rollback times out, Engine tries the
+available framebuffer with a supported Vulkan extent and preserves the
+previous UI scale and present mode where supported. A successful fallback
+reports that the resolution could not be restored exactly and keeps the file
+unchanged. Fallback creation and presentation attempts are bounded. Fatal
+Vulkan errors and an unusable fallback follow the client error path.
+Restore a maximized window to use the size selector.
+
+**Keep changes** is available after a frame successfully presents with the
+candidate settings. An out-of-date acquisition or presentation suspends
+confirmation until the replacement swapchain presents again. The original
+confirmation deadline keeps running.
+
+VSync changes at the next swapchain boundary. Off requires Vulkan's
+IMMEDIATE mode and a refused request leaves the previous mode active. The
+FXAA switch affects scene rendering. Sensitivity is a percentage of the
+default mouse response (25–300% in steps), and vertical inversion changes
+local look input. **Controls reference** is browsable with Up and Down.
+**Reset to defaults** previews changes to window size or scale. Cancelling the
+preview keeps every preference. Resetting a maximized or otherwise non-resizable
+window keeps the saved size, explains how to reset it, and resets the other
+eligible preferences. The defaults are 1920 × 1080 windowed, VSync and FXAA on, 100%
+sensitivity, normal vertical look and Auto UI scale.
+
+Engine writes the versioned record under
+`<saves-root>/.client-settings/player-settings.txt` using a unique staging
+file and atomic replacement. This is a client-wide setting shared across
+solo worlds and remote connections. A missing record uses defaults. Invalid
+or unreadable records are reported and kept until the next explicit save.
+A failed write leaves the change active for the run and offers **Retry saving
+preferences**. The current file requires the complete current schema. Its
+absence permits Engine to read the scale-only legacy
+`<saves-root>/.client-profiles/player-ui.txt` at startup. The next explicit save
+writes the new record, and the legacy file remains available to older builds.
+The design gallery previews scale temporarily and restores the previous player
+policy when leaving. ImGui scale and docking use `imgui.ini`.
+
+Startup applies a saved window size through the same recoverable display path
+without showing a confirmation dialog. It verifies the size with the working
+present mode, then applies the saved or command-line VSync choice. If the size
+is refused, startup restores the initial size or uses the available framebuffer
+and reports the outcome in Settings. The saved record and unrelated preferences
+are preserved in either case.
+
+`--vsync` and the FXAA value selected by `--quality` take precedence over the
+record for the launch. Those controls show the active value and the override.
+Reset preserves the stored value for each overridden setting, so a subsequent
+launch without that flag restores the prior choice.
+CLI benchmark and inspection runs skip the preference loader and follow their
+existing launch policy. Dev UI controls and F10 still make session-only changes
+where their shortcuts apply. Opening Settings reads the live values and leaves
+developer experiments in place. Changing one player setting persists that
+setting without adopting other live developer values. Settings is client-side
+presentation and input configuration, independent of world saves, connection
+credentials, gameplay authority, and server configuration.
+
+### GPU evidence
+
+The opt-in proof presents through the real Vulkan swapchain and captures the
+same UI and scene into readback images after setting the window size. Build
+`test_engine_reload`, run it with the built resources available, then use
+`--player-settings-proof <fresh-output-dir>` to reproduce the captures.
+Invoke `--player-settings-restart-proof <same-output-dir>` in a fresh process
+to verify the persisted fixture against the startup loader.
+On the Windows RTX 4070 Ti, the Settings proof passed 46 checks and the
+fresh-process proof passed 10. The tests inject Vulkan configuration
+refusals, fatal device errors and SDL rollback failures. They check recovery
+and acquisition, preserve the confirmation deadline across recreation, and
+compare the saved record after startup, cancelled previews, CLI overrides,
+and a write retry.
+Validation reported only the known [RTSS diagnostics](vulkan-validation.md#srgbstorage-errors-from-rtss-issue-99).
+
+- [Settings at 960 × 540](images/player-settings/settings.png)
+- [Resize and 125% scale confirmation at 1280 × 720](images/player-settings/resize-preview.png)
+- [Settings after applying the display and input changes](images/player-settings/settings-applied.png)

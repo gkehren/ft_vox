@@ -1,6 +1,7 @@
 #include <Engine/PlayerUiPreferences.hpp>
 
 #include <atomic>
+#include <charconv>
 #include <thread>
 #include <chrono>
 #include <cmath>
@@ -72,9 +73,8 @@ bool parseStep(std::string_view text, float &value)
 std::string formatStep(float value)
 {
 	const long hundredths = std::lround(value * 100.f);
-	char buffer[16]{};
-	std::snprintf(buffer, sizeof(buffer), "%ld.%02ld", hundredths / 100, hundredths % 100);
-	return buffer;
+	const long fraction = hundredths % 100;
+	return std::to_string(hundredths / 100) + '.' + (fraction < 10 ? "0" : "") + std::to_string(fraction);
 }
 
 unsigned long processId()
@@ -135,6 +135,48 @@ std::string_view trimTrailingCarriageReturn(std::string_view line)
 		line.remove_suffix(1);
 	return line;
 }
+
+std::string_view takeLine(std::string_view &record)
+{
+	const auto end = record.find('\n');
+	const auto line = trimTrailingCarriageReturn(record.substr(0, end));
+	record.remove_prefix(end == std::string_view::npos ? record.size() : end + 1);
+	return line;
+}
+
+bool parseScale(std::string_view line, ScalePolicy &scale)
+{
+	if (line == "scale auto")
+		return true;
+	float value = 0.f;
+	if (!line.starts_with("scale fixed ") || !parseStep(line.substr(12), value) || !isUserScale(value))
+		return false;
+	scale = {ScaleMode::Fixed, nearestUserScale(value)};
+	return true;
+}
+
+bool parseInt(std::string_view text, int &value)
+{
+	if (text.empty())
+		return false;
+	const auto end = text.data() + text.size();
+	const auto result = std::from_chars(text.data(), end, value);
+	return result.ec == std::errc{} && result.ptr == end;
+}
+
+bool parseBool(std::string_view line, std::string_view key, bool &value)
+{
+	if (!line.starts_with(key))
+		return false;
+	const auto token = line.substr(key.size());
+	value = token == "on";
+	return value || token == "off";
+}
+
+const char *onOff(bool value)
+{
+	return value ? "on" : "off";
+}
 } // namespace
 
 std::string formatScalePolicy(ScalePolicy policy)
@@ -146,52 +188,58 @@ std::string formatScalePolicy(ScalePolicy policy)
 
 std::string PlayerUiSettings::serialize() const
 {
-	return std::string(kPlayerUiSettingsHeader) + '\n' + formatScalePolicy(scale) + '\n';
+	return std::string(kPlayerUiSettingsHeader) + '\n' + formatScalePolicy(scale) +
+		"\nwindow " + std::to_string(window.width) + ' ' + std::to_string(window.height) +
+		"\nvsync " + onOff(vsync) + "\nfxaa " + onOff(fxaa) +
+		"\nsensitivity " + std::to_string(sensitivity) + "\ninvert-y " + onOff(invertY) + '\n';
+}
+
+bool PlayerUiSettings::valid() const
+{
+	return (scale.mode == ScaleMode::Auto || (scale.mode == ScaleMode::Fixed && isUserScale(scale.value))) &&
+		std::ranges::find(kWindowSizes, window) != kWindowSizes.end() &&
+		std::ranges::find(kSensitivitySteps, sensitivity) != kSensitivitySteps.end();
 }
 
 bool PlayerUiSettings::parse(std::string_view record)
 {
 	if (record.empty() || record.size() > kMaxPlayerUiSettingsBytes)
 		return false;
-	const auto end = record.find('\n');
-	if (end == std::string_view::npos)
-		return false;
-	if (trimTrailingCarriageReturn(record.substr(0, end)) != kPlayerUiSettingsHeader)
-		return false;
-	std::string_view rest = record.substr(end + 1);
 	PlayerUiSettings next;
-	bool sawScale = false;
-	while (!rest.empty())
-	{
-		const auto lineEnd = rest.find('\n');
-		const std::string_view line = trimTrailingCarriageReturn(rest.substr(0, lineEnd));
-		rest.remove_prefix(lineEnd == std::string_view::npos ? rest.size() : lineEnd + 1);
-		if (line.empty())
-			return false;
-		if (line == "scale auto" && !sawScale)
-		{
-			next.scale = {ScaleMode::Auto, 1.f};
-			sawScale = true;
-			continue;
-		}
-		if (line.starts_with("scale fixed ") && !sawScale)
-		{
-			float value = 0.f;
-			if (!parseStep(line.substr(12), value) || !isUserScale(value))
-				return false;
-			next.scale = {ScaleMode::Fixed, nearestUserScale(value)};
-			sawScale = true;
-			continue;
-		}
-		return false; // unknown key, duplicate key or malformed value
-	}
-	if (!sawScale)
+	if (takeLine(record) != kPlayerUiSettingsHeader || !parseScale(takeLine(record), next.scale))
+		return false;
+	const auto windowLine = takeLine(record);
+	const auto separator = windowLine.find(' ', 7);
+	if (!windowLine.starts_with("window ") || separator == std::string_view::npos ||
+		!parseInt(windowLine.substr(7, separator - 7), next.window.width) ||
+		!parseInt(windowLine.substr(separator + 1), next.window.height) ||
+		!parseBool(takeLine(record), "vsync ", next.vsync) ||
+		!parseBool(takeLine(record), "fxaa ", next.fxaa))
+		return false;
+	const auto sensitivityLine = takeLine(record);
+	if (!sensitivityLine.starts_with("sensitivity ") ||
+		!parseInt(sensitivityLine.substr(12), next.sensitivity) ||
+		!parseBool(takeLine(record), "invert-y ", next.invertY))
+		return false;
+	if (!record.empty() || !next.valid())
 		return false;
 	*this = next;
 	return true;
 }
 
-LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
+bool parseLegacyPlayerScale(std::string_view record, ScalePolicy &scale)
+{
+	ScalePolicy next;
+	if (record.size() > kMaxPlayerUiSettingsBytes || takeLine(record) != kLegacyPlayerUiSettingsHeader ||
+		!parseScale(takeLine(record), next) || !record.empty())
+		return false;
+	scale = next;
+	return true;
+}
+
+namespace
+{
+LoadStatus readRecord(const std::filesystem::path &path, auto decode)
 {
 	if (path.empty())
 		return LoadStatus::Missing;
@@ -209,7 +257,7 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 			DWORD bytesRead = 0;
 			const bool read = ReadFile(file, record, static_cast<DWORD>(sizeof(record)), &bytesRead, nullptr) != 0;
 			CloseHandle(file);
-			return read && parse(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
+			return read && decode(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
 		}
 		const auto error = GetLastError();
 		if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
@@ -256,14 +304,25 @@ LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
 	}
 	if (in.bad() || record.size() > kMaxPlayerUiSettingsBytes)
 		return LoadStatus::Corrupt;
-	return parse(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
+	return decode(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
 #endif
+}
+} // namespace
+
+LoadStatus PlayerUiSettings::load(const std::filesystem::path &path)
+{
+	return readRecord(path, [this](std::string_view record) { return parse(record); });
+}
+
+LoadStatus loadLegacyPlayerScale(const std::filesystem::path &path, ScalePolicy &scale)
+{
+	return readRecord(path, [&scale](std::string_view record) { return parseLegacyPlayerScale(record, scale); });
 }
 
 bool PlayerUiSettings::save(const std::filesystem::path &path) const
 {
 	std::error_code ec;
-	if (path.empty())
+	if (path.empty() || !valid())
 		return false;
 	const auto parent = path.parent_path();
 	if (!parent.empty())

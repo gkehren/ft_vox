@@ -4,6 +4,15 @@
 
 #include <vector>
 #include <cstdint>
+#include <stdexcept>
+
+// A rejected surface configuration may be retried with a previous setting.
+// Other Vulkan errors propagate to the host's fatal error path.
+class SwapchainConfigurationError : public std::runtime_error
+{
+public:
+	using std::runtime_error::runtime_error;
+};
 
 struct SwapchainSupportDetails
 {
@@ -24,7 +33,7 @@ public:
 
 	void init(VkContext &context, uint32_t width, uint32_t height, bool vsync = true);
 	void recreate(uint32_t width, uint32_t height);
-	void recreate(uint32_t width, uint32_t height, bool vsync);
+	void recreate(uint32_t width, uint32_t height, bool vsync, bool requireExactExtent = false);
 	void shutdown();
 
 	VkSwapchainKHR getSwapchain() const { return m_swapchain; }
@@ -49,7 +58,7 @@ public:
 	static SwapchainSupportDetails querySupport(VkPhysicalDevice device, VkSurfaceKHR surface);
 
 private:
-	void createSwapchain(uint32_t width, uint32_t height);
+	void createSwapchain(uint32_t width, uint32_t height, bool vsync, bool requireExactExtent);
 	void createImageViews();
 	void cleanupSwapchain();
 

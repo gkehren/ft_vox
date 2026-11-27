@@ -224,7 +224,7 @@ void GameUiSample::buildGallery(Clip scene, float scale)
 			"Slot presentation contract: icon, count, selection, disabled, pending.", Button{}, true,
 			style::ButtonVariant::Quiet});
 	}
-	// 9 — Player UI scale selector, wired to the settings seam.
+	// 9 — Temporary player UI scale selector.
 	{
 		const auto area = section(9);
 		const float gap = theme.space.xs * s;
@@ -235,7 +235,7 @@ void GameUiSample::buildGallery(Clip scene, float scale)
 			const float x = area.rect.x + float(index) * (width + gap);
 			const auto id = ControlId(ScaleAuto + index);
 			m_widgets.add({id, {{x, area.rect.y, x + width, area.rect.y + height}},
-				scaleLabel(static_cast<size_t>(index)), "Applies at the next frame boundary.", Button{},
+				scaleLabel(static_cast<size_t>(index)), "Preview until leaving the gallery.", Button{},
 				true, style::ButtonVariant::Secondary});
 		}
 	}
@@ -455,22 +455,17 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 				strip.rect.w + theme.space.xs * s + line}}, caption, style::TextRole::Caption,
 			theme.palette.inkMuted, 0.f);
 	}
-	// 9 — Scale selector: the buttons own the first line, their state and any
-	// settings notice print underneath instead of behind a control.
+	// 9 — Temporary scale preview, restored when the player leaves the gallery.
 	{
 		const auto area = contentRect(9);
 		const float line = style::lineHeight(style::TextRole::Caption) * s;
 		const float top = area.rect.y + theme.size.buttonHeight * s + theme.space.xs * s;
 		char state[128];
-		std::snprintf(state, sizeof(state), "Effective %.0f%% - %s. Applies at the next frame boundary.",
+		std::snprintf(state, sizeof(state), "Effective %.0f%% - %s. Restored when leaving the gallery.",
 			100.f * m_scale.effective(),
 			m_scale.policy().mode == ScaleMode::Auto ? "auto" : "override");
 		paint.fittedLabel({{area.rect.x, top, area.rect.z, top + line}}, state,
 			style::TextRole::Caption, theme.palette.inkMuted, 0.f);
-		if (!m_settingsNotice.empty())
-			paint.fittedLabel({{area.rect.x, top + line + theme.space.xxs * s, area.rect.z,
-					top + 2.f * line + theme.space.xxs * s}},
-				m_settingsNotice, style::TextRole::Caption, theme.palette.warning, 0.f);
 	}
 	// Section headers last so scrolling content never overdraws them.
 	for (size_t index = 0; index < gallerySections().size(); ++index)
@@ -525,7 +520,9 @@ GameUiSample::InputResult GameUiSample::applyGalleryActivate(ControlId id)
 	}
 	if (id >= ScaleAuto && id <= Scale200)
 	{
-		m_scaleRequest = scaleForIndex(size_t(id - ScaleAuto));
+		if (!m_galleryPreviousScale)
+			m_galleryPreviousScale = m_scale.pendingPolicy();
+		m_scale.setPolicy(scaleForIndex(size_t(id - ScaleAuto)));
 		return InputResult::Consumed;
 	}
 	return InputResult::Consumed;

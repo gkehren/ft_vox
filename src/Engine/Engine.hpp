@@ -24,7 +24,7 @@
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/InventoryUi.hpp>
-#include <Engine/PlayerUiPreferences.hpp>
+#include <Engine/PlayerSettingsUi.hpp>
 #include <Engine/PlayerSessionUi.hpp>
 #include <Engine/PlayerMultiplayer.hpp>
 #include <Engine/PlayerUiInteraction.hpp>
@@ -81,6 +81,11 @@ public:
 	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
 
 	void setVSync(bool enabled);
+	void setPlayerSettingsOverrides(bool vsync, bool fxaa)
+	{
+		m_playerVSyncOverride = vsync;
+		m_playerFxaaOverride = fxaa;
+	}
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
 	int worldSeed() const;
@@ -183,12 +188,23 @@ private:
 	friend struct GameUiBackendProbe;
 	struct RemoteSession;
 	void loadJoinPreferences();
-	/// Player UI preferences (issue #302): the persisted scale override, loaded
-	/// once at startup, applied at the next frame boundary and re-saved when a
-	/// player surface raises a request through the settings seam.
 	void loadPlayerUiPreferences();
 	void persistPlayerUiPreferences();
-	void applyPlayerUiScaleRequests();
+	void pumpPlayerSettings();
+	gameui::WindowSize playerFramebufferSize() const;
+	void notePlayerDisplayFramePresented();
+	bool playerDisplayPreviewMatches(gameui::WindowSize framebuffer) const;
+	void handlePlayerSettingsRequest(const gameui::SettingsRequest &request);
+	enum class DisplayOperation { Preview, Reset, Startup };
+	void beginPlayerDisplayPreview(std::optional<gameui::WindowSize> size,
+		std::optional<gameui::ScalePolicy> scale, DisplayOperation operation = DisplayOperation::Preview);
+	void finishStartupDisplay(std::optional<bool> vsync);
+	void revertPlayerDisplayPreview(std::string_view notice = {});
+	void publishPlayerSettingsView();
+	void requestPlayerVSync(bool enabled, bool persist);
+	void finishPlayerVSync(bool applied);
+	void applyPlayerMouseSensitivity(int percent);
+	void resetPlayerSettingsDefaults(bool resetWindow);
 	void loadHosting();
 	void populateHostingUi(GameUIFrame &frame);
 	void tickHosting();
@@ -260,7 +276,7 @@ private:
 	void handleEvents();
 	void onResize(int width, int height);
 	void requestSwapchainRecreate();
-	void recreateSwapchainIfNeeded(uint32_t width, uint32_t height);
+	bool recreateSwapchainIfNeeded(uint32_t width, uint32_t height);
 	void tickStreaming(double dt);
 	void tickDayCycle(double dt);
 	void processInput(double dt);
@@ -378,6 +394,9 @@ private:
 	bool running{false};
 	bool mouseCaptured{true};
 	bool m_swapchainRecreateRequested{false};
+	// SDL framebuffer last used to configure the current swapchain. The
+	// supported Vulkan extent can differ when the surface clamps this size.
+	gameui::WindowSize m_swapchainFramebuffer{};
 	std::optional<bool> m_pendingVSync;
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
@@ -491,9 +510,31 @@ private:
 	client::JoinPreferences m_joinPreferences;
 	gameui::PlayerUiSettings m_playerUiSettings{};
 	std::string m_playerUiError;
-	/// True while the in-memory preference is not known to be on disk. A failed
-	/// write is retried by the next selection, even of the same value (F17).
+	std::string m_playerSettingsNotice;
 	bool m_playerUiDirty{};
+	bool m_playerVSyncOverride{}, m_playerFxaaOverride{};
+	// Present while a settings-originated request awaits swapchain recreation.
+	// True means a successful application is also an explicit disk edit.
+	std::optional<bool> m_playerVSyncRequest;
+	struct DisplayPreview
+	{
+		gameui::DisplayView view;
+		gameui::WindowSize previousWindow;
+		gameui::ScalePolicy previousScale;
+		std::chrono::steady_clock::time_point deadline;
+		std::optional<std::chrono::steady_clock::time_point> restoreCheck;
+		std::chrono::steady_clock::duration restoreElapsed{};
+		DisplayOperation operation{};
+		std::optional<bool> startupVSync;
+		bool previousVSync{};
+		bool restoreWindowPending{};
+		bool recoveringSwapchain{};
+		bool presented{};
+		bool fallback{};
+		unsigned fallbackAttempts{};
+	};
+	std::optional<DisplayPreview> m_playerDisplayPreview;
+	decltype(&SDL_SetWindowSize) m_setPlayerWindowSize{SDL_SetWindowSize};
 	std::vector<std::string> m_joinProfiles;
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;
