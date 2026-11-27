@@ -14,6 +14,11 @@ namespace gameui
 {
 enum class NavKey { Other, Tab, Enter, Space, Left, Right, Up, Down, Home, End, Backspace, Delete, A, C, V, X };
 
+constexpr bool cancelsComposition(NavKey key, bool shortcut)
+{
+	return shortcut && (key == NavKey::A || key == NavKey::X || key == NavKey::V);
+}
+
 // This editor operates at Unicode scalar boundaries. Shaping, bidi and
 // grapheme segmentation belong to the text service selected for #302.
 size_t nextUtf8(std::string_view text, size_t offset);

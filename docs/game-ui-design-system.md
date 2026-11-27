@@ -362,10 +362,81 @@ bundled SDL 3.4.18:
 The player UI therefore normalizes with `CompositionUnit` (`kPlatformCompositionUnit`
 selects UTF-16 on Windows, scalars elsewhere). A UTF-16 index inside a surrogate
 pair rounds down, so a supplementary character can never be split into invalid
-bytes. Real OS-driven IME validation (Japanese/Chinese/Korean candidate windows,
-supplementary-plane input, focus handoff) still needs a manual pass on a Windows
-desktop and is tracked in [#314](https://github.com/gkehren/ft_vox/issues/314);
-the normalized geometry is covered headlessly.
+bytes. The font displays `?` for missing glyphs while the editor retains the
+original UTF-8, including supplementary characters.
+
+#### Preedit, candidate UI, and focus
+
+SDL uses OS-managed composition by default where the backend supports it, so
+both Game UI and Developer UI can use the native composition window. On backends
+that deliver `SDL_EVENT_TEXT_EDITING`, the player field paints the reported
+preedit. SDL receives the visible editor rect and caret offset in window
+coordinates. The OS owns candidate selection and presentation in both modes.
+
+To experiment with app-rendered preedit, set the SDL environment variable
+`SDL_IME_IMPLEMENTED_UI=composition` before launching the game. SDL 3.4.18
+reads the hint during Windows IME initialization, so the choice applies to the
+whole process. In this mode, Developer ImGui fields display committed text and
+lack inline preedit for composition that SDL delegates to the app. The Game UI
+uses its fallback glyph where the atlas lacks a character, including much of
+CJK. Use the default for regular play and Developer UI work.
+[SDL IME hint](https://wiki.libsdl.org/SDL3/SDL_HINT_IME_IMPLEMENTED_UI) ·
+[SDL 3.4.18 Windows backend](https://github.com/libsdl-org/SDL/blob/release-3.4.18/src/video/windows/SDL_windowskeyboard.c)
+
+A text commit delivered before a focus change stays in the originating field.
+Tab, clicking away, leaving the screen, or losing window focus cancels remaining
+preedit. Hiding and minimizing also retire the editor. Clicking inside a field,
+selecting all, cutting and pasting cancel native and local preedit while keeping
+the editor's SDL session active. Copy reads the committed selection and leaves
+preedit in place. SDL text commits insert normally. Resize and display-scale
+changes keep the same focused SDL session while layout is rebuilt. Text events
+reaching that editor during the rebuild still apply, and the next frame sends
+the new anchor.
+
+#### Validation for [#314](https://github.com/gkehren/ft_vox/issues/314)
+
+`GameUiInteraction` covers range conversion, text geometry and editing
+shortcuts. `test_engine_reload --game-ui-showcase-proof` uses the normal SDL
+configuration. Add `--inline-ime` to explicitly request app-rendered preedit for
+the fixture process before SDL starts. Both runs inject SDL events through the
+production router and Vulkan presentation path. They check caret anchoring,
+supplementary-plane selection and single commits at 100% and 200%, clipboard
+commands during preedit, and existing preedit across each resize or display
+event. The focus, hide and minimize cases cover same-batch and separate-batch
+recovery. The showcase also verifies committed text handoff to and from a real
+Developer UI ImGui input field.
+
+On Windows build 26300 with SDL 3.4.18, the showcase passed 115 checks in each
+mode and the design-system proof passed 103 checks. Vulkan validation reported
+only the [known RTSS VUIDs](vulkan-validation.md). All 55 graphics-off CTest
+cases passed on Windows, and the seven affected ASan/UBSan tests passed on
+Debian WSL2.
+
+Live Japanese, Chinese and Korean candidate placement, supplementary-character
+composition, focus changes during OS composition, and moving an active
+composition between different-DPI monitors remain pending. The Windows test
+session exposed French and US English keyboard profiles. No IBus or Fcitx desktop
+IME was available in the Linux test environment.
+
+For the desktop pass, start `ft_vox --seed 42` and open **Pause → Widget
+showcase**. Set **Player UI scale** in **Settings** before opening the showcase.
+
+1. Use Microsoft Japanese IME, Microsoft Pinyin and Microsoft Korean IME in
+   turn. Fill **Name** with a long ASCII prefix, move to its end and compose a
+   phrase. Open the candidate list and check that it opens near the visible
+   caret in the horizontally scrolled field.
+2. At fixed 100% and 200%, use an IME that can compose U+1F332 or U+20000.
+   Inspect preedit selection, commit once and copy the field into a Unicode-
+   capable editor to verify the exact character behind the fallback glyph.
+3. With fresh preedit each time, Tab away, click **Secondary name**, and return
+   to Pause with Escape. Check that the old field contains only text already
+   committed and that revisiting it displays no preedit. Record any keystroke
+   the IME consumes before the game can navigate.
+4. In windowed mode, drag the game between monitors with different OS scale
+   factors while a candidate list is open. Verify that the preedit survives and
+   the candidate list follows the caret, then commit and verify the result.
+5. Record the OS, SDL version, IME, player scale, display scales and result for
+   each case on the issue. Repeat with an available IBus or Fcitx desktop IME.
 
 ## 8. Limitations and follow-ups
 

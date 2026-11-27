@@ -1456,14 +1456,181 @@ struct GameUiBackendProbe
 			textGeometry.glyphScale == gameui::textStyle(gameui::style::TextRole::Body,
 				sample.m_screenScale, sample.m_fontScale).glyphScale(),
 			"SDL candidate location follows the visible horizontally scrolled caret");
+		const auto queuePreedit = [&](const char *value, int start, int length) {
+			editing.edit.text = value;
+			editing.edit.start = start;
+			editing.edit.length = length;
+			checked(SDL_PushEvent(&editing), "queue IME preedit");
+		};
+		const auto priorScale = sample.m_scale.policy();
+		const auto supplementary = "\xf0\x9f\x8c\xb2\xf0\xa0\x80\x80"; // U+1F332 U+20000
+		std::string expected = sample.m_field.value();
+		const auto compositionIntact = [&] {
+			return sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window) &&
+				sample.m_field.value() == expected && sample.m_field.composition() == supplementary &&
+				sample.m_field.compositionCursor() == 4 && sample.m_field.compositionEnd() == 8;
+		};
+		const auto anchorMatches = [&] {
+			const auto geometry = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(),
+				sample.m_screenScale, sample.m_fontScale);
+			return !geometry.clip.empty() && SDL_GetTextInputArea(engine.window, &textArea, &cursor) &&
+				textArea.x + cursor == int(std::lround(geometry.caretX));
+		};
+		for (const float scale : {1.f, 2.f})
+		{
+			sample.setScalePolicy({gameui::ScaleMode::Fixed, scale});
+			present();
+			click(center("Name"));
+			tap(SDLK_END);
+			windowEvent(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED);
+			const int second = gameui::kPlatformCompositionUnit == gameui::CompositionUnit::Utf16 ? 2 : 1;
+			queuePreedit(supplementary, second, second);
+			engine.handleEvents();
+			CHECK(sample.m_screenScale == scale && compositionIntact(),
+				"new supplementary preedit reaches the focused editor while display geometry is pending at " << scale);
+			present();
+			CHECK(anchorMatches() && compositionIntact(),
+				"rebuilt display geometry repoints the existing composition at " << scale);
+			windowEvent(SDL_EVENT_WINDOW_DISPLAY_CHANGED);
+			commitText(supplementary);
+			engine.handleEvents();
+			expected += supplementary;
+			CHECK(sample.m_field.value() == expected && sample.m_field.composition().empty(),
+				"supplementary commit reaches the editor once while display geometry is pending at " << scale);
+			for (const auto geometryEvent : {SDL_EVENT_WINDOW_RESIZED, SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+				SDL_EVENT_WINDOW_DISPLAY_CHANGED, SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED})
+			{
+				queuePreedit(supplementary, second, second);
+				present();
+				CHECK(anchorMatches() && compositionIntact(), "composition is active before geometry event " << geometryEvent);
+				const int priorCaretX = textArea.x + cursor;
+				if (geometryEvent == SDL_EVENT_WINDOW_RESIZED)
+					resize(scale == 1.f ? 1840 : 1920, 1080);
+				windowEvent(geometryEvent);
+				click(center("Secondary name"));
+				engine.handleEvents();
+				CHECK(engine.inputContext().pointerGeometryPending && compositionIntact(),
+					"pending geometry blocks pointer focus changes and preserves existing preedit at " << scale <<
+					" for event " << geometryEvent);
+				present();
+				CHECK(!engine.inputContext().pointerGeometryPending && anchorMatches() && compositionIntact(),
+					"rebuilt geometry repoints the anchor without another preedit at " << scale << " for event " << geometryEvent);
+				if (geometryEvent == SDL_EVENT_WINDOW_RESIZED)
+					CHECK(textArea.x + cursor != priorCaretX, "the real resize moves the SDL caret anchor at " << scale);
+				commitText(supplementary);
+				present();
+				expected += supplementary;
+				CHECK(sample.m_field.value() == expected && sample.m_field.composition().empty(),
+					"retained preedit commits once after rebuilt geometry at " << scale << " for event " << geometryEvent);
+			}
+		}
+		sample.setScalePolicy(priorScale);
+		present();
+		const auto nameSessionActive = [&] {
+			return sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window);
+		};
+		const auto clipboardText = [] {
+			char *clipboard = SDL_GetClipboardText();
+			const std::string value = clipboard ? clipboard : "";
+			SDL_free(clipboard);
+			return value;
+		};
+		const auto previousClipboard = clipboardText();
+		queuePreedit("cancel", 1, 2);
+		tap(SDLK_A, SDL_KMOD_CTRL);
+		engine.handleEvents();
+		CHECK(nameSessionActive() && sample.m_field.composition().empty() && sample.m_field.selection() == expected,
+			"Ctrl+A clears composition and selects only committed text in the same SDL session");
+		commitText("alpha beta");
+		tap(SDLK_HOME);
+		tap(SDLK_RIGHT, SDL_KMOD_SHIFT);
+		queuePreedit("copy", 1, 2);
+		tap(SDLK_C, SDL_KMOD_CTRL);
+		engine.handleEvents();
+		CHECK(nameSessionActive() && sample.m_field.value() == "alpha beta" && sample.m_field.selection() == "a" &&
+			sample.m_field.composition() == "copy" && clipboardText() == "a", "Ctrl+C copies only the selection and keeps preedit");
+		tap(SDLK_X, SDL_KMOD_CTRL);
+		engine.handleEvents();
+		CHECK(nameSessionActive() && sample.m_field.value() == "lpha beta" && sample.m_field.composition().empty() &&
+			clipboardText() == "a", "Ctrl+X cancels preedit and removes only the committed selection");
+		tap(SDLK_A, SDL_KMOD_CTRL);
+		queuePreedit("cancel", 1, 2);
+		tap(SDLK_V, SDL_KMOD_CTRL);
+		engine.handleEvents();
+		CHECK(nameSessionActive() && sample.m_field.value() == "a" && sample.m_field.composition().empty(),
+			"Ctrl+V cancels preedit and replaces the committed selection once");
+		checked(SDL_SetClipboardText(previousClipboard.c_str()), "restore showcase clipboard text");
+		queuePreedit("!", 0, 1);
+		commitText("!");
+		engine.handleEvents();
+		expected = "a!";
+		CHECK(nameSessionActive() && sample.m_field.value() == expected && sample.m_field.composition().empty(),
+			"a fresh IME commit follows cancellation in the same SDL session");
+		queuePreedit("cancel", 0, 0);
+		click(center("Name"));
+		engine.handleEvents();
+		CHECK(nameSessionActive() && sample.m_field.composition().empty() &&
+			sample.m_field.value() == expected, "clicking within a composing field clears its preedit in place");
+		queuePreedit("cancel", 0, 0);
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		CHECK(!sample.m_sdlEditor && !SDL_TextInputActive(engine.window) && sample.m_field.composition().empty() &&
+			sample.m_field.value() == expected, "Tab cancels preedit when focus leaves the field");
+		click(center("Secondary name"));
+		present();
+		const auto secondarySessionActive = [&] {
+			return sample.m_sdlEditor == &sample.m_secondaryField && SDL_TextInputActive(engine.window);
+		};
+		std::string secondaryValue = "Secondary";
+		tap(SDLK_END);
+		for (const auto interruption : {SDL_EVENT_WINDOW_FOCUS_LOST, SDL_EVENT_WINDOW_HIDDEN, SDL_EVENT_WINDOW_MINIMIZED})
+		{
+			for (const bool sameBatch : {false, true})
+			{
+				queuePreedit("cancel", 1, 2);
+				present();
+				CHECK(secondarySessionActive() && sample.m_secondaryField.composition() == "cancel",
+					"active preedit precedes interruption " << interruption);
+				windowEvent(interruption);
+				commitText("ignored");
+				const auto checkRetired = [&] {
+					CHECK(!sample.m_sdlEditor && !SDL_TextInputActive(engine.window) &&
+						sample.m_secondaryField.composition().empty() && sample.m_secondaryField.value() == secondaryValue,
+						"interruption retires preedit and SDL ownership at " << interruption << " same batch " << sameBatch);
+				};
+				if (!sameBatch)
+				{
+					engine.handleEvents();
+					checkRetired();
+				}
+				if (interruption == SDL_EVENT_WINDOW_HIDDEN)
+					windowEvent(SDL_EVENT_WINDOW_SHOWN);
+				if (interruption == SDL_EVENT_WINDOW_MINIMIZED)
+					windowEvent(SDL_EVENT_WINDOW_RESTORED);
+				windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+				engine.handleEvents();
+				checkRetired();
+				present();
+				CHECK(secondarySessionActive() && sample.m_secondaryField.composition().empty(),
+					"recovery restores the editor without reviving preedit after " << interruption);
+				commitText("+");
+				present();
+				secondaryValue += "+";
+				CHECK(sample.m_secondaryField.value() == secondaryValue, "fresh text commits after " << interruption);
+			}
+		}
+		queuePreedit("cancel", 0, 0);
 		click(center("Secondary level"));
+		engine.handleEvents();
+		CHECK(!sample.m_sdlEditor && sample.m_secondaryField.composition().empty() &&
+			sample.m_secondaryField.value() == secondaryValue, "clicking another control cancels without committing");
 		click(center("Enable secondary name"));
 		click(center("Secondary name"));
 		text.text.text = "Ignored";
 		checked(SDL_PushEvent(&text), "queue committed text over disabled editor");
 		present();
 		CHECK(!sample.m_enableSecond.value && !sample.m_sdlEditor && !SDL_TextInputActive(engine.window) &&
-			sample.m_secondaryField.value() == "Secondary" && !sample.m_feature.value &&
+			sample.m_secondaryField.value() == secondaryValue && !sample.m_feature.value &&
 			std::abs(sample.m_secondarySlider.value - 0.5f) < 0.01f && std::abs(sample.m_slider.value - 0.55f) < 0.001f,
 			"second slider and toggle are independent, and disabling the field stops its SDL session");
 		CHECK(sample.lastRecordedStats() && sample.lastRecordedStats()->metrics.draws <= 31 &&
@@ -1520,10 +1687,13 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.m_feature.value, "real pointer events hit the relocated control");
 
+		click(center("Name"));
+		queuePreedit("cancel", 0, 0);
 		tap(SDLK_ESCAPE);
 		present();
-		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id,
-			"back restores focus to the showcase opener");
+		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id &&
+			!sample.m_sdlEditor && sample.m_field.composition().empty() && sample.m_field.value() == expected,
+			"back cancels preedit and restores focus to the showcase opener");
 		tap(SDLK_TAB);
 		tap(SDLK_RETURN);
 		present();

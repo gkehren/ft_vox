@@ -17,6 +17,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -63,6 +64,18 @@ struct TempDirGuard
 int main(int argc, char **argv)
 {
 	constexpr const char *kWorldName = "engine-reload";
+	const bool showcase = argc >= 2 && std::string_view(argv[1]) == "--game-ui-showcase-proof";
+	const bool inlineIme = showcase && argc == 3 && std::string_view(argv[2]) == "--inline-ime";
+	if (inlineIme && !SDL_SetHintWithPriority(SDL_HINT_IME_IMPLEMENTED_UI, "composition", SDL_HINT_OVERRIDE))
+	{
+		std::cerr << "FAIL: could not opt in to inline IME for the showcase proof\n";
+		return 1;
+	}
+	const auto imeMode = [] {
+		const char *hint = SDL_GetHint(SDL_HINT_IME_IMPLEMENTED_UI);
+		return std::string(hint ? hint : "");
+	};
+	const std::string startupImeMode = showcase ? imeMode() : std::string{};
 
 	// ---- GPU/window bootstrap: the ONLY skip path (issue #180 review
 	// round 4, item 7). Everything after this is a real test.
@@ -95,8 +108,12 @@ int main(int argc, char **argv)
 			return runGameUiPresentProof(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-design-system")
 			return runGameUiDesignSystem(*engine, argv[2]);
-		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-showcase-proof")
+		if (showcase && (argc == 2 || inlineIme))
+		{
+			if (imeMode() != startupImeMode)
+				throw std::runtime_error("engine startup changed the SDL IME configuration");
 			return runGameUiShowcaseProof(*engine);
+		}
 		if (argc == 2 && std::string_view(argv[1]) == "--game-ui-performance")
 			return runGameUiPerformance(*engine);
 		if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--player-hud-proof")
