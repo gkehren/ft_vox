@@ -132,6 +132,15 @@ void workspaceVisibility()
 	CHECK(!ui::developerUiAvailable(true, true, Visible),
 		"a native player screen removes developer input even with the workspace visible");
 
+	const InputContext waiting{.nativeScreen = true, .modal = true, .pointerGeometryPending = true};
+	CHECK(waiting.choose(Pointer) == Blocked && waiting.choose(Key, false, true) == PlayerUi,
+		"geometry refresh blocks pointers while native modal keyboard routing stays live");
+	InputRouter transition;
+	CHECK(transition.button(1, true, waiting.choose(Pointer)) == Blocked &&
+		transition.button(1, false, Gameplay) == Blocked &&
+		transition.button(1, true, Gameplay) == Gameplay,
+		"a press during refresh keeps its blocked release after composition resumes");
+
 	// Hiding ends developer-owned input: a held developer key is quarantined and
 	// still has to be released, so nothing leaks back into the hidden state.
 	CHECK(ui::endsDeveloperInput(Visible, Hidden) && !ui::endsDeveloperInput(Hidden, Visible) &&

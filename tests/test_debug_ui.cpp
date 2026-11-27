@@ -110,6 +110,7 @@ void testHealthMonitor()
 
 	// Recent-event shape: enter immediately, clear after quiet window.
 	debugui::HealthMonitor event(0.f, 2.f);
+	CHECK(!event.update(false, 1.f), "zero enter still requires a real condition");
 	CHECK(event.update(true, 0.f), "zero enter raises immediately");
 	CHECK(!event.update(false, 2.f), "clears after exit seconds quiet");
 
@@ -243,32 +244,30 @@ void testUpdateDebugUiState()
 	debugui::updateDebugUiState(state, f, t0 + 10.0);
 	CHECK(state.activeChunks.count() == 2, "closed panels stop sampling");
 
-	// The opt-in chunk trace flag is propagated to a fresh RenderWorldBridge by
-	// the sampler itself — even with the inspector panel closed — so it
-	// survives world reloads (issue #179 review).
-	VoxelWorld reloadedWorld(&generator, nullptr); RenderWorldBridge reloaded(&reloadedWorld, nullptr, &pool);
-	state.eventTraceEnabled = true;
-	f.chunks = &reloaded;
-	debugui::updateDebugUiState(state, f, t0 + 10.01);
-	CHECK(reloaded.chunkEventTraceEnabled(), "trace flag re-applied to a recreated manager with F9 closed");
+	// A visibility gap starts a new history and a fresh counter baseline.
+	state.cpuFrameTimes.push(100.f);
+	state.health.meshBacklog.update(true, 4.f);
+	state.eventDelta[telemetry::StagingFailures] = 12;
+	state.interruptSampling();
+	state.panels.overview = true;
+	const auto profilerSamples = prof.historyCount();
+	manager.setChunkEventTraceEnabled(true);
+	debugui::updateDebugUiState(state, f, t0 + 60.0);
+	CHECK(state.cpuFrameTimes.count() == 0 && state.activeChunks.count() == 1,
+		  "resume drops old histories and skips the last hidden CPU frame");
+	CHECK(state.frame.onePercentLowMs == 0.f && !state.health.meshBacklog.active() &&
+		  !state.health.stagingFailures.active() && state.eventDelta[telemetry::StagingFailures] == 0,
+		  "resume never interprets the sampling gap as sustained pressure");
+	CHECK(prof.historyCount() == profilerSamples && manager.chunkEventTraceEnabled(),
+		  "debug statistics leave global capture and bridge configuration alone");
 
-	// reloadWorld() (issue #179 review round 2): the dying manager's flag is
-	// captured and re-applied to the replacement BEFORE generateInitialArea()
-	// — bootstrap lifecycle events must land before any updateDebugUiState
-	// call, not just once the UI has re-synced the flag.
-	const bool carried = reloaded.chunkEventTraceEnabled();
-	CHECK(carried, "dying manager's trace flag captured for the reload");
-	VoxelWorld rebootstrapWorld(&generator, nullptr); RenderWorldBridge rebootstrap(&rebootstrapWorld, nullptr, &pool);
-	rebootstrap.setChunkEventTraceEnabled(carried);
-	Chunk *bootstrapped = pool.acquire(glm::vec3(0.f, 0.f, 0.f));
-	CHECK(bootstrapped != nullptr, "pool provides a chunk for the reload bootstrap");
-	if (bootstrapped)
-	{
-		RenderBridgeProbe::registerChunk(rebootstrap, {0, 0, 0}, bootstrapped);
-		RenderBridgeProbe::recordEvent(rebootstrap, bootstrapped, "load");
-		CHECK(!rebootstrap.chunkDebugEvents().empty(),
-			  "bootstrap events recorded on the reloaded manager before any UI sample");
-	}
+	// A bridge attaches to an already-populated authoritative world. Its
+	// initial binds must be traced before the constructor returns.
+	VoxelWorld rebootstrapWorld(&generator, nullptr);
+	rebootstrapWorld.generateInitialAreaVoxels({0, 90, 0}, 0);
+	RenderWorldBridge rebootstrap(&rebootstrapWorld, nullptr, &pool, 1, true);
+	CHECK(rebootstrap.chunkEventTraceEnabled() && !rebootstrap.chunkDebugEvents().empty(),
+		  "the trace is configured before resident chunks are bound");
 
 	std::cout << "PASS\n";
 }

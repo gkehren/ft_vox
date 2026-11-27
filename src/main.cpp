@@ -83,7 +83,7 @@ int main(int argc, char **argv)
 	bool showPlayerHud = true;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
-	std::optional<int> qualityPreset;
+	std::optional<GraphicsQualityPreset> qualityPreset;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
 	int benchmarkViewSwitch = 0;
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
 				std::cerr << "Error: --quality accepts low|medium|high|cinematic (or 0-3).\n";
 				return kExitUsage;
 			}
-			qualityPreset = preset;
+			qualityPreset = static_cast<GraphicsQualityPreset>(preset);
 			continue;
 		}
 		if (arg == "--vsync")
@@ -439,7 +439,7 @@ int main(int argc, char **argv)
 		const bool directSolo = !worldName.empty() || directSeed || benchmarkDuration > 0.f ||
 			inspection || uiSpike || gameUiPreview;
 		Engine engine(resourcePack);
-		engine.setPlayerSettingsOverrides(vsyncOverride.has_value(), qualityPreset.has_value());
+		engine.setPlayerSettingsOverrides(vsyncOverride.has_value(), qualityPreset);
 		engine.setShowDeveloperUi(showDeveloperUi);
 		engine.setShowPlayerHud(showPlayerHud);
 		if (server)
@@ -458,7 +458,7 @@ int main(int argc, char **argv)
 		if (vsyncOverride)
 			engine.setVSync(*vsyncOverride);
 		if (qualityPreset)
-			engine.setGraphicsQualityPreset(static_cast<GraphicsQualityPreset>(*qualityPreset));
+			engine.setGraphicsQualityPreset(*qualityPreset);
 		if (frontBiasOverride)
 			engine.setStreamFrontBias(*frontBiasOverride);
 		if (shadowMapSizeOverride > 0)

@@ -80,7 +80,7 @@ bool Engine::developerUiAvailable() const
 
 gameui::InputContext Engine::inputContext() const
 {
-	const bool devAvailable = developerUiAvailable();
+	const bool devAvailable = developerInputReady();
 	const bool pendingDevFocus = devAvailable && imgui->pendingKeyboard();
 	return {
 		.interactive = windowFocused && !m_windowHidden && !m_windowMinimized,
@@ -93,6 +93,7 @@ gameui::InputContext Engine::inputContext() const
 			(mouseCaptured ? imgui->ownsActiveInput() : imgui->ownsKeyboard())),
 		.devDialog = devAvailable && (imgui->hasModal() || (developerUi && developerUi->isFileDialogOpen())),
 		.devText = pendingDevFocus || (devAvailable && imgui->editingText()),
+		.pointerGeometryPending = m_uiGeometryPending,
 		.transition = m_playerSessionRequest.has_value() || switchingSession() || (m_remote && !m_remote->ready()),
 		.captureFailed = m_captureFailed,
 	};
@@ -101,7 +102,7 @@ gameui::InputContext Engine::inputContext() const
 ImGuiLayer::PointerHit Engine::developerPointerAt(float x, float y) const
 {
 	using enum ImGuiLayer::PointerHit;
-	if (!developerUiAvailable())
+	if (!developerInputReady())
 		return PassThrough;
 	return mouseCaptured ? (imgui->ownsActiveInput() ? Interactive : PassThrough) : imgui->pointerHit(x, y);
 }
@@ -136,24 +137,21 @@ void Engine::setDeveloperWorkspaceVisible(bool visible)
 	}
 	if (m_showDeveloperUi == visible)
 		return;
-	if (ui::endsDeveloperInput(m_showDeveloperUi ? ui::Workspace::Visible : ui::Workspace::Hidden,
-			visible ? ui::Workspace::Visible : ui::Workspace::Hidden))
+	m_showDeveloperUi = visible;
+	syncUiInput();
+}
+
+void Engine::invalidateUiGeometry()
+{
+	m_uiGeometryPending = true;
+	cancelGameUiPointer();
+	m_inputRouter.cancelPointer(gameui::InputOwner::Gameplay);
+	cancelDeveloperInput();
+	if (m_playerUi)
 	{
-		// Release developer input and close its dialogs before hiding the workspace.
-		cancelDeveloperInput();
-		if (developerUi)
-			developerUi->cancelDeveloperDialogs();
-		if (imgui)
-			imgui->dismissFocusAndPopups();
-	}
-	if (inventoryPanelOpen())
-	{
-		cancelGameUiPointer();
 		m_playerUi->cancelInventoryGesture();
 		m_playerUi->invalidateLayout();
 	}
-	m_showDeveloperUi = visible;
-	syncUiInput();
 }
 
 void Engine::syncUiInput()
@@ -183,14 +181,18 @@ void Engine::syncUiInput()
 		setMouseCaptured(restore);
 	}
 	const bool suppressed = suppressDeveloperUi();
-	if (m_developerSuppressed != suppressed)
+	const bool composed = developerUiAvailable();
+	if (m_developerComposed != composed || m_developerSuppressed != suppressed)
 	{
-		m_developerSuppressed = suppressed;
-		cancelDeveloperInput();
-		if (suppressed && developerUi)
+		invalidateUiGeometry();
+		if (m_developerComposed && !composed)
+		{
 			developerUi->cancelDeveloperDialogs();
-		if (suppressed && imgui)
-			imgui->dismissFocusAndPopups();
+			developerUi->suspendSampling();
+			imgui->suspendPresentation();
+		}
+		m_developerComposed = composed;
+		m_developerSuppressed = suppressed;
 	}
 	// F01 (#316): Developer UI keyboard ownership (an open editor, an
 	// armed widget, a popup or a latched navigation focus) forfeits an
@@ -198,7 +200,7 @@ void Engine::syncUiInput()
 	// Passive wantCaptureKeyboard — retained by mere hover focus — never
 	// latches ownership (round 2), so it cannot cancel a gesture the
 	// player is making in the native screen.
-	if (m_playerUi && inventoryPanelOpen() && developerUiAvailable() && !suppressed &&
+	if (m_playerUi && inventoryPanelOpen() && developerInputReady() &&
 		imgui && imgui->ownsKeyboard())
 		m_playerUi->cancelInventoryGesture();
 	auto policy = inputContext();
@@ -251,10 +253,13 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 				imgui->releaseKeyboardOwnership();
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+			cancelGameUiPointer();
+			break;
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
-			cancelGameUiPointer();
+		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+			invalidateUiGeometry();
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
 		{
@@ -305,7 +310,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		owner = m_inputRouter.key(size_t(scan), down, event.key.repeat, candidate);
 		// Dev UI uses aggregate modifiers for docking and pointer shortcuts
 		// even when the physical modifier is held for gameplay.
-		if (developerUiAvailable() && policy.interactive && owner != DeveloperUi)
+		if (developerInputReady() && policy.interactive && owner != DeveloperUi)
 			imgui->observeModifiers(event.key.mod);
 		if (owner == PlayerUi && down && !event.key.repeat && (back || (inventoryShortcut && policy.inventory)))
 		{
@@ -334,7 +339,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		policy.devPointer = devHit == ImGuiLayer::PointerHit::Interactive;
 		policy.devOccludes = devHit == ImGuiLayer::PointerHit::Occludes;
 		const auto press = m_inputRouter.pointerOwner();
-		policy.nativePointer = !mouseCaptured && m_playerUi && !wheel &&
+		policy.nativePointer = !policy.pointerGeometryPending && !mouseCaptured && m_playerUi && !wheel &&
 			(motion ? press == PlayerUi : event.button.button == SDL_BUTTON_LEFT) && m_playerUi->hitsStrip(x, y);
 		const auto candidate = m_captureFailed && mouseCaptured ? Blocked : policy.choose(InputKind::Pointer);
 		const bool continuing = motion ||
@@ -354,10 +359,10 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 			m_playerUi->cancelInventoryGesture();
 		// Position feeds ImGui hover bookkeeping. Only Dev-owned button and
 		// wheel edges reach its controls, even when ownership changes mid-press.
-		if (developerUiAvailable() && policy.interactive && !mouseCaptured &&
+		if (developerInputReady() && policy.interactive && !mouseCaptured &&
 			((motion && owner != DeveloperUi) || (!motion && owner == DeveloperUi)))
 			imgui->observePointer(x, y);
-		if (developerUiAvailable() && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+		if (developerInputReady() && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
 			((event.button.button == SDL_BUTTON_LEFT &&
 				 ((owner == PlayerUi && m_playerUi &&
 					  (policy.nativeScreen ? m_playerUi->canFocusWidget(x, y) : policy.nativePointer)) ||

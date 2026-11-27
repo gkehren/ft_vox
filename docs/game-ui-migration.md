@@ -22,6 +22,14 @@ confirmations keep input and suppress ImGui drawing. F1 updates the
 workspace visibility to apply on dismissal. Connected Pause remains
 local and the server continues to tick.
 
+Pointer input waits for the next successful presentation after a composition,
+window-size or display-scale change. Engine invalidates native layout and
+quarantines held buttons until release, so a click queued with F1 or modal
+dismissal cannot hit old rectangles or pass through to the world. Global
+keyboard shortcuts still run during the transition. When Developer UI
+relinquishes the cursor, SDL restores its default cursor and the ImGui cursor
+cache is cleared. SDL relative mode retains its current state.
+
 Engine builds `DeveloperUiFrame` only for a visible workspace or an explicit
 biome-map benchmark. Hidden frames skip ImGui frame construction. The live
 context and existing window IDs preserve dock associations, and
@@ -30,7 +38,27 @@ ImGui initialization, swapchain recreation and shutdown stay independent
 of visibility. Native presentation receives bounded view models and submits
 typed intents. Developer network and server views receive read-only
 diagnostics. Native join, hosting and administration keep the existing
-Engine adapters and verification checks.
+Engine adapters and verification checks. The developer roster displays fresh
+entries through the existing clipper and keeps no selection or admin state.
+
+Engine resolves effective FXAA from the native preference or the launch-time
+`--quality` override. Developer preset selection and preset reset apply the
+pack's rendering values and preserve effective FXAA. Reset Post restores the
+pack's post fields and leaves FXAA alone. Native Settings displays the effective
+value and the override status. Only a native preference change writes FXAA to
+disk.
+
+Chunk Inspector's trace checkbox sends an Engine command. The Engine-owned
+setting is off by default and is applied when a render bridge is constructed,
+before bootstrap or resident chunk attachment. The bounded event ring can
+continue collecting during hidden play and the setting survives world and
+session transitions.
+
+Developer panel histories and sustained alerts cover the current visible
+sampling interval. After hiding, modal suppression or a long presentation gap,
+they restart with fresh counter baselines. ImGui resumes with a fresh frame
+delta. Engine profiler and benchmark captures keep their independent timeline.
+The Performance GPU capture graph is labeled accordingly.
 
 | Surface | Route and parity |
 | --- | --- |
@@ -58,20 +86,19 @@ tree resumed when reopened.
 | Check | Result |
 | --- | --- |
 | Windows Release graphics-off build and CTest | 55/55 passed, including CoreIncludeGuard and HeadlessDeps. |
-| Windows Release graphical build and focused CTest | Game and server built. 10/10 selected UI, graphics and biome-map tests passed. |
-| Vulkan HUD/workspace proof | 66 checks passed. Covers default hidden, F1 and its alias, key repeat, drag cancellation, Pause, quit confirmation, Inventory, panel shortcuts, H, reset/default layout, swapchain, atlas and world changes. |
-| Vulkan presentation and Settings | Present proof passed 39 checks. Settings passed 46 checks and the fresh-process restart proof passed, including independent developer scale and visibility and display rollback. |
-| Graphical join and native hosted flows | Join smoke passed 63 checks, including reconnect with Developer UI hidden and F1 during connected play and Pause. Native Host/Join passed for owner and guest, including verified administration. The two-client hosted closure passed the inventory matrix, checkpoint and restart. |
+| Windows Release graphical build and focused CTest | All graphical targets built. 10/10 selected UI, graphics and biome-map tests passed. |
+| Vulkan HUD/workspace proof | 80 checks passed, including same-batch pointer quarantine on F1 and modal dismissal, the SDL cursor, timing on resume, resize and display scale, docking restoration, and hidden-world bootstrap tracing. |
+| Vulkan presentation and Settings | Presentation passed 39 checks. Settings passed 49 checks and restart passed 10, including developer preset resets, FXAA persistence, both CLI FXAA override values, and display rollback. |
+| Graphical join and native hosted flows | Join smoke passed 65 checks, including F1 during connected play and trace inheritance across remote connection and solo restoration. The native session menu passed 35 checks, including hidden world creation. Native Host/Join passed for owner and guest on an isolated retry after one missed guest menu click. Hosted closure passed the inventory matrix, checkpoint and restart. |
 | Production CLI benchmark | Wrote reports for the standard hidden run and the explicit `--benchmark-map 0.5` run. |
-| Vulkan validation | The successful GPU runs reported the documented RTSS swapchain diagnostics. The HUD proof counted 14 such messages and zero additional errors. |
+| Vulkan validation | The successful GPU runs reported the documented RTSS swapchain diagnostics. The HUD proof counted 28 such messages and zero additional errors. |
 
 The separate solo inventory proof exercised F1 while a real ImGui text editor
-owned the keyboard. Its existing ten pointer and inventory assertions also
-failed on the pre-change binary on this desktop. The hosted inventory matrix
-passed its ten operations with the original 117-item budget conserved. The
-showcase proof reproduced the same two slider assertions on both binaries.
-The Vulkan proofs injected SDL events and the resulting captures were reviewed
-visually.
+owned the keyboard. Its ten known pointer and inventory assertions and the
+showcase proof's two known slider assertions reproduced on this desktop.
+Those twelve failures are tracked separately from the correction checks.
+The hosted inventory matrix passed all ten operations and conserved the
+117-item budget. The Vulkan proofs injected SDL events.
 
 ## Native player inventory (#304)
 

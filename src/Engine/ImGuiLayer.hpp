@@ -25,7 +25,7 @@ public:
 	void observePointer(float x, float y);
 	void observeModifiers(SDL_Keymod mods);
 	void cancelInput();
-	void dismissFocusAndPopups();
+	void suspendPresentation();
 	void yieldKeyboard();
 	void beginFrame();
 	void endFrame(); // ImGui::Render()

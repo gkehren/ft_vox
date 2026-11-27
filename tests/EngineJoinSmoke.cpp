@@ -292,6 +292,7 @@ struct EngineJoinProbe
 			engine.requestSwapchainRecreate();
 			return false;
 		}
+		engine.noteUiFramePresented();
 		++engine.frameNumber;
 		return true;
 	}
@@ -1668,7 +1669,11 @@ struct EngineJoinProbe
 		pump();
 		CHECK(engine.sim.get() == solo && !engine.m_joinError.empty(), "invalid join leaves solo running");
 
+		engine.setChunkTraceEnabled(true);
 		join(first, "alice", "42");
+		CHECK(engine.renderBridge && engine.renderBridge->chunkEventTraceEnabled() &&
+			!engine.renderBridge->chunkDebugEvents().empty(),
+			"remote projection traces chunk arrivals while the Developer UI is hidden");
 		engine.tickDayCycle(1.0);
 		const auto aliceId = engine.m_remote->welcome->player;
 		const auto firstScope = engine.m_remote->scope;
@@ -1798,6 +1803,9 @@ struct EngineJoinProbe
 		    "return restores paused solo position, inventory, time and visible terrain");
 		CHECK(engine.renderBridge && engine.renderBridge->chunkCount() > 0 &&
 			engine.renderBridge->pendingGenJobs() == 0, "solo projection rebinds after workers drain");
+		CHECK(engine.renderBridge->chunkEventTraceEnabled() &&
+			!engine.renderBridge->chunkDebugEvents().empty(),
+			"restoring a suspended solo world keeps tracing and records the initial binds");
 
 		net::udp::Socket silentServer({0x7f000001, 0});
 		frame().connectServer({client::formatEndpoint(silentServer.address()), "bob", ""});

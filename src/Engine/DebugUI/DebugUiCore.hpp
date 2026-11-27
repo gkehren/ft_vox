@@ -6,7 +6,7 @@
 // the aggregation helpers are unit-testable without Vulkan or a window.
 //
 // Data flow: Engine fills DeveloperUiFrame once per frame (as before);
-// updateDebugUiState() (DebugUiEngine.hpp, defined in DebugUiCore.cpp)
+// updateDebugUiState() (DebugUiEngine.hpp, defined in DebugUiState.cpp)
 // samples it into the snapshots below at a throttled rate, and the domain
 // panels (DebugPanels.hpp) render from UiState. Panels keep direct access to
 // the settings structs (RenderSettings / ShaderParameters /
@@ -18,6 +18,7 @@
 #include <Engine/PlayerUi.hpp>
 
 #include <array>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -279,7 +280,9 @@ public:
 	MemoryDebugSnapshot memory;
 	PlayerDebugSnapshot player;
 
-	// 10 Hz bounded histories (sampled only while a consumer panel is open).
+	// Presentation histories cover the current visible interval.
+	MetricHistory cpuFrameTimes; // previous completed frames at frame cadence
+	// 10 Hz histories sampled while a consumer panel is open.
 	MetricHistory cpuMs;
 	MetricHistory gpuMs;
 	MetricHistory pendingMesh;
@@ -308,18 +311,17 @@ public:
 	// Chunk inspector selection (chunk coordinates; Y is always 0 today).
 	glm::ivec3 inspectCoord{0, 0, 0};
 	bool inspectHasTarget{false};
-	bool eventTraceEnabled{false}; // mirrors RenderWorldBridge's opt-in trace
 
 	// Previous telemetry sample, for "since last refresh" event deltas.
 	bool hasPrevEvents{false};
 	std::array<uint64_t, telemetry::EventCount> prevEvents{};
 	std::array<uint64_t, telemetry::EventCount> eventDelta{};
 	double lastTelemetrySample{-1.0};
-	double lastHistorySample{-1.0};
-	float dtSinceLastSample{0.f};
+	bool samplingInterrupted{};
+	void interruptSampling() { samplingInterrupted = true; }
 
 	// Recent-event health bookkeeping (cumulative counters -> last-seen time).
-	size_t prevPoolRejects{0};
+	std::optional<size_t> prevPoolRejects;
 	double lastPoolRejectIncrease{-100.0};
 	double lastStagingFailureAt{-100.0};
 

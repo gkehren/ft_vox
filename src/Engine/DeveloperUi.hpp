@@ -146,6 +146,8 @@ struct DeveloperUiFrame
 	std::function<void(float)> setCameraMovementSpeed;
 	std::function<void(float)> setIsometricZoom;
 	RenderWorldBridge *chunks{nullptr};
+	bool chunkTraceEnabled{};
+	std::function<void(bool)> setChunkTraceEnabled;
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};
 	WorldRenderer *worldRenderer{nullptr};
@@ -200,6 +202,7 @@ struct DeveloperUiFrame
 	bool validation{false};
 
 	bool *hudHints{};
+	std::function<void(GraphicsQualityPreset)> applyGraphicsQuality;
 	/// True while a VSync change awaits the deferred swapchain recreate
 	/// (Graphics ▸ Display marks the present mode "(applying)").
 	bool vsyncPending{false};
@@ -250,6 +253,7 @@ public:
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(DeveloperUiFrame &frame);
+	void suspendSampling() { m_debug.interruptSampling(); }
 	/// Close developer-owned modal surfaces when the workspace is hidden
 	/// (issue #303 F04): a file browser must not survive as an invisible open
 	/// dialog that still owns developer input state.
@@ -372,7 +376,6 @@ private:
 	void drawStatusOverlay(DeveloperUiFrame &frame);
 	void drawPlayerPanel(DeveloperUiFrame &frame);
 	void drawMultiplayerPanel(const DeveloperUiFrame &frame);
-	void drawHostedPlayers(const hosting::Snapshot *server);
 	void drawWorld(DeveloperUiFrame &frame);
 	void drawHelp(DeveloperUiFrame &frame);
 	void requestBiomeMapRefresh()
@@ -400,6 +403,7 @@ private:
 	/// Developer-console state: panel visibility + debug snapshots + bounded
 	/// histories (issue #179). Refreshed once per draw by updateDebugUiState.
 	debugui::UiState m_debug{};
+	double m_lastDrawAt{-1.0};
 
 	/// Explicit hidden-mode flag for the H shortcut (never derived from panel
 	/// visibility: a layout is hidden because H was pressed, not because
@@ -409,8 +413,6 @@ private:
 	/// the next H. Never written while the layout is hidden — manual panel
 	/// opens abandon the snapshot via leaveLayoutTilesHidden() instead.
 	ui::LayoutTilesSnapshot m_savedTilesState{};
-	sim::PlayerId m_hostPlayerSelection;
-	uint64_t m_hostSelectionLaunch{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};

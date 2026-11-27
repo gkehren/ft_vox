@@ -1,8 +1,7 @@
 // Engine-facing snapshot collection for the developer console (issue #179).
 // Everything here is read-only with respect to the engine: chunk counters
 // are atomic or main-thread-only state, telemetry uses the non-destructive
-// sampleLive() path, and the only cross-thread writer touched is
-// RenderWorldBridge's opt-in event-trace enable flag.
+// sampleLive() path.
 
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 
@@ -15,6 +14,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <numeric>
+#include <utility>
 
 namespace debugui
 {
@@ -183,7 +184,7 @@ static void sampleStreamingDomain(UiState &state, const DeveloperUiFrame &frame,
 		s.poolAcquired = pool.acquiredCount();
 		s.poolRejects = pool.rejectCount();
 		s.poolGrows = pool.growEvents();
-		if (s.poolRejects > state.prevPoolRejects)
+		if (state.prevPoolRejects && s.poolRejects > *state.prevPoolRejects)
 			state.lastPoolRejectIncrease = nowSeconds;
 		state.prevPoolRejects = s.poolRejects;
 	}
@@ -248,30 +249,57 @@ static void sampleMemoryDomain(UiState &state, const DeveloperUiFrame &frame, do
 
 // --- Per-frame state refresh ---
 
+static void restartSampling(UiState &state)
+{
+	for (auto *history : {&state.cpuFrameTimes, &state.cpuMs, &state.gpuMs,
+		&state.pendingMesh, &state.pendingLoad, &state.pendingGen, &state.pendingLight,
+		&state.uploadBacklog, &state.activeChunks, &state.gpuLiveBytes, &state.retiredBytes,
+		&state.stagingUsed, &state.arenaUtilization})
+		history->clear();
+
+	resetScopeStats(state);
+	state.frame.avgMs = state.frame.onePercentLowMs = 0.f;
+	state.health = {};
+	state.lastTelemetrySample = -1.0;
+	state.prevPoolRejects.reset();
+	state.lastPoolRejectIncrease = state.lastStagingFailureAt = -100.0;
+	state.hasPrevEvents = false;
+	state.eventDelta.fill(0);
+}
+
+static void summarizeVisibleFrames(UiState &state)
+{
+	const auto count = state.cpuFrameTimes.count();
+	if (!count)
+		return;
+	std::array<float, kMetricHistorySize> samples;
+	state.cpuFrameTimes.copyOrdered(samples.data());
+	const auto end = samples.begin() + count;
+	state.frame.avgMs = std::accumulate(samples.begin(), end, 0.f) / float(count);
+	const auto slowCount = std::max<size_t>(1, count / 100);
+	std::partial_sort(samples.begin(), samples.begin() + slowCount, end, std::greater<>{});
+	state.frame.onePercentLowMs = std::accumulate(samples.begin(), samples.begin() + slowCount, 0.f) /
+		float(slowCount);
+}
+
 void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
+	const bool resumed = std::exchange(state.samplingInterrupted, false);
+	if (resumed)
+		restartSampling(state);
 	// Cheap frame-level snapshot: every frame, main-thread scalar reads.
 	{
-		// Keep the opt-in chunk lifecycle trace alive across world reloads:
-		// the flag lives in UiState and is re-applied every frame, even with
-		// the inspector closed, so a recreated RenderWorldBridge inherits it
-		// (issue #179 review). Idempotent one-bool store.
-		if (frame.chunks)
-			frame.chunks->setChunkEventTraceEnabled(state.eventTraceEnabled);
-
 		Profiler &prof = GetProfiler();
 		state.frame.fps = frame.fps;
 		// CPU frame time comes from the profiler's full-frame scope, not the
 		// paced simulation delta (DeveloperUiFrame::frameMs): vsync pacing and
 		// stall absorption make the two diverge (issue #179 review).
-		state.frame.cpuFrameMs = prof.lastFrameMs();
+		state.frame.cpuFrameMs = resumed ? 0.f : prof.lastFrameMs();
 		state.frame.simulationDtMs = frame.frameMs;
-		state.frame.avgMs = prof.avgFrameMs();
-		state.frame.onePercentLowMs = prof.onePercentLowMs();
 		state.frame.vsync = frame.render ? frame.render->vsyncEnabled : false;
 		state.frame.presentMode = frame.presentModeName ? frame.presentModeName : "";
 		state.frame.gpuValid = false;
-		if (frame.gpu)
+		if (frame.gpu && !resumed)
 		{
 			const GpuFrameSample &gpu = frame.gpu->latest();
 			if (gpu.serial && gpu.present[size_t(GpuPass::Frame)])
@@ -320,8 +348,10 @@ void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double no
 			resetScopeStats(state);
 			state.lastProfilerEpoch = epoch;
 		}
-		if (state.panels.performance)
+		if (!resumed && state.panels.performance)
 			updateScopeFrameStats(state);
+		if (!resumed && (state.panels.performance || state.panels.overview) && state.frame.cpuFrameMs > 0.f)
+			state.cpuFrameTimes.push(state.frame.cpuFrameMs);
 	}
 
 	const bool needStreaming = state.panels.overview || state.panels.streaming;
@@ -342,9 +372,10 @@ void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double no
 	const float dt = state.lastTelemetrySample < 0.0
 						 ? 0.016f
 						 : float(std::min(nowSeconds - state.lastTelemetrySample, 1.0));
-	state.dtSinceLastSample = dt;
 	state.lastTelemetrySample = nowSeconds;
 
+	if (state.panels.overview || needPerformance)
+		summarizeVisibleFrames(state);
 	if (needPerformance)
 		sampleScopeHistories(state);
 
@@ -361,18 +392,10 @@ void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double no
 	// memory-derived monitors freeze instead of advancing on stale data.
 	if (state.panels.overview)
 	{
-		state.cpuMs.push(GetProfiler().lastFrameMs());
-		if (frame.gpu)
-		{
-			const GpuFrameSample &gpu = frame.gpu->latest();
-			state.gpuMs.push(gpu.serial && gpu.present[size_t(GpuPass::Frame)]
-								 ? gpu.ms[size_t(GpuPass::Frame)]
-								 : 0.f);
-		}
-		else
-		{
-			state.gpuMs.push(0.f);
-		}
+		if (state.frame.cpuFrameMs > 0.f)
+			state.cpuMs.push(state.frame.cpuFrameMs);
+		if (state.frame.gpuValid)
+			state.gpuMs.push(state.frame.gpuFrameMs);
 		state.health.update(state, dt);
 	}
 	else if (state.panels.streaming)

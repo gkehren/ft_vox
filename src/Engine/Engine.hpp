@@ -83,11 +83,7 @@ public:
 	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
 
 	void setVSync(bool enabled);
-	void setPlayerSettingsOverrides(bool vsync, bool fxaa)
-	{
-		m_playerVSyncOverride = vsync;
-		m_playerFxaaOverride = fxaa;
-	}
+	void setPlayerSettingsOverrides(bool vsync, std::optional<GraphicsQualityPreset> quality);
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
 	int worldSeed() const;
@@ -206,6 +202,7 @@ private:
 	void requestPlayerVSync(bool enabled, bool persist);
 	void finishPlayerVSync(bool applied);
 	void applyPlayerMouseSensitivity(int percent);
+	void applyPlayerFxaa();
 	void resetPlayerSettingsDefaults(bool resetWindow);
 	void loadHosting();
 	void populateHostingActions(MultiplayerActions &actions);
@@ -230,6 +227,8 @@ private:
 	void noteSessionFramePresented() { m_sessionProgressPresented |= m_playerSessionRequest.has_value(); }
 	void completePlayerSession();
 	void failPlayerSession(std::string message, bool retryable = true);
+	void createRenderBridge(VoxelWorld *world, uint64_t generation);
+	void setChunkTraceEnabled(bool enabled);
 	void finishSoloBootstrap(glm::dvec3 center, bool resident);
 	struct SoloWorkResult
 	{
@@ -334,6 +333,9 @@ private:
 	/// Only visible developer surfaces build ImGui frames and receive input.
 	/// A native modal temporarily suppresses developer drawing and input.
 	bool developerUiAvailable() const;
+	bool developerInputReady() const { return !m_uiGeometryPending && developerUiAvailable(); }
+	void invalidateUiGeometry();
+	void noteUiFramePresented() { m_uiGeometryPending = false; }
 	gameui::HudView playerHudView() const;
 	gameui::InputContext inputContext() const;
 	ImGuiLayer::PointerHit developerPointerAt(float x, float y) const;
@@ -476,13 +478,15 @@ private:
 	gameui::InputRouter m_inputRouter;
 	std::optional<bool> m_captureBeforeScreen;
 	uint64_t m_uiScreenRevision{};
-	bool m_developerSuppressed{}, m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
+	bool m_developerSuppressed{}, m_developerComposed{}, m_uiGeometryPending{};
+	bool m_movementAllowed{}, m_windowHidden{}, m_windowMinimized{}, m_captureFailed{};
 	bool m_uiSpike{false};
 	bool m_showDeveloperUi{};
 	bool m_showHudHints{true};
 	bool m_showPlayerHud{true};
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
+	bool m_chunkTraceEnabled{};
 	// Authoritative simulation + derived render projection (Epic #204,
 	// issues #208/#209). GameSimulation owns the TerrainGenerator,
 	// VoxelWorld, PlayerController and MobSystem (CPU-only ft_vox_core); the
@@ -513,7 +517,8 @@ private:
 	std::string m_playerUiError;
 	std::string m_playerSettingsNotice;
 	bool m_playerUiDirty{};
-	bool m_playerVSyncOverride{}, m_playerFxaaOverride{};
+	bool m_playerVSyncOverride{};
+	std::optional<bool> m_playerFxaaOverride;
 	// Present while a settings-originated request awaits swapchain recreation.
 	// True means a successful application is also an explicit disk edit.
 	std::optional<bool> m_playerVSyncRequest;

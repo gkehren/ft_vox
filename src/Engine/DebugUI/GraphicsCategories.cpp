@@ -72,22 +72,22 @@ void drawGeneral(debugui::UiState &s, DeveloperUiFrame &frame)
 	ImGui::SeparatorText("Quality");
 	const char *presetNames[] = {"Low", "Medium", "High", "Cinematic"};
 	int presetIdx = static_cast<int>(pp.qualityPreset);
-	if (ImGui::Combo("Quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)))
-		pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
+	if (ImGui::Combo("Quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)) && frame.applyGraphicsQuality)
+		frame.applyGraphicsQuality(static_cast<GraphicsQualityPreset>(presetIdx));
 
 	// Issue #185: surface drift from the selected pack instead of hiding it —
 	// matchesPreset ignores the runtime underwater state + debug views.
 	// Stacked vertically (no SameLine chain) so the reset button stays
 	// visible at 360 px docked width.
-	const bool custom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
+	const bool custom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset, /*compareFxaa=*/false);
 	if (custom)
 	{
 		ImGui::Text("Preset: Custom (based on %s)", presetName(pp.qualityPreset));
 		char resetLabel[48];
 		std::snprintf(resetLabel, sizeof(resetLabel), "Reset to %s",
 					  presetName(pp.qualityPreset));
-		if (ImGui::Button(resetLabel))
-			pp.applyPreset(pp.qualityPreset);
+		if (ImGui::Button(resetLabel) && frame.applyGraphicsQuality)
+			frame.applyGraphicsQuality(pp.qualityPreset);
 	}
 	else
 	{
@@ -95,13 +95,12 @@ void drawGeneral(debugui::UiState &s, DeveloperUiFrame &frame)
 		ImGui::SameLine();
 		ui::statusBadge(presetName(pp.qualityPreset), ui::StatusKind::Ok);
 	}
-	ui::helpMarker("Presets control shadow resolution, FXAA, bloom, SSAO, god rays, film "
+	ui::helpMarker("Presets control shadow resolution, bloom, SSAO, god rays, film "
 				   "grain, vignette, post grade and the exposure/tonemap baseline. The pack "
 				   "also drives runtime water tiers in the renderer (SSR march budget, "
 				   "water shadows / caustics). Lighting, atmosphere, water appearance, "
-				   "display, resource packs, UI scale and debug views are never touched.");
-	ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain / spatial AA "
-						"(Low: off) plus the runtime water quality tier.");
+				   "display, player FXAA, resource packs, UI scale and debug views are unchanged.");
+	ImGui::TextDisabled("FXAA follows the Game Menu setting or the command-line quality choice.");
 }
 
 void drawDisplay(debugui::UiState &s, DeveloperUiFrame &frame)
@@ -332,7 +331,7 @@ void drawPost(debugui::UiState &s, DeveloperUiFrame &frame)
 	}
 	ImGui::Text("Spatial AA (FXAA 3.11): %s", pp.fxaaEnabled ? "On" : "Off");
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.\nThe Low preset disables AA.");
+		ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.");
 	// Presets and post resets never touch ssaoDebugView (Render Debug owns
 	// it, and the renderer gates stale views via effectiveSsaoDebugView).
 	// Clearing it here is deliberate UX: an explicit SSAO disable also

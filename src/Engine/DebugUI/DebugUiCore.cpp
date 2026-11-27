@@ -110,16 +110,16 @@ bool HealthMonitor::update(bool condition, float dtSeconds)
 		m_conditionSeconds = 0.f;
 	}
 
-	if (!m_active && m_conditionSeconds >= m_enterSeconds)
+	if (!m_active && condition && m_conditionSeconds >= m_enterSeconds)
 		m_active = true;
-	else if (m_active && m_clearSeconds >= m_exitSeconds)
+	else if (m_active && !condition && m_clearSeconds >= m_exitSeconds)
 		m_active = false;
 	return m_active;
 }
 
 void HealthMonitor::reset()
 {
-	m_conditionSeconds = 0.f;
+	m_conditionSeconds = m_clearSeconds = 0.f;
 	m_active = false;
 }
 

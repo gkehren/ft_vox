@@ -98,6 +98,8 @@ static void drawMultiplayerNetworkStats(const ui::NetworkStats &stats)
 		"%llu", "Times movement prediction discarded its pending state and reset.");
 }
 
+static void drawHostedPlayers(const hosting::Snapshot *server);
+
 void DeveloperUi::drawMultiplayerPanel(const DeveloperUiFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
@@ -131,22 +133,10 @@ void DeveloperUi::drawMultiplayerPanel(const DeveloperUiFrame &frame)
 	ImGui::End();
 }
 
-void DeveloperUi::drawHostedPlayers(const hosting::Snapshot *server)
+static void drawHostedPlayers(const hosting::Snapshot *server)
 {
 	const auto *sample = server && server->state == hosting::State::Ready && server->status &&
 		monitoring::fresh(server->status->sampledMs, monitoring::monotonicMs()) ? server->status.get() : nullptr;
-	if (!sample || m_hostSelectionLaunch != server->launch)
-		m_hostPlayerSelection = {};
-	m_hostSelectionLaunch = server ? server->launch : 0;
-	if (sample && m_hostPlayerSelection.valid())
-	{
-		const auto players = sample->transport.roster();
-		const auto found = std::ranges::lower_bound(players, m_hostPlayerSelection.value, {}, [](const auto &player) {
-			return player.id.value;
-		});
-		if (found == players.end() || found->id != m_hostPlayerSelection)
-			m_hostPlayerSelection = {};
-	}
 	if (!ImGui::CollapsingHeader("Players"))
 		return;
 	if (!sample)
@@ -179,12 +169,9 @@ void DeveloperUi::drawHostedPlayers(const hosting::Snapshot *server)
 			for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
 			{
 				const auto &row = players[static_cast<size_t>(index)];
-				char label[32];
-				std::snprintf(label, sizeof(label), "Player #%u", static_cast<unsigned>(row.id.value));
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
-				if (ImGui::Selectable(label, m_hostPlayerSelection == row.id, ImGuiSelectableFlags_SpanAllColumns))
-					m_hostPlayerSelection = row.id;
+				ImGui::Text("Player #%u", static_cast<unsigned>(row.id.value));
 				ImGui::TableSetColumnIndex(1);
 				ImGui::TextUnformatted(sessionLabel(row.state));
 			}

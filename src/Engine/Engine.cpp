@@ -339,14 +339,26 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	finishSoloBootstrap(bootstrapCenter, false);
 }
 
+void Engine::createRenderBridge(VoxelWorld *world, uint64_t generation)
+{
+	renderBridge = std::make_unique<RenderWorldBridge>(world, threadPool.get(), chunkPool.get(),
+		generation, m_chunkTraceEnabled);
+}
+
+void Engine::setChunkTraceEnabled(bool enabled)
+{
+	m_chunkTraceEnabled = enabled;
+	if (renderBridge)
+		renderBridge->setChunkEventTraceEnabled(enabled);
+}
+
 void Engine::finishSoloBootstrap(glm::dvec3 bootstrapCenter, bool resident)
 {
 	if (!chunkPool)
 		chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	camera.setPosition(glm::vec3(bootstrapCenter));
-	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get(), sim->worldGenerationId());
+	createRenderBridge(sim->world(), sim->worldGenerationId());
 
 	// Synchronous terrain bootstrap: authoritative voxels + render binding,
 	// meshing and upload in one step (the bridge drains the world's Loaded
@@ -406,7 +418,10 @@ void Engine::setGraphicsQualityPreset(GraphicsQualityPreset preset)
 	// Apply immediately when the renderer exists (GUI/tool callers); CLI
 	// parsing runs before init, so park it and apply at the top of run().
 	if (worldRenderer)
+	{
 		worldRenderer->postSettings().applyPreset(preset);
+		applyPlayerFxaa();
+	}
 	else
 		m_pendingQualityPreset = preset;
 	// Tag benchmark reports with the quality tier (issue #138): the parked
@@ -573,12 +588,6 @@ bool Engine::reloadWorld(int newSeed)
 
 	vkContext->waitIdle();
 	resourceRetire.flush();
-	// Carry the opt-in chunk lifecycle trace across the reload (issue #179
-	// review round 2): re-apply it to the new bridge BEFORE
-	// generateInitialArea() so bootstrap events are not lost — the UI-side
-	// sync in updateDebugUiState only runs later in the frame.
-	const bool chunkTraceEnabled =
-		renderBridge && renderBridge->chunkEventTraceEnabled();
 	renderBridge.reset();
 	// The simulation owns the authoritative transition (issue #208). The
 	// persistent world was already closed through the bridge above (or none
@@ -588,9 +597,7 @@ bool Engine::reloadWorld(int newSeed)
 	// stays authoritative and the fresh bridge is deliberately re-projected
 	// onto it so the aborted reload leaves a renderable session.
 	const bool reloaded = sim->reload(newSeed);
-	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get(), sim->worldGenerationId());
-	renderBridge->setChunkEventTraceEnabled(chunkTraceEnabled);
+	createRenderBridge(sim->world(), sim->worldGenerationId());
 	if (!reloaded)
 		return false;
 
@@ -1708,7 +1715,9 @@ void Engine::drawUi()
 		f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
 		f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	}
-	f.chunks = renderBridge.get();
+		f.chunks = renderBridge.get();
+	f.chunkTraceEnabled = m_chunkTraceEnabled;
+	f.setChunkTraceEnabled = [this](bool enabled) { setChunkTraceEnabled(enabled); };
 	f.pool = renderBridge ? renderBridge->getChunkPool() : nullptr;
 	f.generator = sim ? sim->terrainGenerator() : nullptr;
 	f.worldRenderer = worldRenderer.get();
@@ -1804,6 +1813,7 @@ void Engine::drawUi()
 		f.validation = vkContext->isValidationEnabled();
 	}
 	f.hudHints = &m_showHudHints;
+	f.applyGraphicsQuality = [this](GraphicsQualityPreset preset) { setGraphicsQualityPreset(preset); };
 	// Graphics ▸ Display "(applying)" marker (issue #185): true until the
 	// deferred swapchain recreate consumed the pending toggle.
 	f.vsyncPending = m_pendingVSync.has_value();
@@ -2191,7 +2201,7 @@ void Engine::run()
 	running = true;
 	if (m_pendingQualityPreset)
 	{
-		worldRenderer->postSettings().applyPreset(*m_pendingQualityPreset);
+		setGraphicsQualityPreset(*m_pendingQualityPreset);
 		m_pendingQualityPreset.reset();
 	}
 	if (m_perfFrequency == 0)
@@ -2393,6 +2403,7 @@ void Engine::run()
 				requestSwapchainRecreate();
 			else
 			{
+				noteUiFramePresented();
 				notePlayerDisplayFramePresented();
 				noteSessionFramePresented();
 			}

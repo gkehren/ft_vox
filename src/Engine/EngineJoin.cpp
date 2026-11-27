@@ -272,8 +272,7 @@ void Engine::resumeSolo()
 	retireWorldProjection();
 	if (m_suspendedSolo)
 	{
-		renderBridge = std::make_unique<RenderWorldBridge>(m_suspendedSolo->simulation->world(),
-			threadPool.get(), chunkPool.get(), m_suspendedSolo->simulation->worldGenerationId());
+		createRenderBridge(m_suspendedSolo->simulation->world(), m_suspendedSolo->simulation->worldGenerationId());
 		sim = std::move(m_suspendedSolo->simulation);
 		camera = m_suspendedSolo->camera;
 		paused = m_suspendedSolo->paused;

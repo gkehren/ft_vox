@@ -237,6 +237,14 @@ int main()
 			ok = fail("waterDebugView is a diagnostic and must survive resetGraphicsWater");
 	}
 
+	{
+		auto pp = PostProcessSettings::presetValues(GraphicsQualityPreset::Low);
+		pp.fxaaEnabled = true;
+		if (PostProcessSettings::matchesPreset(pp, GraphicsQualityPreset::Low) ||
+			!PostProcessSettings::matchesPreset(pp, GraphicsQualityPreset::Low, /*compareFxaa=*/false))
+			ok = fail("developer preset matching ignores separately owned FXAA");
+	}
+
 	// --- resetGraphicsPost: Post category only, everything else preserved ---
 	{
 		// Base pack High (presetValues stamps the tag); junk out-of-category
@@ -247,7 +255,7 @@ int main()
 		pp.underwater = true;
 		pp.underwaterStrength = 0.7f;
 		pp.underwaterSurfaceY = 42.0f;
-		pp.fxaaEnabled = true;
+		pp.fxaaEnabled = false;
 		pp.bloomEnabled = false;
 		pp.bloomThreshold = 9.0f;
 		pp.bloomIntensity = 9.0f;
@@ -296,7 +304,9 @@ int main()
 		if (!pp.underwater || pp.underwaterStrength != 0.7f || pp.underwaterSurfaceY != 42.0f)
 			ok = fail("resetGraphicsPost must preserve underwater runtime state");
 		// Every post-owned field must be back at the pack's canonical value:
-		if (pp.fxaaEnabled != canon.fxaaEnabled || pp.bloomEnabled != canon.bloomEnabled ||
+		if (pp.fxaaEnabled)
+			ok = fail("resetGraphicsPost must preserve the effective player FXAA");
+		if (pp.bloomEnabled != canon.bloomEnabled ||
 			pp.bloomThreshold != canon.bloomThreshold || pp.bloomIntensity != canon.bloomIntensity ||
 			pp.bloomBlurIterations != canon.bloomBlurIterations || pp.ssaoEnabled != canon.ssaoEnabled ||
 			pp.ssaoRadius != canon.ssaoRadius || pp.ssaoIntensity != canon.ssaoIntensity ||

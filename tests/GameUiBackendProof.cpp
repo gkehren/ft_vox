@@ -249,9 +249,12 @@ struct GameUiBackendProbe
 		target.buffer = createBuffer(allocator, extent.width * extent.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 			VMA_MEMORY_USAGE_AUTO, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 		const auto shot = [&](const char *name) {
+			engine.syncUiInput();
 			sample.prepare(engine.window, 0, extent, {}, engine.worldRenderer->getTextureManager(), engine.m_atlasVersion);
 			const auto image = capture(target, &sample.renderer());
 			checked(visual::writePng((out / name).string(), image), "write session screenshot");
+			// The rest of this proof interacts with the completed offscreen composition.
+			engine.noteUiFramePresented();
 		};
 		const auto request = [&](gameui::SessionAction action, std::string name = {}, std::string seed = {}) {
 			sample.m_sessionRequest = gameui::SessionRequest{action, std::move(name), std::move(seed)};
@@ -304,12 +307,15 @@ struct GameUiBackendProbe
 		CHECK(sample.screens().top() == Screen::SessionError && engine.acceptsPlayerSession(Retry) &&
 			!std::filesystem::exists(out / "saves" / "menu-proof"), "failure releases the empty reservation");
 		engine.m_beforeLocalWorldInitializeForTests = {};
+		engine.setChunkTraceEnabled(true);
 		request(Retry);
 		complete();
 		CHECK(engine.sim && engine.sim->isWorldOpen() && engine.worldSeed() == 42 &&
 			!std::filesystem::exists(out / "saves" / "duplicate"), "create publishes one persistent world");
 		auto *const authority = engine.sim.get();
 		auto *const projection = engine.renderBridge.get();
+		CHECK(!engine.developerWorkspaceVisible() && projection->chunkEventTraceEnabled() &&
+			!projection->chunkDebugEvents().empty(), "native world creation records bootstrap events while Developer UI is hidden");
 		request(Create, "unexpected", "43");
 		request(Open, "menu-proof");
 		CHECK(engine.sim.get() == authority && engine.renderBridge.get() == projection &&
@@ -1192,6 +1198,7 @@ struct GameUiBackendProbe
 		engine.updateFrameUniforms(slot, int(renderExtent.width), int(renderExtent.height), 5.f);
 		engine.recordFrame(slot, image, 0, gpuTag);
 		checked(engine.frameCtx->submitAndPresent(*engine.swapchain, image), "present Game UI proof frame");
+		engine.noteUiFramePresented();
 		engine.notePlayerDisplayFramePresented();
 		engine.noteSessionFramePresented();
 		++engine.frameNumber;
@@ -2531,15 +2538,34 @@ struct GameUiBackendProbe
 				sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa &&
 				sample.m_settingsView.sensitivity == saved.sensitivity && sample.m_settingsView.invertY,
 			"the startup loader restores the complete record");
-		engine.setPlayerSettingsOverrides(true, true);
+		engine.setGraphicsQualityPreset(GraphicsQualityPreset::High);
+		CHECK(!engine.worldRenderer->postSettings().fxaaEnabled && readText(record) == savedBytes,
+			"applying a developer preset preserves the saved FXAA choice and preference bytes");
+		engine.worldRenderer->postSettings().bloomThreshold = 9.f;
+		engine.setGraphicsQualityPreset(GraphicsQualityPreset::High);
+		CHECK(!engine.worldRenderer->postSettings().fxaaEnabled &&
+			engine.worldRenderer->postSettings().bloomThreshold ==
+				PostProcessSettings::presetValues(GraphicsQualityPreset::High).bloomThreshold,
+			"resetting the developer preset restores the pack while preserving FXAA");
+
+		engine.setPlayerSettingsOverrides(true, GraphicsQualityPreset::High);
 		engine.setVSync(true);
-		engine.worldRenderer->postSettings().fxaaEnabled = true;
+		engine.setGraphicsQualityPreset(GraphicsQualityPreset::Low);
+		resetGraphicsPost(engine.worldRenderer->postSettings());
 		engine.loadPlayerUiPreferences();
 		present();
 		PlayerUiSettings afterOverrides;
 		CHECK(sample.m_settingsView.vsync && sample.m_settingsView.fxaa && sample.m_settingsView.vsyncOverridden &&
 				sample.m_settingsView.fxaaOverridden && afterOverrides.load(record) == LoadStatus::Ok &&
-				afterOverrides == saved, "CLI overrides win for the session and do not rewrite the preferences");
+				afterOverrides == saved, "CLI overrides win over a developer preset, post reset and the saved preferences");
+		engine.setPlayerSettingsOverrides(true, GraphicsQualityPreset::Low);
+		engine.setGraphicsQualityPreset(GraphicsQualityPreset::High);
+		engine.handlePlayerSettingsRequest(SetFxaa{true});
+		present();
+		CHECK(!sample.m_settingsView.fxaa && sample.m_settingsView.fxaaOverridden && readText(record) == savedBytes,
+			"a CLI override that disables FXAA stays authoritative and blocks Settings writes");
+		engine.setPlayerSettingsOverrides(true, GraphicsQualityPreset::High);
+		present();
 		checked(SDL_MaximizeWindow(engine.window) && SDL_SyncWindow(engine.window), "maximize Settings window");
 		frames(2);
 		checked(!sample.m_settingsView.canResize, "a maximized window cannot be resized by Settings");
@@ -2557,7 +2583,7 @@ struct GameUiBackendProbe
 				sample.m_settingsView.notice.find("command-line overrides") != std::string::npos,
 			"maximized reset keeps the saved window and CLI-locked preferences while resetting eligible values");
 		restore();
-		engine.setPlayerSettingsOverrides(false, false);
+		engine.setPlayerSettingsOverrides(false, std::nullopt);
 		engine.loadPlayerUiPreferences();
 		present();
 		CHECK(sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa,
@@ -2683,7 +2709,7 @@ struct GameUiBackendProbe
 		};
 
 		// T19. Restore the initial viewport exactly and keep the native menu usable.
-		engine.setPlayerSettingsOverrides(true, false);
+		engine.setPlayerSettingsOverrides(true, std::nullopt);
 		startFromWorkingWindow();
 		rejectStartup();
 		present();
@@ -2698,7 +2724,7 @@ struct GameUiBackendProbe
 
 		// T20. Reject the saved size and make the window manager restore a
 		// different geometry. The pending VSync choice still gets its own apply.
-		engine.setPlayerSettingsOverrides(false, false);
+		engine.setPlayerSettingsOverrides(false, std::nullopt);
 		startFromWorkingWindow();
 		CHECK(engine.m_playerDisplayPreview->startupVSync == saved.vsync && !engine.m_pendingVSync &&
 				engine.swapchain->isVSync(), "startup holds the saved present mode until size verification");
@@ -3391,7 +3417,11 @@ struct GameUiBackendProbe
 		frames(3);
 		CHECK(hasStoneIcon() && sample.m_draws.atlasGeneration() == engine.m_atlasVersion,
 			"live icon is repainted using the new atlas after both slots cycle");
+		CHECK(!engine.renderBridge->chunkEventTraceEnabled(), "a regular session starts without tracing");
+		engine.setChunkTraceEnabled(true);
 		CHECK(engine.reloadWorld(43), "new solo epoch starts");
+		CHECK(!engine.developerWorkspaceVisible() && engine.renderBridge->chunkEventTraceEnabled() &&
+			!engine.renderBridge->chunkDebugEvents().empty(), "hidden solo reload traces its bootstrap before any developer frame");
 		present();
 		CHECK(!hasStoneIcon() && engine.playerHudView().hotbar.selectedName == "Empty slot",
 			"new epoch paints its own inventory with no stale item icon");
@@ -3558,9 +3588,16 @@ struct GameUiBackendProbe
 			sample.screens().top() == gameui::Screen::ConfirmExit && engine.running,
 			"requesting Developer UI while confirming quit keeps the native modal in control");
 		tap(SDLK_ESCAPE);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, 48.f, 64.f);
+		engine.handleEvents();
+		CHECK(engine.m_uiGeometryPending && !engine.developerInputReady() &&
+			engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None,
+			"a pointer press in the modal dismissal batch waits for the new composition");
 		present();
-		CHECK(engine.developerUiAvailable() && sample.screens().top() == gameui::Screen::Pause,
-			"dismissing the native modal restores the requested workspace");
+		button(SDL_EVENT_MOUSE_BUTTON_UP, 48.f, 64.f);
+		engine.handleEvents();
+		CHECK(engine.developerInputReady() && sample.screens().top() == gameui::Screen::Pause,
+			"dismissing the native modal restores the requested workspace without leaking the release");
 		tap(SDLK_ESCAPE);
 		frames(2);
 
@@ -3569,8 +3606,21 @@ struct GameUiBackendProbe
 		frames(2);
 		const auto dockedPanel = sample.m_inventoryLayout.panel;
 		const auto dockId = shell.dockspaceId();
+		engine.sim->grantItems(items::ItemId::Stone, 4);
+		const auto slot = sample.m_inventoryLayout.slot({0}).rect;
+		const glm::vec2 slotCenter{(slot.x + slot.z) * 0.5f, (slot.y + slot.w) * 0.5f};
 		tap(SDLK_D, chord);
-		frames(2);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, slotCenter.x, slotCenter.y);
+		engine.handleEvents();
+		CHECK(engine.m_uiGeometryPending && engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None &&
+			!sample.m_inventoryInteraction.drag().active(),
+			"hiding cannot route a press into the old native inventory geometry");
+		present();
+		button(SDL_EVENT_MOUSE_BUTTON_UP, slotCenter.x, slotCenter.y);
+		present();
+		CHECK(!sample.m_inventoryInteraction.drag().active() &&
+			engine.playerInventoryView().snapshot->slots[0].count == 4,
+			"the blocked release cannot perform an inventory operation in the new layout");
 		CHECK(engine.inventoryPanelOpen() && !engine.developerUiAvailable() &&
 			sample.m_inventoryLayout.panel != dockedPanel && shell.dockspaceId() == dockId,
 			"native inventory uses the full view when the workspace hides");
@@ -3612,6 +3662,7 @@ struct GameUiBackendProbe
 		frames(2);
 		graphics = ImGui::FindWindowByName(ui::windows::kGraphics);
 		CHECK(graphics && graphics->DockId != 0, "default layout redocks Graphics");
+		workspaceCursorAndResizeProof();
 		if (!output.empty())
 		{
 			std::filesystem::create_directories(output);
@@ -3640,6 +3691,84 @@ struct GameUiBackendProbe
 			frames(3);
 			captureWorkspace("player-hud.png");
 		}
+	}
+
+	void workspaceCursorAndResizeProof()
+	{
+		using enum gameui::InputOwner;
+		using enum ImGuiLayer::PointerHit;
+		checked(engine.setMouseCaptured(false), "release relative mouse mode for the cursor proof");
+		auto desiredCursor = ImGuiMouseCursor_TextInput;
+		glm::vec2 control{};
+		bool clicked = false;
+		const auto cursorWindow = [&] {
+			ImGui::SetNextWindowPos({40, 70}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize({230, 96}, ImGuiCond_Always);
+			if (ImGui::Begin("Workspace cursor proof", nullptr, ImGuiWindowFlags_NoDocking |
+				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+			{
+				clicked |= ImGui::Button("Pointer witness");
+				const auto min = ImGui::GetItemRectMin();
+				const auto origin = ImGui::GetMainViewport()->Pos;
+				control = {min.x - origin.x + 10.f, min.y - origin.y + 5.f};
+			}
+			ImGui::End();
+			ImGui::SetMouseCursor(desiredCursor);
+		};
+		present(cursorWindow);
+		present(cursorWindow);
+		auto *const textCursor = SDL_GetCursor();
+		CHECK(textCursor && textCursor != SDL_GetDefaultCursor(), "the developer text cursor is active");
+
+		tap(SDLK_F1);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, control.x, control.y);
+		engine.handleEvents();
+		CHECK(SDL_GetCursor() == SDL_GetDefaultCursor() && !SDL_GetWindowRelativeMouseMode(engine.window) &&
+			engine.m_inputRouter.pointerOwner() == None,
+			"F1 restores the SDL cursor and blocks the same-batch press when hiding");
+		const auto hiddenFrame = ImGui::GetFrameCount();
+		frames(2);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y);
+		engine.handleEvents();
+		CHECK(ImGui::GetFrameCount() == hiddenFrame && !clicked, "hidden frames do not advance ImGui or replay input");
+
+		resize(1400, 800);
+		windowEvent(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED);
+		tap(SDLK_F1);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, control.x, control.y);
+		engine.handleEvents();
+		CHECK(engine.developerWorkspaceVisible() && !engine.developerInputReady() &&
+			engine.developerPointerAt(control.x, control.y) == PassThrough && engine.m_inputRouter.pointerOwner() == None,
+			"the same-batch press after resize and F1 cannot hit stale ImGui geometry or gameplay");
+		present(cursorWindow);
+		CHECK(engine.developerInputReady() && engine.developerPointerAt(control.x, control.y) == Interactive &&
+			std::abs(ImGui::GetIO().DeltaTime - 1.f / 60.f) < 0.001f,
+			"the first refreshed frame restores hit testing and resumes ImGui with a fresh time step");
+		button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y);
+		present(cursorWindow);
+		CHECK(!clicked && SDL_GetCursor() == textCursor,
+			"the blocked press stays blocked after refresh and the text cursor returns");
+
+		desiredCursor = ImGuiMouseCursor_ResizeEW;
+		present(cursorWindow);
+		present(cursorWindow);
+		CHECK(SDL_GetCursor() != SDL_GetDefaultCursor() && SDL_GetCursor() != textCursor,
+			"the backend installs the developer resize cursor");
+		tap(SDLK_F1);
+		present();
+		CHECK(SDL_GetCursor() == SDL_GetDefaultCursor(), "hiding the resize cursor restores the native cursor");
+
+		checked(engine.setMouseCaptured(true), "capture mouse for the gameplay transition proof");
+		tap(SDLK_F1);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, control.x, control.y, SDL_BUTTON_RIGHT);
+		engine.handleEvents();
+		CHECK(SDL_GetWindowRelativeMouseMode(engine.window) && !engine.m_inputRouter.activeButton(SDL_BUTTON_RIGHT),
+			"reopening keeps SDL relative capture and quarantines a same-batch gameplay press");
+		present();
+		button(SDL_EVENT_MOUSE_BUTTON_UP, control.x, control.y, SDL_BUTTON_RIGHT);
+		present();
+		resize(1280, 720);
+		frames(2);
 	}
 
 	void performance()

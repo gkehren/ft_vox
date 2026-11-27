@@ -304,8 +304,7 @@ void Engine::pumpPlayerSession()
 			}
 			else
 			{
-				renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-					chunkPool.get(), sim->worldGenerationId());
+				createRenderBridge(sim->world(), sim->worldGenerationId());
 				renderBridge->meshResidentArea(camera.getPosition(), sim::GameSimulation::kBootstrapRadiusChunks,
 					vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 			}

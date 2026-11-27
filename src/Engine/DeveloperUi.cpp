@@ -173,7 +173,11 @@ void DeveloperUi::draw(DeveloperUiFrame &frame)
 {
 	// Refresh debug snapshots/histories/health first (issue #179). Throttled
 	// internally; heavy sampling only runs while a consumer panel is open.
-	debugui::updateDebugUiState(m_debug, frame, ImGui::GetTime());
+	const double now = static_cast<double>(SDL_GetTicksNS()) * 1e-9;
+	if (m_lastDrawAt >= 0.0 && now - m_lastDrawAt > 0.5)
+		m_debug.interruptSampling();
+	m_lastDrawAt = now;
+	debugui::updateDebugUiState(m_debug, frame, now);
 
 	const ui::ShellToggles toggles{
 		&m_debug.panels.statusOverlay, &m_debug.panels.playerPanel,

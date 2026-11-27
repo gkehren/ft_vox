@@ -96,11 +96,10 @@ void drawChunkInspector(UiState &s, DeveloperUiFrame &frame)
 	s.inspectCoord.x = std::clamp(s.inspectCoord.x, -4096, 4096);
 	s.inspectCoord.z = std::clamp(s.inspectCoord.z, -4096, 4096);
 
-	// Opt-in bounded trace. The flag lives in UiState (it survives world
-	// reloads); updateDebugUiState re-applies it to the RenderWorldBridge every
-	// frame — even with this panel closed — so a recreated manager inherits
-	// it. This checkbox only flips the UI-owned flag.
-	ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &s.eventTraceEnabled);
+	bool traceEnabled = frame.chunkTraceEnabled;
+	if (ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &traceEnabled) &&
+		frame.setChunkTraceEnabled)
+		frame.setChunkTraceEnabled(traceEnabled);
 
 	// --- Selected chunk state ---
 	ImGui::SeparatorText("State");
@@ -201,7 +200,7 @@ void drawChunkInspector(UiState &s, DeveloperUiFrame &frame)
 
 	// --- Event trace (filtered to the selected chunk) ---
 	ImGui::SeparatorText("Event trace");
-	if (!s.eventTraceEnabled)
+	if (!traceEnabled)
 	{
 		ImGui::TextDisabled("Enable tracing above to record load/gen/mesh/edit/upload\n"
 							"events (bounded ring, main-thread only).");

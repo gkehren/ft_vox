@@ -294,8 +294,7 @@ void Engine::pollRemote()
 		if (next)
 		{
 			remote.projection = std::make_unique<net::udp::ClientWorld>();
-			renderBridge = std::make_unique<RenderWorldBridge>(&remote.projection->world(),
-				threadPool.get(), chunkPool.get(), ++m_remoteRenderEpoch);
+			createRenderBridge(&remote.projection->world(), ++m_remoteRenderEpoch);
 			std::cout << "[multiplayer] Joined player=" << welcome->player.value
 				<< " seed=" << welcome->seed << " projection=" << m_remoteRenderEpoch << std::endl;
 		}

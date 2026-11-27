@@ -66,9 +66,9 @@ WorldStreamSettings worldStreamSettings(const RenderSettings &settings)
 } // namespace
 
 RenderWorldBridge::RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool,
-									 uint64_t worldGenerationId)
+									 uint64_t worldGenerationId, bool traceChunkEvents)
 	: m_world(world), m_worldGenerationId(worldGenerationId),
-	  m_threadPool(threadPool), m_chunkPool(chunkPool)
+	  m_threadPool(threadPool), m_chunkPool(chunkPool), m_chunkTraceEnabled(traceChunkEvents)
 {
 	assert(m_world != nullptr && "RenderWorldBridge requires a host-owned VoxelWorld");
 	// Render-side worker profiling seam: the world itself is profiler-free

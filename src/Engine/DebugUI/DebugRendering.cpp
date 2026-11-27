@@ -151,7 +151,7 @@ void drawRenderDebug(UiState &s, DeveloperUiFrame &frame)
 	// qualityPreset still drives runtime tiers (water SSR budget, caustics)
 	// even after the post knobs drift — so a Custom state names the BASE
 	// pack instead of claiming the values are the pack's (issue #185).
-	const bool presetCustom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
+	const bool presetCustom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset, /*compareFxaa=*/false);
 	ImGui::Text("%s: %s   |   shadow map %u (active %u)",
 				presetCustom ? "Base quality pack" : "Quality",
 				presetNames[int(pp.qualityPreset)], uint32_t(pp.shadowMapSize),
