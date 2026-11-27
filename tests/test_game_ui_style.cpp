@@ -9,14 +9,18 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <latch>
 #include <limits>
 #include <string>
 #include <thread>
@@ -338,9 +342,13 @@ void scaling()
 
 void preferences()
 {
-	const auto &dir = std::filesystem::temp_directory_path() / "ftvox-ui-302-prefs";
+	const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+	const auto dir = std::filesystem::temp_directory_path() / ("ftvox-ui-prefs-" + std::to_string(stamp));
 	std::error_code ec;
-	std::filesystem::remove_all(dir, ec);
+	const bool created = std::filesystem::create_directory(dir, ec);
+	CHECK(created, "create an isolated settings fixture directory: " << ec.message());
+	if (!created)
+		return;
 	const auto path = dir / "player-ui.txt";
 
 	PlayerUiSettings settings;
@@ -505,34 +513,38 @@ void preferences()
 	// R03: readers can never observe a half-replaced record, because the read
 	// opens the file before sizing it and reads from that same handle.
 	{
+		const PlayerUiSettings autoRecord;
+		const PlayerUiSettings fixedRecord{{ScaleMode::Fixed, 1.5f}, {960, 540}, false, false, 250, true};
+		CHECK(autoRecord.save(path), "seed the reader/writer race with a complete record");
 		std::atomic<bool> stop{false};
-		std::atomic<int> falseCorrupt{0};
+		std::atomic<int> failedReads{0};
 		std::atomic<int> badValues{0};
+		std::latch started{2};
+		const auto read = [&] {
+			PlayerUiSettings seen;
+			if (seen.load(path) != LoadStatus::Ok)
+				++failedReads;
+			else if (seen != autoRecord && seen != fixedRecord)
+				++badValues;
+		};
 		std::vector<std::thread> readers;
 		for (int i = 0; i < 2; ++i)
-			readers.emplace_back([&path, &stop, &falseCorrupt, &badValues] {
+			readers.emplace_back([&] {
+				read();
+				started.count_down();
 				while (!stop.load())
-				{
-					PlayerUiSettings seen;
-					const auto status = seen.load(path);
-					if (status != LoadStatus::Ok && status != LoadStatus::Missing)
-						++falseCorrupt;
-					else if (status == LoadStatus::Ok && seen.scale.mode == ScaleMode::Fixed &&
-							 !isUserScale(seen.scale.value))
-						++badValues;
-				}
+					read();
 			});
-		PlayerUiSettings autoRecord, fixedRecord;
-		autoRecord.scale = {ScaleMode::Auto, 1.f};
-		fixedRecord.scale = {ScaleMode::Fixed, 1.5f};
+		started.wait();
 		for (int i = 0; i < 40; ++i)
 			CHECK((i % 2 ? fixedRecord : autoRecord).save(path),
 				"a writer alternating records succeeds while readers load");
 		stop = true;
 		for (auto &reader : readers)
 			reader.join();
-		CHECK(falseCorrupt.load() == 0 && badValues.load() == 0,
-			"concurrent readers never report a false corrupt record or a partial value");
+		CHECK(failedReads.load() == 0 && badValues.load() == 0,
+			"concurrent readers always load one complete record (failed loads=" << failedReads.load() <<
+			", unexpected records=" << badValues.load() << ')');
 	}
 
 #if defined(_WIN32)
@@ -545,6 +557,17 @@ void preferences()
 		const HANDLE holder = CreateFileW(path.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		CHECK(holder != INVALID_HANDLE_VALUE, "another instance can hold a delete-enabled handle");
+		{
+			// Reproduce the sharing conflict from the CRT open used before #318.
+			const HANDLE noDeleteShare = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+				nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+			const auto openError = noDeleteShare == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+			CHECK(openError == ERROR_SHARING_VIOLATION, "an open without delete sharing conflicts with DELETE access");
+			if (noDeleteShare != INVALID_HANDLE_VALUE)
+				CloseHandle(noDeleteShare);
+			const std::ifstream crtOpen(path, std::ios::binary);
+			CHECK(!crtOpen.is_open(), "the previous CRT stream open fails under the same DELETE access");
+		}
 		PlayerUiSettings loaded;
 		CHECK(loaded.load(path) == LoadStatus::Ok && loaded == kept,
 			"the preferences reader shares delete access with an in-progress replacement");
@@ -567,6 +590,9 @@ void preferences()
 		PlayerUiSettings replacement;
 		replacement.scale = {ScaleMode::Fixed, 2.f};
 		CHECK(!replacement.save(path), "a replace against a held destination is reported as failed");
+		const auto beforeLoad = replacement;
+		CHECK(replacement.load(path) == LoadStatus::Busy && replacement == beforeLoad,
+			"an exclusive open exhausts read retries as Busy and preserves the current values");
 		if (holder != INVALID_HANDLE_VALUE)
 			CloseHandle(holder);
 		PlayerUiSettings after;
@@ -576,6 +602,29 @@ void preferences()
 		for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
 			stagingLeft = stagingLeft || entry.path().filename().string().find(".tmp.") != std::string::npos;
 		CHECK(!stagingLeft, "a failed replacement against the destination leaves no staging file");
+	}
+	{
+		const HANDLE holder = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(holder != INVALID_HANDLE_VALUE, "open a shared handle for a byte lock");
+		if (holder != INVALID_HANDLE_VALUE)
+		{
+			OVERLAPPED region{};
+			const bool locked = LockFileEx(holder, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+				0, 1, 0, &region) != 0;
+			CHECK(locked, "lock the first byte without blocking other opens");
+			if (locked)
+			{
+				PlayerUiSettings loaded;
+				CHECK(loaded.load(path) == LoadStatus::Busy && loaded == PlayerUiSettings{},
+					"a byte lock exhausts ReadFile retries as Busy and preserves the current values");
+				CHECK(UnlockFileEx(holder, 0, 1, 0, &region) != 0, "release the byte lock");
+				CHECK(loaded.load(path) == LoadStatus::Ok && loaded.scale.value == 1.25f,
+					"the original record loads once the lock is released");
+			}
+			CloseHandle(holder);
+		}
 	}
 #endif
 

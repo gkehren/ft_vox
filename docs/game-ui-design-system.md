@@ -326,7 +326,7 @@ correction.
 | --- | --- | --- | --- |
 | R01 | The selection highlight is built **with** its horizontal scroll offset and intersected with the editor clip *before* the visibility test, then that same rect is painted — for committed text and for IME preedit selections. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping`: a scrolled field at 100/150/200% × 1×/0.5× density still emits exactly one highlight quad, inside `editorClip`, plus its caret |
 | R02 | A failed DPI query stays invalid end to end: `scaleInputs` reports `contentScaleValid=false`, the controller keeps the last valid Auto scale (no revision bump), `Fixed` ignores the failure, an identical restore is a no-op, and the host skips the atlas refresh while the density is unknown. | `PlayerUiScale.hpp`, `GameUiSample.*` | `GameUiStyle::scaling` conversion → controller matrix (0/NaN/0-density, restore, Fixed, Auto-after-Fixed) |
-| R03 | `PlayerUiSettings::load` opens the record first and reads bounded 512-byte chunks from that same handle, rejects records over `kMaxPlayerUiSettingsBytes`, retries a momentary sharing violation, and keeps `Missing` (not-there, incl. a missing parent) distinct from `Corrupt` (unreadable or malformed). | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences`: 2 readers vs 40 alternating writes report no false corruption; an injected failure keeps the previous record and leaves no staging file |
+| R03 | `PlayerUiSettings::load` reads a bounded record from one open handle, rejects oversized records and distinguishes missing, corrupt or unreadable, and Windows sharing contention. | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences`: two readers and 40 alternating writes check complete records. A blocked replacement preserves the previous record and cleans its staging file. |
 | R04 | `sliderGeometry` gives the label and the percentage readout disjoint rects with a token gap; the label elides instead of painting over the value. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping` (label `z` ≤ value `x` at 100/200% and 240/80/12 px, no glyph straddles the boundary) |
 | R05 | `fill`/`ring`/`sectionHeader`/`divider`/`fittedLabel`/`labelAligned`/`progress` clamp to their own rect: no inverted band, border width clamped to the box, header rule clamped to `rect.w`, and a rect that cannot show half a line paints no text. | `PlayerUiComponents.cpp` | `GameUiComponents::degenerateGeometry` (empty, inverted, fractional, 3 px wide, 0.5 px tall) |
 | R06 | `style::slotTokens` is the one resolver for slot visuals (face, border colour, border width, tint, indicator); `toggleFace`/`sliderFill`/`sliderTrackFace` give toggles and sliders pressed and hover feedback. Precedence documented above. | `PlayerUiStyle.hpp`, `PlayerUiComponents.cpp` | `GameUiStyle::states` asserts resolved colours, widths and the dim tint for `Error\|Focused`, `Pending\|Focused`, `Selected\|Disabled\|Focused`, `Disabled\|Error` |
@@ -347,6 +347,42 @@ correction.
 The only visible capture difference is a handful of ±1 pixels at label edges:
 glyphs that used to extend a pixel past their component are now cut by the same
 rect, which is exactly what S01 guarantees.
+
+### Windows preferences contention (#317)
+
+#318 changed Windows preference reads from a CRT stream to `CreateFileW` with
+`FILE_SHARE_DELETE`. A CRT reader without that share flag can fail to open a
+valid record while another handle has `DELETE` access. The Windows regression
+test reproduces that conflict with an actual CRT stream and verifies that the
+shared reader can still read the complete record.
+
+On Windows 11 with MSVC, 20 instrumented runs of the pre-#318 code recorded
+151 sharing-violation opens during concurrent saves. The latest failed open
+was on attempt three, so the historical CI exhaustion was not reproduced
+locally. The current test passed 40 traced runs. It recorded failed replacement
+attempts followed by successful retries, and no failed opens during the
+ordinary reader/writer race.
+
+Windows reads and atomic replacements share a 40-attempt retry policy. A read
+that exhausts a sharing, byte-lock or delete-pending conflict reports `Busy`.
+Startup shows a busy notice and uses defaults for the launch without falling
+back to the legacy record or marking settings for repair. The reader decodes
+bytes from a single successful handle. Every successful load in the race check
+must match one of the two complete records, and every write must succeed.
+
+To diagnose a recurrence, set `FT_VOX_PLAYER_SETTINGS_TRACE=1` in the Windows
+test process. It records the open, read or rename phase, Win32 error, attempt
+number and elapsed microseconds for each failure. The existing `cpu-windows`
+job enables traces on test failure. Set the repository Actions variable
+`FT_VOX_GAME_UI_STYLE_REPEAT` to a count from 1 to 100 to opt in to its stress
+step. The equivalent local PowerShell run is:
+
+```powershell
+$env:FT_VOX_PLAYER_SETTINGS_TRACE = '1'
+ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat until-fail:40 --output-on-failure
+```
+
+Use `-V` in place of `--output-on-failure` to see traces from passing runs too.
 
 ### IME platform facts (F09)
 

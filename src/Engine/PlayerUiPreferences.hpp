@@ -42,6 +42,7 @@ enum class LoadStatus : uint8_t
 	Ok = 0,
 	Missing,  // fresh install: defaults, no log
 	Corrupt,  // unreadable record: defaults + a loud log, never a session change
+	Busy,     // Windows sharing or lock conflict persisted through all retries
 };
 
 struct PlayerUiSettings
@@ -61,8 +62,7 @@ struct PlayerUiSettings
 	bool parse(std::string_view record);
 
 	/// Read the record. A missing file is NOT an error (fresh install) and
-	/// keeps the current values; a corrupt file also keeps them, so a bad
-	/// record never silently changes the running session.
+	/// keeps the current values. An unreadable or busy file also keeps them.
 	LoadStatus load(const std::filesystem::path &path);
 
 	/// Write the record atomically. Creates the parent directory.

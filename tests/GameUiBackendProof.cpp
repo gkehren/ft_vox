@@ -19,6 +19,13 @@
 #include <fstream>
 #include <stdexcept>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace
 {
 constexpr VkColorSpaceKHR kColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -2445,6 +2452,20 @@ struct GameUiBackendProbe
 		engine.loadPlayerUiPreferences();
 		CHECK(engine.m_playerUiSettings.scale == (ScalePolicy{ScaleMode::Fixed, 1.f}) && !fs::exists(record),
 			"the legacy player scale loads without a migration write");
+#if defined(_WIN32)
+		{
+			const PlayerUiSettings lockedSettings{{ScaleMode::Fixed, 1.5f}};
+			CHECK(lockedSettings.save(record), "seed the current settings path before locking it");
+			const HANDLE held = CreateFileW(record.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+				FILE_ATTRIBUTE_NORMAL, nullptr);
+			checked(held != INVALID_HANDLE_VALUE, "lock the current settings path for the startup read");
+			engine.loadPlayerUiPreferences();
+			CloseHandle(held);
+			CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && !engine.m_playerUiDirty &&
+				engine.m_playerUiError.find("busy") != std::string::npos && readText(record) == lockedSettings.serialize(),
+				"busy current settings preserve the file, bypass legacy fallback and do not offer a repair write");
+		}
+#endif
 		fs::create_directories(record.parent_path());
 		std::ofstream(record, std::ios::binary) << legacyBytes;
 		engine.loadPlayerUiPreferences();

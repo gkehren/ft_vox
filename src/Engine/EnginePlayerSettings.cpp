@@ -50,8 +50,11 @@ void Engine::loadPlayerUiPreferences()
 	{
 		m_playerUiDirty = true;
 		m_playerUiError = "Could not read saved player settings. Defaults apply.";
-		std::cerr << "[ui] " << m_playerUiError << '\n';
 	}
+	else if (status == LoadStatus::Busy)
+		m_playerUiError = "Saved player settings are busy. Defaults apply for this launch.";
+	if (!m_playerUiError.empty())
+		std::cerr << "[ui] " << m_playerUiError << '\n';
 	if (m_playerUi)
 		m_playerUi->setScalePolicy(m_playerUiSettings.scale);
 	applyPlayerFxaa();
