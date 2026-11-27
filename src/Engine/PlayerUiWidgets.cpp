@@ -435,6 +435,8 @@ WidgetEvent WidgetSet::key(ControlId &current, NavKey key, bool shift, bool shor
 		return {};
 	if (auto *field = editor(current))
 	{
+		if (cancelsComposition(key, shortcut))
+			field->cancelComposition();
 		if (shortcut)
 		{
 			switch (key)

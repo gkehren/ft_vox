@@ -694,17 +694,26 @@ void changeNotifications()
 		"caret movement and clearing preedit are not change actions");
 	checkEdit(key(NavKey::Delete));
 	CHECK(first.value() == "a" && key(NavKey::Delete).action == WidgetAction::None, "delete at end has no event");
-	CHECK(key(NavKey::A, true).action == WidgetAction::None &&
-		key(NavKey::C, true).action == WidgetAction::Copy &&
+	first.preedit("pending", 1, 2);
+	CHECK(key(NavKey::A, true).action == WidgetAction::None && first.composition().empty() && first.selection() == "a",
+		"select all clears preedit before selecting the committed value");
+	first.preedit("pending", 1, 2);
+	CHECK(key(NavKey::C, true).action == WidgetAction::Copy && first.composition() == "pending" &&
+		first.compositionCursor() == 1 && first.compositionEnd() == 3 && first.selection() == "a" &&
 		set.commitText(focus, "a").action == WidgetAction::None, "selection, copy and identical replacement do not change text");
 	CHECK(set.completeCut(focus).action == WidgetAction::None && first.value() == "a", "cut requires a selection");
 	first.selectAll();
-	CHECK(key(NavKey::X, true).action == WidgetAction::Cut && first.value() == "a",
-		"cut does not mutate until the clipboard adapter completes it");
+	first.preedit("pending", 1, 2);
+	CHECK(key(NavKey::X, true).action == WidgetAction::Cut && first.composition().empty() &&
+		first.value() == "a" && first.selection() == "a", "cut clears preedit and defers removal to the clipboard adapter");
 	checkEdit(set.completeCut(focus));
 	CHECK(first.value().empty() && set.completeCut(focus).action == WidgetAction::None, "successful cut emits once");
 	set.focus(focus, 2, false);
-	CHECK(key(NavKey::V, true).action == WidgetAction::Paste && second.value().empty(), "paste asks the clipboard adapter");
+	checkEdit(set.commitText(focus, "replace me"));
+	second.selectAll();
+	second.preedit("pending", 1, 2);
+	CHECK(key(NavKey::V, true).action == WidgetAction::Paste && second.composition().empty() &&
+		second.selection() == "replace me", "paste clears preedit and retains the committed selection for replacement");
 	checkEdit(set.commitText(focus, "paste"));
 	CHECK(second.value() == "paste" && first.value().empty() &&
 		set.commitText(focus, "\n").action == WidgetAction::None, "paste and SDL commits share sanitization and notifications");

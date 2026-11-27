@@ -367,40 +367,56 @@ original UTF-8, including supplementary characters.
 
 #### Preedit, candidate UI, and focus
 
-The engine sets `SDL_HINT_IME_IMPLEMENTED_UI` to `composition` before SDL
-initialization. The Windows backend uses that setting to emit editing events
-for the player field to paint. SDL leaves candidate selection and placement to
-the OS, so the game does not handle `SDL_EVENT_TEXT_EDITING_CANDIDATES`. SDL
-receives the visible editor rect and caret offset in window coordinates. The
-IME can place its candidate window outside that rect to avoid obscuring the
-text. The hint is process-wide. Developer ImGui fields can display committed
-text but do not paint inline preedit when the SDL backend sends it to the app.
+SDL uses OS-managed composition by default where the backend supports it, so
+both Game UI and Developer UI can use the native composition window. On backends
+that deliver `SDL_EVENT_TEXT_EDITING`, the player field paints the reported
+preedit. SDL receives the visible editor rect and caret offset in window
+coordinates. The OS owns candidate selection and presentation in both modes.
+
+To experiment with app-rendered preedit, set the SDL environment variable
+`SDL_IME_IMPLEMENTED_UI=composition` before launching the game. SDL 3.4.18
+reads the hint during Windows IME initialization, so the choice applies to the
+whole process. In this mode, Developer ImGui fields display committed text and
+lack inline preedit for composition that SDL delegates to the app. The Game UI
+uses its fallback glyph where the atlas lacks a character, including much of
+CJK. Use the default for regular play and Developer UI work.
 [SDL IME hint](https://wiki.libsdl.org/SDL3/SDL_HINT_IME_IMPLEMENTED_UI) ·
 [SDL 3.4.18 Windows backend](https://github.com/libsdl-org/SDL/blob/release-3.4.18/src/video/windows/SDL_windowskeyboard.c)
 
 A text commit delivered before a focus change stays in the originating field.
 Tab, clicking away, leaving the screen, or losing window focus cancels remaining
-preedit. Clicking inside the field repositions its caret and clears native
-preedit as well. Resize and display-scale changes keep the same focused SDL
-session while layout is rebuilt. Text events reaching that editor during the
-rebuild still apply, and the next frame sends the new anchor.
+preedit. Hiding and minimizing also retire the editor. Clicking inside a field,
+selecting all, cutting and pasting cancel native and local preedit while keeping
+the editor's SDL session active. Copy reads the committed selection and leaves
+preedit in place. SDL text commits insert normally. Resize and display-scale
+changes keep the same focused SDL session while layout is rebuilt. Text events
+reaching that editor during the rebuild still apply, and the next frame sends
+the new anchor.
 
 #### Validation for [#314](https://github.com/gkehren/ft_vox/issues/314)
 
-`GameUiInteraction` covers composition range conversion and text geometry.
-The opt-in `test_engine_reload --game-ui-showcase-proof` drives the real SDL
-event router and Vulkan presentation with queued SDL events. It checks the
-scrolled caret anchor, U+1F332 and U+20000 preedit selection and a single UTF-8
-commit at 100% and 200%, cancellation on focus transfers, and continuity across
-display-change events. These checks exercise the application's SDL boundary.
+`GameUiInteraction` covers range conversion, text geometry and editing
+shortcuts. `test_engine_reload --game-ui-showcase-proof` uses the normal SDL
+configuration. Add `--inline-ime` to explicitly request app-rendered preedit for
+the fixture process before SDL starts. Both runs inject SDL events through the
+production router and Vulkan presentation path. They check caret anchoring,
+supplementary-plane selection and single commits at 100% and 200%, clipboard
+commands during preedit, and existing preedit across each resize or display
+event. The focus, hide and minimize cases cover same-batch and separate-batch
+recovery. The showcase also verifies committed text handoff to and from a real
+Developer UI ImGui input field.
 
-On Windows build 26300 with SDL 3.4.18, the showcase passed all 51 checks and the
-design-system gallery passed all 103 checks with Vulkan validation enabled.
-This environment exposed French and US English keyboard profiles. Live
-Japanese, Chinese and Korean candidate placement,
-supplementary-character composition, focus changes during OS composition, and
-moving an active composition between different-DPI monitors remain pending.
-Linux desktop IME coverage also remains pending.
+On Windows build 26300 with SDL 3.4.18, the showcase passed 115 checks in each
+mode and the design-system proof passed 103 checks. Vulkan validation reported
+only the [known RTSS VUIDs](vulkan-validation.md). All 55 graphics-off CTest
+cases passed on Windows, and the seven affected ASan/UBSan tests passed on
+Debian WSL2.
+
+Live Japanese, Chinese and Korean candidate placement, supplementary-character
+composition, focus changes during OS composition, and moving an active
+composition between different-DPI monitors remain pending. The Windows test
+session exposed French and US English keyboard profiles. No IBus or Fcitx desktop
+IME was available in the Linux test environment.
 
 For the desktop pass, start `ft_vox --seed 42` and open **Pause → Widget
 showcase**. Set **Player UI scale** in **Settings** before opening the showcase.

@@ -59,8 +59,6 @@ Engine::Engine(std::string resourcePackRoot)
 	: camera(glm::vec3(0.0f, 90.0f, 0.0f))
 	, m_resourcePackRoot(std::move(resourcePackRoot))
 {
-	// Player fields render inline preedit. Keep candidate selection in the OS.
-	SDL_SetHintWithPriority(SDL_HINT_IME_IMPLEMENTED_UI, "composition", SDL_HINT_OVERRIDE);
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
 	// Developer capture is explicit. SDL auto-capture would otherwise

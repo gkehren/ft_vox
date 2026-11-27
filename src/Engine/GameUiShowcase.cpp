@@ -410,12 +410,12 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(SDL_Window *window, co
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		if (event.button.button == SDL_BUTTON_LEFT)
 		{
-			const bool composing = m_sdlEditor && !m_sdlEditor->composition().empty();
-			result = m_widgets.press({event.button.x, event.button.y}, focus, font(), m_screenScale,
-				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0, m_fontScale, style::baseline());
-			// A click in the same field can cancel preedit without changing focus.
-			if (composing && m_sdlEditor == m_widgets.editor(focus) && m_sdlEditor->composition().empty())
+			const glm::vec2 point{event.button.x, event.button.y};
+			const auto *target = m_widgets.at(point);
+			if (target && target->id == focus && m_sdlEditor && m_sdlEditor == m_widgets.editor(focus))
 				SDL_ClearComposition(window);
+			result = m_widgets.press(point, focus, font(), m_screenScale,
+				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0, m_fontScale, style::baseline());
 		}
 		break;
 	case SDL_EVENT_MOUSE_MOTION:
@@ -432,10 +432,15 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(SDL_Window *window, co
 			event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y, m_screenScale, focus);
 		break;
 	case SDL_EVENT_KEY_DOWN:
-		result = m_widgets.key(focus, navKey(event.key.key),
-			(event.key.mod & SDL_KMOD_SHIFT) != 0,
-			(event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0, event.key.repeat);
+	{
+		const auto key = navKey(event.key.key);
+		const bool shortcut = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+		// OS-managed preedit may be active with no local composition string.
+		if (cancelsComposition(key, shortcut) && m_sdlEditor && m_sdlEditor == m_widgets.editor(focus))
+			SDL_ClearComposition(window);
+		result = m_widgets.key(focus, key, (event.key.mod & SDL_KMOD_SHIFT) != 0, shortcut, event.key.repeat);
 		break;
+	}
 	default: break;
 	}
 	m_screens.focus(focus);
