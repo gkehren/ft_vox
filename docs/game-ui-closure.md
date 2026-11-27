@@ -155,15 +155,16 @@ captures.
 
 ## Hands-on acceptance
 
-The SDL-driven proofs exercise real Vulkan devices and real server
-sessions where available. Hands-on acceptance still requires a desktop
-operator. Mark each row with the tested OS, hardware, and result before
-merging Phase K.
+The maintainer reported that the hands-on checklist passed during review
+of [PR #322](https://github.com/gkehren/ft_vox/pull/322). This covers solo
+play, settings, two-client hosting and restart, Developer UI, and window
+and input handling. The SDL-driven results and captures above come from
+the automated fixture runs.
 
-The Windows computer-use runtime was unavailable for this run. The
-physical keyboard/mouse playthrough, OS DPI transitions and IME, an
-overlay-free validation run, native Linux graphics and macOS/MoltenVK
-build/smoke remain unverified.
+The manual sign-off did not specify which optional configurations were
+available. OS-driven DPI transitions and IME, overlay-free validation,
+native Linux graphics and macOS/MoltenVK build and smoke have no separate
+environment-specific result recorded here.
 
 | Check | Operator actions |
 | --- | --- |
