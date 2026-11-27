@@ -49,6 +49,45 @@ struct ActorWitness
 	int selected{};
 	std::array<items::ItemStack, items::kInventorySize> slots{};
 };
+
+// Hold one authoritative reply across the guest's fixture restart. Both
+// sessions see the same loopback peer, so the replay reaches the scope check.
+struct ActionReplyRelay
+{
+	net::udp::Socket socket{{0x7f000001, 0}};
+	net::udp::Address server{}, client{};
+	bool holdResult{};
+	std::optional<net::wire::Packet> delayed;
+	uint64_t lastAction{};
+
+	void pump()
+	{
+		using namespace net::wire;
+		net::udp::Received datagram;
+		while (socket.receive(datagram))
+		{
+			const auto bytes = std::span(datagram.bytes).first(datagram.size);
+			Packet packet;
+			const bool fromServer = datagram.from == server;
+			if (decode(fromServer ? Endpoint::Server : Endpoint::Client, bytes, packet) != CodecStatus::Ok)
+				continue;
+			if (!fromServer)
+			{
+				client = datagram.from;
+				if (const auto *action = std::get_if<Action>(&packet.payload))
+					lastAction = action->actionId;
+			}
+			if (fromServer && holdResult && std::holds_alternative<ActionResult>(packet.payload))
+			{
+				if (!delayed)
+					delayed = packet;
+				continue;
+			}
+			if (!socket.send(fromServer ? client : server, bytes))
+				throw std::runtime_error("hosted fixture relay could not forward a datagram");
+		}
+	}
+};
 }
 
 using namespace std::chrono_literals;
@@ -59,6 +98,7 @@ struct EngineJoinProbe
 
 	explicit EngineJoinProbe(Engine &engine) : engine(engine) {}
 	Engine &engine;
+	std::optional<ActionReplyRelay> actionRelay;
 
 	struct SessionProbe : MultiplayerActions, ui::RemoteSessionView {};
 
@@ -75,6 +115,8 @@ struct EngineJoinProbe
 			engine.applySessionRequests();
 		if (engine.m_remote)
 		{
+			if (actionRelay)
+				actionRelay->pump();
 			// F09 (#316): the scenario never overrides the host's focus
 			// bookkeeping. When the operator's desktop owns the focus, a
 			// controlled SDL focus event re-asserts it through the real
@@ -1178,6 +1220,8 @@ struct EngineJoinProbe
 		engine.initializeNoiseGenerator(host ? 13 : 19);
 		engine.enableGameUi(false, false);
 		auto *const solo = engine.sim.get();
+		solo->grantItems(host ? items::ItemId::Stone : items::ItemId::Dirt, 4);
+		const auto soloInventory = engine.playerInventoryView().snapshot;
 		if (!restoring)
 			frame().createJoinProfile(profile);
 
@@ -1227,6 +1271,11 @@ struct EngineJoinProbe
 			until([&] { return fs::exists(round / "endpoint.txt"); }, "graphical host did not publish its endpoint");
 			std::string endpoint;
 			std::ifstream(round / "endpoint.txt") >> endpoint;
+			if (!restoring)
+			{
+				actionRelay.emplace();
+				endpoint = relayEndpoint(endpoint);
+			}
 			join(endpoint.c_str(), profile, "42");
 		}
 		until([&] { return seesPeer(); }, "second player did not appear in the authoritative snapshot");
@@ -1331,6 +1380,8 @@ struct EngineJoinProbe
 			}, "the mined drop did not return to the owner's confirmed inventory before the fixture stop",
 				std::chrono::seconds(60));
 
+			until([&] { return fs::exists(round / "guest-action-pending.txt"); },
+				"the guest did not witness a pending action before the fixture stop");
 			frame().stopHostedServer();
 			until([&] { return engine.m_hostSnapshot.state == hosting::State::Stopped; },
 				"the fixture baseline stop did not reach Stopped", std::chrono::seconds(60));
@@ -1390,18 +1441,33 @@ struct EngineJoinProbe
 				"the guest must see the edited block before the fixture stop",
 				std::chrono::seconds(60));
 			publish(round / "guest-edit-confirmed.txt", "ok");
+			until([&] { return engine.m_remote->ready() && engine.playerInventoryView().enabled(); },
+				"the guest did not regain inventory readiness after replicating the edit");
+			const auto oldInventory = engine.playerInventoryView().snapshot;
+			actionRelay->holdResult = true;
+			submitPendingSelection();
+			until([&] { return actionRelay->delayed.has_value(); },
+				"the relay did not receive the guest's authoritative action result");
+			CHECK(engine.m_remote->actionPending && engine.playerInventoryView().snapshot == oldInventory,
+				"the guest still exposes its confirmed inventory while the reply is delayed");
+			CHECK(engine.m_remote->scope == actionRelay->delayed->scope,
+				"the withheld result belongs to the departing scope");
+			frame().leaveServer();
 			until([&] {
 				const auto ui = frame();
 				return ui.multiplayerStatus && ui.joinServer && engine.m_remote && !engine.m_remote->scope;
-			}, "the fixture stop did not publish the departure to the guest", std::chrono::seconds(120));
+			}, "the guest did not disconnect with its action still pending");
 			checkRetiredProjection();
+			publish(round / "guest-action-pending.txt", "retired");
 			frame().returnToSolo();
 			pump();
 			until([&] { return fs::exists(round / "fixture-endpoint.txt"); },
 				"the owner did not publish the fixture endpoint", std::chrono::seconds(120));
 			std::string fixtureEndpoint;
 			std::ifstream(round / "fixture-endpoint.txt") >> fixtureEndpoint;
+			fixtureEndpoint = relayEndpoint(fixtureEndpoint);
 			join(fixtureEndpoint.c_str(), profile, "42");
+			checkDelayedReply();
 			until([&] { return fs::exists(edit); }, "owner did not publish the edited cell",
 				std::chrono::seconds(30));
 			glm::ivec3 cell{};
@@ -1448,6 +1514,10 @@ struct EngineJoinProbe
 		}
 		checkWitness(evidence / "first" / actorFile, round / actorFile, restoring);
 
+		const auto remoteInventory = engine.playerInventoryView().snapshot;
+		CHECK(remoteInventory && soloInventory && remoteInventory->selected != soloInventory->selected,
+			"the departing remote hotbar visibly differs from the suspended solo inventory");
+		const bool capturedBeforeDeparture = engine.mouseCaptured;
 		if (host)
 		{
 			until([&] { return fs::exists(round / "guest-actor.txt"); }, "guest did not record its private state");
@@ -1497,6 +1567,7 @@ struct EngineJoinProbe
 					<< " ticks=" << monitor->ticks << " rx_bytes=" << monitor->transport.receivedBytes << std::endl;
 			publish(round / "role.txt", "granted");
 			until([&] { return fs::exists(round / "guest-verified.txt"); }, "guest did not verify its available controls");
+			openDepartureScreen(true);
 			submit(Operation::Stop);
 			until([&] { return !engine.m_hostSnapshot.active(); }, "owner stop did not reach a terminal state");
 			const auto &stopped = engine.m_hostSnapshot;
@@ -1515,6 +1586,7 @@ struct EngineJoinProbe
 			const auto error = ui.administerHostedServer(1, Operation::Stop, {}, "");
 			CHECK(!engine.m_hostSnapshot.active() && !engine.m_hostSnapshot.administration && !error.empty(),
 				"forging a graphical callback cannot give a remote delegate local stop access");
+			openDepartureScreen(false);
 			publish(round / "guest-verified.txt", "no local controls");
 		}
 		until([&] {
@@ -1522,14 +1594,162 @@ struct EngineJoinProbe
 			return ui.multiplayerStatus && ui.joinServer && !engine.m_remote->scope;
 		}, "client never reported server departure and offered retry");
 		checkRetiredProjection();
+		auto &sample = *engine.m_playerUi;
+		const auto expectedScreen = host ? gameui::Screen::MultiplayerConfirm : gameui::Screen::MultiplayerRoster;
+		CHECK(sample.screens().top() == expectedScreen, "disconnect leaves the native recovery route reachable");
 		frame().returnToSolo();
 		pump();
 		CHECK(!engine.m_remote && engine.sim.get() == solo && engine.viewWorld() == solo->world(),
 			"client returns to the existing solo world after hosted shutdown");
-		CHECK(!engine.m_playerUi->screens().contains(gameui::Screen::MultiplayerConfirm) &&
-			!engine.m_playerUi->screens().contains(gameui::Screen::MultiplayerAdmin) &&
-			!engine.inventoryPanelOpen() && engine.playerHudView().hotbar.available,
-			"both clients retire their remote menus and publish the solo hotbar after hosted shutdown");
+		engine.syncUiInput();
+		auto resumedStack = sample.screens();
+		CHECK(sample.screens().top() == gameui::Screen::Hud && !sample.screens().blocksGameplay() &&
+			sample.screens().focus() == 0 && !resumedStack.back(),
+			"return to this unpaused solo world restores a single, unfocused HUD root");
+		CHECK(!sample.hasArmedPress() && !sample.m_multiplayerConfirm && !sample.m_multiplayerRequest &&
+			!sample.m_inventoryInteraction.drag().active() && !sample.m_inventoryView.snapshot &&
+			!sample.m_inventoryView.actionPending && !sample.m_inventoryView.pendingSlots &&
+			engine.m_inputRouter.pointerOwner() == gameui::InputOwner::None,
+			"the transition retires pending UI state and quarantines the old press");
+		const auto soloHud = engine.playerHudView();
+		CHECK(soloInventory && engine.playerInventoryView().snapshot == soloInventory &&
+			soloHud.hotbar.available && soloHud.hotbar.slots[0].count == 4 &&
+			soloHud.hotbar.slots[0].label == (host ? "Stone" : "Dirt"),
+			"both clients recover their own authoritative solo inventory and corresponding HUD");
+		CHECK(engine.mouseCaptured == capturedBeforeDeparture && !engine.simulationSuspended() &&
+			engine.inputContext().allowsMovement(), "return restores the solo cursor and movement policy");
+		SDL_Event release{};
+		release.type = SDL_EVENT_MOUSE_BUTTON_UP;
+		release.button.windowID = SDL_GetWindowID(engine.window);
+		release.button.button = SDL_BUTTON_LEFT;
+		CHECK(engine.routeUiEvent(release), "the old native release never reaches solo gameplay");
+		sample.openPause();
+		sample.openScreen(gameui::Screen::Multiplayer);
+		engine.pumpPlayerMultiplayer();
+		CHECK(!sample.m_multiplayer.connection && sample.m_multiplayer.nearby.empty() &&
+			!sample.m_multiplayer.administration && !sample.m_multiplayer.monitor &&
+			!sample.m_mpAdminDisplayed && !sample.m_mpAdminTarget.valid(),
+			"a fresh visit cannot see the retired roster or administration state");
+		sample.closePause();
+	}
+
+	std::string relayEndpoint(std::string_view endpoint)
+	{
+		const auto address = client::parseEndpoint(endpoint);
+		if (!address)
+			throw std::runtime_error("the hosted fixture published an invalid endpoint");
+		actionRelay->server = *address;
+		return client::formatEndpoint(actionRelay->socket.address());
+	}
+
+	void submitPendingSelection()
+	{
+		const inventoryui::Action action{inventoryui::Command::Select,
+			inventoryui::SlotId{engine.selectedHotbarSlot()}};
+		if (!engine.submitRemoteInventoryAction(action))
+			throw std::runtime_error("the fixture could not submit a private hotbar action");
+		const auto view = engine.playerInventoryView();
+		CHECK(engine.m_remote->actionPending && engine.m_remote->pendingInventoryAction &&
+			view.snapshot && view.actionPending && view.pendingSlots &&
+			view.pendingSlots->command == action.command && view.pendingSlots->from == action.from,
+			"the old session publishes a real pending action and its affected slot");
+	}
+
+	void checkDelayedReply()
+	{
+		using namespace net::wire;
+		auto &relay = *actionRelay;
+		const auto &packet = *relay.delayed;
+		const auto oldAction = std::get<ActionResult>(packet.payload);
+		auto &remote = *engine.m_remote;
+		CHECK(remote.scope && remote.scope != packet.scope, "the guest reattaches under a fresh scope");
+		relay.holdResult = false;
+		// Advance the fresh action counter until its pending ID collides with
+		// the old reply. A mismatch in action ID must not mask a scope failure.
+		if (oldAction.actionId != 2)
+			throw std::runtime_error("the old guest's second selection did not produce action ID 2");
+		submitPendingSelection();
+		until([&] { return !remote.actionPending; }, "the fresh guest's first selection did not settle");
+		const auto before = engine.playerInventoryView().snapshot;
+		engine.pollRemote(); // drain the already-forwarded packets before injecting the held reply
+		submitPendingSelection();
+		Datagram encoded;
+		if (encode(Endpoint::Server, packet, encoded) != CodecStatus::Ok ||
+			!relay.socket.send(relay.client, encoded.view()))
+			throw std::runtime_error("could not replay the held server result");
+		const auto received = remote.transport.traffic().receivedBytes;
+		// Do not pump the relay while receiving the replay. The real reply to
+		// the new action cannot race the assertion.
+		engine.pollRemote();
+		CHECK(remote.transport.traffic().receivedBytes >= received + encoded.view().size(),
+			"the delayed reply reached the fresh transport from its live peer");
+		const auto after = engine.playerInventoryView();
+		CHECK(after.snapshot == before && remote.actionPending && remote.pendingInventoryAction &&
+			after.actionPending && after.pendingSlots,
+			"the stale result leaves the new private inventory and matching pending action intact");
+		until([&] { return relay.lastAction == oldAction.actionId && !remote.actionPending; },
+			"the fresh action with the same ID did not receive its own result");
+		CHECK(engine.playerInventoryView().snapshot == before,
+			"a no-op selection conserves the restored inventory after the real reply");
+		std::cout << "HOSTED retired and replayed a delayed guest action result, id=" << oldAction.actionId << '\n';
+	}
+
+	void openDepartureScreen(bool host)
+	{
+		using enum gameui::Screen;
+		auto &sample = *engine.m_playerUi;
+		const auto paint = [&] {
+			engine.pumpPlayerMultiplayer();
+			if (!presentClosureFrame())
+				throw std::runtime_error("the hosted navigation witness could not present");
+		};
+		const auto focusControl = [&](std::string_view label) {
+			const auto widgets = sample.m_widgets.widgets();
+			const auto found = std::ranges::find(widgets, label, &gameui::Widget::label);
+			if (found == widgets.end() || !found->enabled)
+				throw std::runtime_error("the departure screen lacks its native control: " + std::string(label));
+			auto focusId = sample.screens().focus();
+			sample.m_widgets.focus(focusId, found->id, true);
+			sample.m_screens.focus(focusId);
+			return sample.m_widgets.bounds(*found).intersect(sample.m_widgets.viewport().clip);
+		};
+		const auto press = [&](std::string_view label) {
+			focusControl(label);
+			tap(SDLK_RETURN);
+			paint();
+		};
+		assertWindowFocus();
+		tap(SDLK_ESCAPE);
+		paint();
+		CHECK(sample.screens().top() == Pause && !engine.nativePause(), "connected Escape opens a live Pause menu");
+		press("Multiplayer");
+		if (host)
+			press("Host server");
+		press(host ? "Administration" : "Players");
+		if (host)
+		{
+			CHECK(sample.screens().top() == MultiplayerAdmin && sample.m_mpAdminDisplayed &&
+				sample.m_mpAdminDisplayed->role == Role::Owner, "the host opens the verified owner administration screen");
+			press("Stop and save server...");
+			CHECK(sample.screens().top() == MultiplayerConfirm && sample.m_multiplayerConfirm &&
+				sample.m_multiplayerConfirm->administration &&
+				sample.m_multiplayerConfirm->administration->operation == Operation::Stop,
+				"the owner holds a live stop confirmation when the fixture ends the server");
+		}
+		else
+			CHECK(sample.screens().top() == MultiplayerRoster && sample.m_multiplayer.nearby.size() == 2 &&
+				!sample.m_multiplayer.administration, "the guest opens its real two-player roster without local authority");
+		const auto bounds = focusControl(host ? "Cancel" : "Back");
+		SDL_Event event{};
+		event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+		event.button.windowID = SDL_GetWindowID(engine.window);
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.x = (bounds.rect.x + bounds.rect.z) * 0.5f;
+		event.button.y = (bounds.rect.y + bounds.rect.w) * 0.5f;
+		engine.routeUiEvent(event);
+		CHECK(sample.screens().focus() != 0 && sample.hasArmedPress() &&
+			engine.m_inputRouter.pointerOwner() == gameui::InputOwner::PlayerUi,
+			"the departing multiplayer screen owns a focused, armed native control");
 	}
 
 	void until(const auto &done, const char *description,
@@ -1608,7 +1828,8 @@ struct EngineJoinProbe
 		const auto inventory = engine.playerInventoryView();
 		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
 			"leaving or switching replaces the old HUD with session feedback");
-		CHECK(!inventory.enabled() && !inventory.snapshot && !inventory.actionPending && !remote.actionPending,
+		CHECK(!inventory.enabled() && !inventory.snapshot && !inventory.actionPending && !inventory.pendingSlots &&
+			!remote.actionPending && !remote.pendingInventoryAction,
 			"leaving or switching retires the previous inventory view and pending action");
 		CHECK(hud.statusKind == gameui::style::Status::Pending ||
 			hud.recovery == gameui::recoveryInstruction(),

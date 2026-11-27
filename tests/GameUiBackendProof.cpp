@@ -852,6 +852,11 @@ struct GameUiBackendProbe
 			// against a known client state.
 			until([&] { return fs::exists(evidence / "guest-ready-for-kick"); },
 				"the guest did not finish its closed-menu probe");
+			until([&] {
+				const auto widgets = sample.m_widgets.widgets();
+				const auto kickButton = std::ranges::find(widgets, "Kick for 60 seconds...", &gameui::Widget::label);
+				return kickButton != widgets.end() && kickButton->enabled;
+			}, "the hosted monitor did not publish the guest as online for the kick");
 			press("Kick for 60 seconds...");
 			CHECK(sample.m_multiplayerConfirm->administration->operation == localcontrol::Operation::Kick &&
 				sample.m_multiplayerConfirm->administration->subject &&
@@ -1168,7 +1173,8 @@ struct GameUiBackendProbe
 		return {uint32_t(w), uint32_t(h)};
 	}
 
-	void present(const std::function<void()> &extraDevUi = {}, std::optional<uint64_t> gpuTag = std::nullopt)
+	std::optional<uint32_t> present(const std::function<void()> &extraDevUi = {},
+		std::optional<uint64_t> gpuTag = std::nullopt)
 	{
 		auto &prof = GetProfiler();
 		prof.beginFrame();
@@ -1180,7 +1186,7 @@ struct GameUiBackendProbe
 		if (!ready)
 		{
 			prof.endFrame();
-			return;
+			return std::nullopt;
 		}
 		engine.publishPlayerSettingsView();
 		uint32_t image = 0;
@@ -1209,6 +1215,7 @@ struct GameUiBackendProbe
 		engine.noteSessionFramePresented();
 		++engine.frameNumber;
 		prof.endFrame();
+		return slot;
 	}
 
 	void resize(int width, int height)
@@ -1979,6 +1986,7 @@ struct GameUiBackendProbe
 			int width, height;
 			gameui::ScalePolicy policy;
 			gameui::Screen screen;
+			bool crafting{};
 		};
 		const Case cases[] = {
 			{"gallery-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery},
@@ -1988,6 +1996,9 @@ struct GameUiBackendProbe
 			{"hud-1920x1080-100", 1920, 1080, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
 			{"hud-2560x1080-150", 2560, 1080, {gameui::ScaleMode::Fixed, 1.5f}, gameui::Screen::HudMock},
 			{"hud-960x540-100", 960, 540, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::HudMock},
+			{"crafting-gallery", 1280, 720, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery, true},
+			{"crafting-compact", 960, 540, {gameui::ScaleMode::Fixed, 1.f}, gameui::Screen::Gallery, true},
+			{"crafting-200", 1920, 1080, {gameui::ScaleMode::Fixed, 2.f}, gameui::Screen::Gallery, true},
 		};
 		std::filesystem::create_directories(out);
 		for (const auto &test : cases)
@@ -2027,6 +2038,38 @@ struct GameUiBackendProbe
 					"the gallery confirmation styles its destructive action as danger for " << test.name);
 			}
 
+			gameui::CraftingGalleryLayout crafting{};
+			glm::vec2 hover{};
+			if (test.crafting)
+			{
+				const auto &theme = gameui::style::baseline();
+				const auto &viewport = sample.m_widgets.viewport();
+				const auto previousOffset = viewport.offset;
+				SDL_Event wheel{};
+				wheel.type = SDL_EVENT_MOUSE_WHEEL;
+				wheel.wheel.windowID = SDL_GetWindowID(engine.window);
+				wheel.wheel.which = kProofMouse;
+				wheel.wheel.y = -100.f;
+				wheel.wheel.mouse_x = viewport.clip.rect.z - 2.f;
+				wheel.wheel.mouse_y = viewport.clip.rect.w - 2.f;
+				checked(SDL_PushEvent(&wheel), "queue scrolling to the crafting preview");
+				present();
+				CHECK(viewport.offset > previousOffset, "SDL wheel scrolls the gallery to the crafting preview");
+				const auto section = gameui::gallerySectionRect(sample.m_gallery, theme, gameui::kCraftingGallerySection);
+				crafting = gameui::craftingGalleryLayout(viewport.place(section), theme, sample.m_screenScale);
+				const auto first = gameui::slotCell(crafting.inputs, 0, 0);
+				hover = glm::vec2(first.rect) + gameui::size(first) * 0.5f;
+				SDL_WarpMouseInWindow(engine.window, hover.x, hover.y);
+				frames(2);
+				SDL_GetMouseState(&hover.x, &hover.y);
+				CHECK(SDL_GetMouseFocus() == engine.window && gameui::hit(first, hover),
+					"the SDL pointer is over the populated cobblestone slot");
+				CHECK(!crafting.output.empty() && crafting.output.intersect(viewport.clip) == crafting.output &&
+					crafting.outputLabel.intersect(viewport.clip) == crafting.outputLabel &&
+					crafting.inputs.bounds.intersect(viewport.clip) == crafting.inputs.bounds,
+					"all crafting inputs, output and label are visible after scrolling");
+			}
+
 			// Capture in the live swapchain format so subsequent window frames
 			// always use pipelines compatible with their attachments.
 			const auto format = engine.swapchain->getImageFormat();
@@ -2039,6 +2082,47 @@ struct GameUiBackendProbe
 				VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 			sample.prepare(engine.window, 0, extent, {}, world.getTextureManager(),
 				engine.m_atlasVersion);
+			if (test.crafting)
+			{
+				const auto &theme = gameui::style::baseline();
+				gameui::DrawList expected;
+				expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+				const gameui::Surface paint(expected, sample.font(), theme, sample.m_screenScale,
+					sample.m_widgets.viewport().clip, sample.m_atlasLayers, sample.m_fontScale);
+				const auto matches = [&] {
+					return !expected.quads().empty() && !std::ranges::search(sample.m_draws.quads(), expected.quads(),
+						[](const gameui::Quad &actual, const gameui::Quad &reference) {
+							return actual.rect == reference.rect && actual.uv == reference.uv &&
+								actual.color == reference.color && actual.layer == reference.layer;
+						}).empty();
+				};
+				for (int index = 0; index < 9; ++index)
+				{
+					expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+					gameui::SlotView input{};
+					if (index == 0)
+					{
+						input.icon = gameui::AtlasIcon{engine.m_atlasVersion, COBBLESTONE};
+						input.count = 64;
+						input.state = gameui::style::State::Selected;
+					}
+					else if (index == 4)
+					{
+						input.icon = gameui::AtlasIcon{engine.m_atlasVersion, DIRT};
+						input.count = 3;
+					}
+					paint.slot(gameui::slotCell(crafting.inputs, index % 3, index / 3), input);
+					CHECK(matches(), "the gallery draws crafting input slot " << index);
+				}
+				expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+				gameui::SlotView output{};
+				output.state = gameui::style::State::Disabled;
+				paint.slot(crafting.output, output);
+				CHECK(matches(), "the output uses the shared disabled slot presentation");
+				expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+				paint.tooltip(crafting.modal.panel, hover, "Cobblestone");
+				CHECK(matches(), "hover paints the Cobblestone tooltip through the shared surface");
+			}
 			const auto stats = sample.renderer().stats(0);
 			const auto image = capture(target, &sample.renderer());
 			CHECK(image.width == extent.width && image.height == extent.height,
@@ -3900,6 +3984,8 @@ struct GameUiBackendProbe
 			const bool inventory = engine.inventoryPanelOpen();
 			frames(120);
 			std::vector<float> wall, gpuFrame, uiCpu, uiGpu, devCpu, devGpu;
+			std::array<unsigned, VkFrameContext::kMaxFramesInFlight> uiFramesBySlot{};
+			gameui::RenderStats peakUi{};
 			int peakDevCommands = 0;
 			size_t peakDevUpload = 0;
 			uint64_t serial = gpuProfiler.latest().serial;
@@ -3925,11 +4011,26 @@ struct GameUiBackendProbe
 			};
 			for (unsigned i = 0; i < measuredFrames; ++i)
 			{
-				present({}, tag);
+				const auto slot = present({}, tag);
+				checked(slot.has_value(), "every measured frame must present");
 				const auto &prof = GetProfiler();
 				wall.push_back(prof.lastFrameMs());
 				if (uiEnabled)
+				{
 					uiCpu.push_back(prof.lastScopeMs("GameUIBuild") + prof.lastScopeMs("GameUIDraw"));
+					const auto &recorded = engine.m_playerUi->lastRecordedStats();
+					checked(recorded && recorded->frameNumber == engine.frameNumber - 1,
+						"every measured player frame must publish current draw statistics");
+					const auto &stats = recorded->metrics;
+					++uiFramesBySlot[*slot];
+					peakUi.draws = std::max(peakUi.draws, stats.draws);
+					peakUi.vertices = std::max(peakUi.vertices, stats.vertices);
+					peakUi.dropped = std::max(peakUi.dropped, stats.dropped);
+					peakUi.descriptorSets = std::max(peakUi.descriptorSets, stats.descriptorSets);
+					peakUi.instanceBytes = std::max(peakUi.instanceBytes, stats.instanceBytes);
+					peakUi.fontBytes = std::max(peakUi.fontBytes, stats.fontBytes);
+					peakUi.compositionBytes = std::max(peakUi.compositionBytes, stats.compositionBytes);
+				}
 				if (devEnabled)
 				{
 					devCpu.push_back(prof.lastScopeMs("DevUIBuild") + prof.lastScopeMs("DevUIDraw"));
@@ -3975,12 +4076,17 @@ struct GameUiBackendProbe
 				<< " dev_peak_upload_bytes=" << peakDevUpload;
 			if (uiEnabled)
 			{
-				const auto stats = engine.m_playerUi->renderer().stats(0);
-				std::cout << " ui_draws=" << stats.draws << " ui_vertices=" << stats.vertices
-					<< " ui_sets=" << stats.descriptorSets << " ui_instance_bytes=" << stats.instanceBytes
-					<< " ui_font_bytes=" << stats.fontBytes << " ui_composition_bytes=" << stats.compositionBytes;
-				CHECK(stats.draws <= (inventory ? 32u : 8u) && stats.dropped == 0,
-					"the player screen stays within its draw budget");
+				std::cout << " ui_frames_by_slot=";
+				for (const auto count : uiFramesBySlot)
+					std::cout << count << ' ';
+				std::cout << " ui_peak_draws=" << peakUi.draws << " ui_peak_vertices=" << peakUi.vertices
+					<< " ui_peak_dropped=" << peakUi.dropped << " ui_peak_sets=" << peakUi.descriptorSets
+					<< " ui_peak_instance_bytes=" << peakUi.instanceBytes << " ui_peak_font_bytes=" << peakUi.fontBytes
+					<< " ui_peak_composition_bytes=" << peakUi.compositionBytes;
+				CHECK(std::ranges::all_of(uiFramesBySlot, [](auto count) { return count > 0; }),
+					"all active frame slots contribute player UI statistics");
+				CHECK(peakUi.draws <= (inventory ? 32u : 8u) && peakUi.dropped == 0,
+					"every measured player frame stays within its draw and instance budgets");
 				if (!devEnabled && uiGpu.size() >= minGpuSamples)
 					CHECK(percentile(uiCpu, 0.95f) <= (inventory ? 0.50f : 0.25f) &&
 						percentile(uiGpu, 0.95f) <= (inventory ? 0.35f : 0.20f),

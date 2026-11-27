@@ -34,11 +34,29 @@ coverage is tracked in [#314](https://github.com/gkehren/ft_vox/issues/314).
 
 | Environment | Result |
 | --- | --- |
-| Windows, MSVC 14.52 Release, graphics off | 55 CTest entries passed, including the nested clean configure/build/test and core/headless guards. A targeted rerun covered the final preferences matrix. The optional Boost prototype was absent. |
-| Debian 13 WSL2, GCC 14.2 Release, graphics off | 56 CTest entries passed, including the nested clean check, guards and the optional Boost prototype. The affected UI and preferences tests also passed in targeted reruns. |
-| Debian 13 WSL2, GCC 14.2 Debug, ASan/UBSan | All seven affected Game UI and multiplayer presentation/intent tests passed. The build used the standard warning policy after an inherited warnings-as-errors cache rejected existing aggregate initializers. |
-| Windows 11 build 26300, MSVC Release, Vulkan 1.4.357, RTX 4070 Ti/621.24 | Game, server and native fixtures compiled. Engine reload (33 checks), solo menus (35), HUD and developer workspace (87), inventory (51), Settings and restart (49 and 10), gallery (46), showcase (40), WSI (39) and offscreen composition (25) passed. |
-| Two Windows clients and a dedicated child on loopback | Native menus passed 25 owner and 27 guest checks. The checkpoint fixture passed 74 owner and 32 guest checks on first launch and 15 owner and 17 guest checks after restart. Both clients checked private inventories, owner/delegate scope, shutdown and stale presentation cleanup. |
+| Windows, MSVC 14.52 Release, graphics off | 55 CTest entries passed in the correction pass, including the nested clean configure/build/test and core/headless guards. The optional Boost prototype was absent. |
+| Debian 13 WSL2, GCC 14.2 Release, graphics off | 56 CTest entries passed in the correction pass, including the nested clean check, guards and the optional Boost prototype. |
+| Debian 13 WSL2, GCC 14.2 Debug, ASan/UBSan | All seven affected Game UI and multiplayer presentation/intent tests passed in the correction pass. The build used the standard warning policy. |
+| Windows 11 build 26300, MSVC Release, Vulkan 1.4.357, RTX 4070 Ti/621.24 | Game, server and native fixtures compiled. The gallery passed 103 checks in the correction pass. Earlier native results include engine reload (33 checks), solo menus (35), HUD and developer workspace (87), inventory (51), Settings and restart (49 and 10), showcase (40), WSI (39) and offscreen composition (25). |
+| Two Windows clients and a dedicated child on loopback | The corrected `--full-ui` run passed 25 owner and 27 guest menu checks. The checkpoint fixture passed 85 owner and 51 guest checks on first launch and 26 owner and 27 guest checks after restart. Both clients checked private inventories, owner/delegate scope, shutdown and stale presentation cleanup. |
+
+The CPU preferences matrix validates and round-trips all 1,728 advertised
+combinations in memory. The crafting layout checks cover nine combinations
+of window size and UI scale, including all input hit regions and the
+separate output and label. The native gallery proof scrolls to the preview
+with an SDL wheel event, hovers Cobblestone and checks the nine drawn slots,
+disabled output and tooltip. It writes `crafting-gallery.png` at 1280×720,
+with additional compact and 200% captures.
+
+The hosted checkpoint fixture holds a real guest action result during
+disconnect and replays it after the guest joins the replacement server.
+The new session has a pending selection with the same action ID. Its
+confirmed inventory and pending state must survive the old reply, then
+settle on the new server's reply. At the final stop, the owner has an open
+administration confirmation and the guest has an open roster. Both fixture
+clients return to their unpaused solo HUD with their own stacks, their
+previous cursor policy and fresh navigation. A reopened Multiplayer
+screen publishes current data for the solo session.
 
 The initial solo inventory run lost synthetic clicks because the fixture
 was flushing its own queued events. The fixture now filters desktop
@@ -70,29 +88,31 @@ The isolated sRGB/UNORM probe supplies the automated pixel comparison.
 
 ### Release timing on the RTX 4070 Ti
 
-The run collected 600 tagged GPU frames for each mode. Times in milliseconds
+The correction run collected 600 tagged GPU frames for each mode and 300
+render-stat samples per slot in every player UI mode. Times in milliseconds
 are median / p95. The scene-only baseline skips both UI record paths. The
 visible Developer UI sample uses the default dock workspace reached by F1.
 
 | Mode | CPU frame | GPU frame | Game UI CPU | Game UI GPU | Dev UI CPU | Dev UI GPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Scene only, first | 0.562 / 1.286 | 0.419 / 0.817 | — | — | — | — |
-| HUD | 0.561 / 1.253 | 0.419 / 0.652 | 0.0081 / 0.0094 | 0.0031 / 0.0041 | — | — |
-| HUD and Developer UI | 0.570 / 1.178 | 0.424 / 0.652 | 0.0077 / 0.0083 | 0.0031 / 0.0041 | 0.0299 / 0.0323 | 0.0041 / 0.0051 |
-| HUD, after hiding Developer UI | 0.558 / 1.171 | 0.419 / 0.649 | 0.0088 / 0.0093 | 0.0031 / 0.0041 | — | — |
-| Inventory | 0.585 / 1.228 | 0.439 / 0.661 | 0.0142 / 0.0151 | 0.0236 / 0.0236 | — | — |
-| Scene only, last | 0.563 / 1.190 | 0.417 / 0.647 | — | — | — | — |
+| Scene only, first | 1.127 / 1.696 | 0.449 / 0.990 | — | — | — | — |
+| HUD | 1.117 / 1.487 | 0.453 / 0.917 | 0.0093 / 0.0130 | 0.0031 / 0.0041 | — | — |
+| HUD and Developer UI | 1.101 / 1.449 | 0.457 / 0.916 | 0.0080 / 0.0121 | 0.0031 / 0.0041 | 0.0314 / 0.0600 | 0.0051 / 0.0102 |
+| HUD, after hiding Developer UI | 1.107 / 1.463 | 0.452 / 0.922 | 0.0093 / 0.0127 | 0.0031 / 0.0041 | — | — |
+| Inventory | 1.131 / 1.478 | 0.459 / 0.913 | 0.0150 / 0.0234 | 0.0236 / 0.0236 | — | — |
+| Scene only, last | 1.067 / 1.437 | 0.434 / 0.901 | — | — | — | — |
 
-The HUD and inventory used one Game UI draw each, with 936 and 3,072
-vertices respectively. All player modes used four descriptor sets,
+The measured maxima were one Game UI draw each for HUD and inventory,
+936 and 3,072 vertices respectively, and zero dropped instances. Across
+all sampled frames, player modes peaked at four descriptor sets,
 208 KiB of instance buffers and a 32 KiB font allocation. The sRGB
 swapchain needed zero composition bytes. The Developer UI sample peaked
 at two indexed draw commands and 6,372 bytes of used vertex/index upload
 data. Both player modes met their attributed budgets. The first baseline's
-GPU frame p95 was 0.170 ms higher than the last baseline, so the attributed
-scopes provide a more stable estimate of UI cost than whole-frame p95
-subtraction. Repeated resize and atlas reload checks verified that the UI
-resource footprint returned to its baseline.
+GPU frame p95 was 0.089 ms higher than the last baseline. The attributed
+scopes measure UI cost directly while whole-frame p95 also varies between
+the two scene-only runs. Earlier resize and atlas reload checks also
+verified that the UI resource footprint returned to its baseline.
 
 ## Reproduce
 
@@ -143,8 +163,14 @@ For Release timing use `FT_VOX_VALIDATION=0`, `FT_VOX_SYNC_VALIDATION=0`,
 1920×1080 size and VSync off in each mode. The sequence brackets the UI
 modes with a scene-only baseline. Each mode warms up for 120 frames and
 samples 600 frames. The report includes frame medians and p95, attributed
-CPU and GPU scopes, player draw count and instance/font/composition bytes,
+CPU and GPU scopes, peak player draw and vertex counts, dropped instances,
+descriptor sets and instance/font/composition bytes,
 and the Developer UI's peak indexed draw commands and used upload bytes.
+Every measured frame contributes the Game UI statistics recorded from its
+actual frame slot. Both active slots must be represented. Draws, vertices
+and drops describe that frame. Descriptor and allocation figures already
+cover all active slots, so the report takes their peak across samples.
+Warmup and untagged drain frames are excluded from these statistics.
 The ImGui descriptor pool capacity is 256 sets. Used upload bytes describe
 the geometry submitted, while the backend can retain a larger allocated
 buffer. The player budget is the [backend ADR](adr/game-ui-backend.md#verification-and-budgets)

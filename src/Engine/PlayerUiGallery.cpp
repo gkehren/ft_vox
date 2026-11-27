@@ -1,7 +1,5 @@
 #include <Engine/PlayerUiGallery.hpp>
 
-#include <Engine/PlayerUiComponents.hpp>
-
 #include <algorithm>
 
 namespace gameui
@@ -24,6 +22,7 @@ std::span<const GallerySection> gallerySections()
 		{"Player UI scale", 104.f},
 		{"Crafting component preview", 264.f},
 	};
+	static_assert(sections[kCraftingGallerySection].title == "Crafting component preview");
 	return sections;
 }
 
@@ -79,6 +78,24 @@ Clip gallerySectionRect(const GalleryLayout &layout, const style::Theme &, size_
 		y += sections[i].height * s + layout.sectionSpacing;
 	const float x = layout.body.rect.x + float(column) * (layout.columnWidth + layout.sectionSpacing);
 	return {{x, y, x + layout.columnWidth, y + sections[index].height * s}};
+}
+
+CraftingGalleryLayout craftingGalleryLayout(Clip section, const style::Theme &theme, float scale)
+{
+	section.rect.y += galleryHeaderHeight(theme, scale);
+	const auto modal = confirmationLayout(section, size(section), false, theme, scale);
+	const float gap = theme.size.slotGap * scale;
+	const float gridSide = (3.f * theme.size.slot + 2.f * theme.size.slotGap) * scale;
+	const Clip gridArea{{modal.body.rect.x, modal.body.rect.y,
+		std::min(modal.body.rect.x + gridSide, modal.body.rect.z),
+		std::min(modal.body.rect.y + gridSide, modal.body.rect.w)}};
+	const auto inputs = slotGrid(gridArea, 3, 3, gap);
+	const float outputX = inputs.bounds.rect.z + theme.space.lg * scale;
+	const float outputY = slotCell(inputs, 0, 1).rect.y;
+	const auto outputGrid = slotGrid({{outputX, outputY, modal.body.rect.z, outputY + inputs.cell}}, 1, 1, gap);
+	const auto output = slotCell(outputGrid, 0, 0);
+	return {modal, inputs, output,
+		{{output.rect.z + gap, output.rect.y, modal.body.rect.z, output.rect.w}}};
 }
 
 HudMockLayout hudMockLayout(Clip view, const style::Theme &theme, float scale, int hotbarSlots)

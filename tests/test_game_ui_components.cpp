@@ -1266,6 +1266,31 @@ void gallery()
 	CHECK(narrow.panel.rect.z - narrow.panel.rect.x <= 640.f &&
 			narrow.contentHeight > size(narrow.body).y,
 		"a narrow window scrolls its content instead of overflowing the card");
+
+	for (const auto bounds : {Clip{{0, 0, 960, 540}}, Clip{{0, 0, 1280, 720}}, wide})
+		for (const float scale : {1.f, 1.5f, 2.f})
+		{
+			const auto gallery = galleryLayout(bounds, theme(), scale);
+			const auto section = gallerySectionRect(gallery, theme(), kCraftingGallerySection);
+			ScrollViewport viewport{gallery.body, gallery.contentHeight};
+			viewport.reveal(section);
+			const auto layout = craftingGalleryLayout(viewport.place(section), theme(), scale);
+			CHECK(inside(layout.inputs.bounds, layout.modal.body) && inside(layout.inputs.bounds, gallery.body) &&
+				inside(layout.output, layout.modal.body) && inside(layout.outputLabel, gallery.body),
+				"the scrolled crafting preview fits compact, standard and high-scale layouts");
+			CHECK(!layout.output.empty() && !layout.outputLabel.empty() &&
+				layout.inputs.bounds.rect.z < layout.output.rect.x && layout.output.rect.z < layout.outputLabel.rect.x &&
+				layout.output.rect.y == slotCell(layout.inputs, 0, 1).rect.y &&
+				size(layout.output) == glm::vec2(layout.inputs.cell),
+				"the disabled output aligns to the middle row and has a separate label");
+			for (int index = 0; index < 9; ++index)
+			{
+				const auto cell = slotCell(layout.inputs, index % 3, index / 3);
+				CHECK(!cell.empty() && inside(cell, layout.inputs.bounds) &&
+					slotIndexAt(layout.inputs, glm::vec2(cell.rect) + size(cell) * 0.5f) == index,
+					"each of the nine inputs has a visible, independently hittable cell");
+			}
+		}
 }
 } // namespace
 
