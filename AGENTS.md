@@ -13,6 +13,7 @@
 - [`docs/gameplay-loop.md`](docs/gameplay-loop.md) — authoritative Epic #223 gameplay model: item registry, commands/results, entity rules, persistence, replication readiness (closed by issue #230)
 - [`docs/visual-regression.md`](docs/visual-regression.md) — Visual-regression harness: scenes, references, tolerances
 - [`docs/multiplayer-closure.md`](docs/multiplayer-closure.md) — Epic #245 acceptance gates, loopback and restart evidence, resource budgets and GPU follow-ups
+- [`docs/game-ui-closure.md`](docs/game-ui-closure.md) — Epic #298 migration matrix, CPU and opt-in native Vulkan checks, manual acceptance and performance evidence
 
 ## Architecture Overview
 

@@ -368,6 +368,16 @@ void preferences()
 	const PlayerUiSettings custom{{ScaleMode::Fixed, 1.75f}, {1280, 720}, false, false, 250, true};
 	CHECK(custom.save(path) && reloaded.load(path) == LoadStatus::Ok && reloaded == custom,
 		"all client preferences round-trip together");
+	for (const auto window : kWindowSizes)
+		for (const int sensitivity : kSensitivitySteps)
+		{
+			auto offered = custom;
+			offered.window = window;
+			offered.sensitivity = sensitivity;
+			PlayerUiSettings parsed;
+			CHECK(offered.valid() && parsed.parse(offered.serialize()) && parsed == offered,
+				"every advertised window size and sensitivity pair is valid and persists");
+		}
 	const auto rejects = [&](std::string_view from, std::string_view to) {
 		auto malformed = custom.serialize();
 		malformed.replace(malformed.find(from), from.size(), to);

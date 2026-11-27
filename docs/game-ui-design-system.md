@@ -378,3 +378,14 @@ the normalized geometry is covered headlessly.
   [Live HUD controls and evidence](game-ui-migration.md#live-player-hud-303)
 - The pause-menu previews are additive; the existing solo/multiplayer/hosting
   and developer flows are unchanged.
+
+## Crafting composition preview
+
+Pause → Design system includes a crafting table preview built from the same
+confirmation card, slot grid, slot states and tooltip used by player screens.
+The 3×3 input grid shows sample stacks and the output slot is disabled.
+Hover a populated input to inspect its name. A future crafting or container
+screen can supply a bounded snapshot of its own slots and route typed intents
+through Engine. `SlotView` carries display state, including the atlas
+generation, quantity and optional progress. Recipes, output validation and
+inventory transfers belong to the simulation or server.

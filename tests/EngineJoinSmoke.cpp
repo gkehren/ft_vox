@@ -1526,6 +1526,10 @@ struct EngineJoinProbe
 		pump();
 		CHECK(!engine.m_remote && engine.sim.get() == solo && engine.viewWorld() == solo->world(),
 			"client returns to the existing solo world after hosted shutdown");
+		CHECK(!engine.m_playerUi->screens().contains(gameui::Screen::MultiplayerConfirm) &&
+			!engine.m_playerUi->screens().contains(gameui::Screen::MultiplayerAdmin) &&
+			!engine.inventoryPanelOpen() && engine.playerHudView().hotbar.available,
+			"both clients retire their remote menus and publish the solo hotbar after hosted shutdown");
 	}
 
 	void until(const auto &done, const char *description,
@@ -1601,8 +1605,11 @@ struct EngineJoinProbe
 		    engine.mobStates.empty() && engine.m_itemStates.empty(),
 		    "departure clears draw references, entity views and pooled render handles");
 		const auto hud = engine.playerHudView();
+		const auto inventory = engine.playerInventoryView();
 		CHECK(!hud.hotbar.available && !hud.aim && !hud.status.empty(),
 			"leaving or switching replaces the old HUD with session feedback");
+		CHECK(!inventory.enabled() && !inventory.snapshot && !inventory.actionPending && !remote.actionPending,
+			"leaving or switching retires the previous inventory view and pending action");
 		CHECK(hud.statusKind == gameui::style::Status::Pending ||
 			hud.recovery == gameui::recoveryInstruction(),
 			"an ended session publishes the reconnect steps reachable from this workspace/capture state");

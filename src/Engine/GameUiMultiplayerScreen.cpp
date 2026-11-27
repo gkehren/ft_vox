@@ -635,11 +635,7 @@ void GameUiSample::buildMultiplayerScreen(Screen screen, StackLayout &column)
 				if (!action.profile.empty())
 					text("Authorize profile " + action.profile);
 				if (action.operation == Operation::Kick)
-					// A kick targets the persistent identity (correction F02):
-					// the server stores a 60-second kickedUntil lockout on the
-					// persistent access record, so the wording describes the
-					// reconnection refusal, not just the disconnect.
-					text("Disconnects the player and refuses reconnection for 60 seconds.");
+					text("Rejoin blocked for " + std::to_string(localcontrol::kKickSeconds) + " seconds.");
 				eligible &= admin && !view.adminPending && eligibleAdministration(action, view.launch, *admin, view.monitor.get());
 			}
 			else if (intent.action == MultiplayerAction::ForceStop)

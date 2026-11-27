@@ -862,3 +862,9 @@ Validation reported only the known [RTSS diagnostics](vulkan-validation.md#srgbs
 - [Settings at 960 × 540](images/player-settings/settings.png)
 - [Resize and 125% scale confirmation at 1280 × 720](images/player-settings/resize-preview.png)
 - [Settings after applying the display and input changes](images/player-settings/settings-applied.png)
+
+## Phase K verification
+
+The [closure matrix](game-ui-closure.md) maps the migrated routes to their
+implementing PRs, the current automated evidence and the remaining
+physical acceptance checks.

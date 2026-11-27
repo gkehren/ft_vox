@@ -22,6 +22,7 @@ std::span<const GallerySection> gallerySections()
 		{"Confirmation", 216.f},
 		{"Inventory slots", 120.f},
 		{"Player UI scale", 104.f},
+		{"Crafting component preview", 264.f},
 	};
 	return sections;
 }

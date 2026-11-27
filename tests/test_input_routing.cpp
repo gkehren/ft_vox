@@ -53,7 +53,7 @@ int main()
 	checkRoute(SDLK_8, KeyRoute::GameplayShortcut, "8 hotbar gameplay");
 	checkRoute(SDLK_9, KeyRoute::GameplayShortcut, "9 hotbar gameplay");
 
-	// Escape is special (UI/modal routing first, then possibly quit) and
+	// Escape goes through the native screen/input policy and
 	// must never enter the shortcut routes.
 	checkRoute(SDLK_ESCAPE, KeyRoute::NotGameUIShortcut, "Escape not a DeveloperUi shortcut");
 
@@ -62,16 +62,6 @@ int main()
 	checkRoute(SDLK_0, KeyRoute::NotGameUIShortcut, "digit 0 not a hotbar shortcut");
 	checkRoute(SDLK_SPACE, KeyRoute::NotGameUIShortcut, "space not a shortcut");
 	checkRoute(SDLK_RETURN, KeyRoute::NotGameUIShortcut, "return not a shortcut");
-
-	// This helper only decides whether the application may quit.
-	// Modal dismissal itself is handled by ImGuiFileDialog.
-	CHECK(escapeShouldQuit(false, false), "escape quits with free UI");
-	CHECK(!escapeShouldQuit(true, false),
-		  "escape does not quit while ImGui captures keyboard");
-	CHECK(!escapeShouldQuit(false, true),
-		  "escape does not quit while a modal dialog is open");
-	CHECK(!escapeShouldQuit(true, true),
-		  "escape does not quit when UI captures and a modal is open");
 
 	using namespace gameui;
 	const auto failedEnable = captureOutcome(true, false, false);

@@ -91,6 +91,11 @@ simulation runner and the CPU-only tests. SDL3, the Vulkan SDK/loader, volk,
 VMA, miniz and the SPIR-V compilers are **not discovered at all** — no
 GPU, window, shader toolchain or vcpkg toolchain is required.
 
+The player UI state, layout, preferences, inventory and multiplayer intent
+tests run with `FT_VOX_GRAPHICS=OFF`. See the
+[UI closure commands](game-ui-closure.md#reproduce) for the opt-in Vulkan
+fixtures and Release measurement on a graphical build.
+
 ```bash
 # Linux / macOS
 cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release

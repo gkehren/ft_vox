@@ -467,6 +467,41 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 		paint.fittedLabel({{area.rect.x, top, area.rect.z, top + line}}, state,
 			style::TextRole::Caption, theme.palette.inkMuted, 0.f);
 	}
+	// A presentation-only composition. Each slot still uses the same
+	// atlas-backed view as inventory; a real crafting screen supplies its
+	// own bounded snapshot and routes its actions through the session host.
+	{
+		const auto area = contentRect(10);
+		const auto modal = confirmationLayout(area, size(area), false, theme, s);
+		paint.confirmation(modal, "Crafting table", "");
+		const float gap = theme.size.slotGap * s;
+		const float gridSide = (3.f * theme.size.slot + 2.f * theme.size.slotGap) * s;
+		const Clip gridArea{{modal.body.rect.x, modal.body.rect.y,
+			std::min(modal.body.rect.x + gridSide, modal.body.rect.z),
+			std::min(modal.body.rect.y + gridSide, modal.body.rect.w)}};
+		const auto grid = slotGrid(gridArea, 3, 3, gap);
+		std::array<SlotView, 9> inputs{};
+		inputs[0] = sampleSlot(kSampleStacks[0], m_draws.atlasGeneration(), style::State::Selected);
+		inputs[4] = sampleSlot(kSampleStacks[2], m_draws.atlasGeneration(), style::State::Rest);
+		inputs[0].label = "Cobblestone";
+		inputs[4].label = "Dirt";
+		paint.slotGrid(grid, inputs);
+		const float outputX = grid.bounds.rect.z + theme.space.lg * s;
+		const float outputY = slotCell(grid, 0, 1).rect.y;
+		const auto output = slotGrid({{outputX, outputY, modal.body.rect.z, outputY + grid.cell}}, 1, 1, gap);
+		if (!output.bounds.empty())
+		{
+			SlotView emptyOutput{};
+			emptyOutput.state = style::State::Disabled;
+			const auto outputCell = slotCell(output, 0, 0);
+			paint.slot(outputCell, emptyOutput);
+			paint.fittedLabel({{outputCell.rect.z + gap, outputCell.rect.y, modal.body.rect.z, outputCell.rect.w}},
+				"Output", style::TextRole::Caption, theme.palette.inkMuted, 0.f);
+		}
+		const auto input = slotIndexAt(grid, pointer);
+		if (input >= 0 && hit(m_gallery.body, pointer) && !inputs[size_t(input)].label.empty())
+			paint.tooltip(modal.panel, pointer, inputs[size_t(input)].label);
+	}
 	// Section headers last so scrolling content never overdraws them.
 	for (size_t index = 0; index < gallerySections().size(); ++index)
 	{

@@ -444,6 +444,10 @@ struct GameUiBackendProbe
 		using gameui::Screen;
 		using namespace std::chrono_literals;
 		const bool host = !server.empty();
+		// The owner and guest inject their own focus events. The window manager
+		// can only focus one of them, so native focus loss must not cancel a
+		// synthetic click in the other process. Other proofs exercise focus loss.
+		SDL_SetEventEnabled(SDL_EVENT_WINDOW_FOCUS_LOST, false);
 		ImGui::GetIO().IniFilename = nullptr;
 		engine.setShowDeveloperUi(false);
 		engine.loadJoinPreferences();
@@ -627,6 +631,7 @@ struct GameUiBackendProbe
 			const auto wheel = [&](float y) {
 				SDL_Event event{};
 				event.type = SDL_EVENT_MOUSE_WHEEL;
+				event.wheel.which = kProofMouse;
 				event.wheel.windowID = SDL_GetWindowID(engine.window);
 				event.wheel.y = y;
 				event.wheel.mouse_x = (bounds.rect.x + bounds.rect.z) * .5f;
@@ -1218,26 +1223,38 @@ struct GameUiBackendProbe
 			present();
 	}
 
+	// An unused mouse ID lets a proof queue several synthetic gestures before
+	// a frame while excluding desktop events for its window.
+	static constexpr SDL_MouseID kProofMouse = 0xfa37c109u;
+
 	void button(Uint32 type, float x, float y, Uint8 which = SDL_BUTTON_LEFT)
 	{
-		// Real pointer input from the desktop interleaves with the synthetic
-		// clicks: a motion or window leave queued between the press and its
-		// release cancels the armed activation, and the click is silently
-		// dropped. The proof drives only synthetic input, so drop any queued
-		// real pointer events before each click pair.
+		const auto window = SDL_GetWindowID(engine.window);
 		if (type == SDL_EVENT_MOUSE_BUTTON_DOWN)
 		{
 			SDL_PumpEvents();
-			SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
-			SDL_FlushEvent(SDL_EVENT_MOUSE_BUTTON_DOWN);
-			SDL_FlushEvent(SDL_EVENT_MOUSE_BUTTON_UP);
-			SDL_FlushEvent(SDL_EVENT_MOUSE_WHEEL);
-			SDL_FlushEvent(SDL_EVENT_WINDOW_MOUSE_ENTER);
-			SDL_FlushEvent(SDL_EVENT_WINDOW_MOUSE_LEAVE);
+			auto target = window;
+			SDL_FilterEvents([](void *data, SDL_Event *event) {
+				const auto id = *static_cast<const SDL_WindowID *>(data);
+				switch (event->type)
+				{
+				case SDL_EVENT_MOUSE_MOTION:
+					return event->motion.windowID != id || event->motion.which == kProofMouse;
+				case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
+					return event->button.windowID != id || event->button.which == kProofMouse;
+				case SDL_EVENT_MOUSE_WHEEL:
+					return event->wheel.windowID != id || event->wheel.which == kProofMouse;
+				case SDL_EVENT_WINDOW_MOUSE_ENTER: case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+					return event->window.windowID != id;
+				default:
+					return true;
+				}
+			}, &target);
 		}
 		SDL_Event event{};
 		event.type = type;
-		event.button.windowID = SDL_GetWindowID(engine.window);
+		event.button.windowID = window;
+		event.button.which = kProofMouse;
 		event.button.button = which;
 		event.button.x = x;
 		event.button.y = y;
@@ -1249,6 +1266,7 @@ struct GameUiBackendProbe
 		SDL_Event event{};
 		event.type = SDL_EVENT_MOUSE_MOTION;
 		event.motion.windowID = SDL_GetWindowID(engine.window);
+		event.motion.which = kProofMouse;
 		event.motion.x = x;
 		event.motion.y = y;
 		checked(SDL_PushEvent(&event), "queue pointer motion");
@@ -1400,6 +1418,7 @@ struct GameUiBackendProbe
 			"keyboard adjusts slider and list selection");
 		SDL_Event wheel{};
 		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.which = kProofMouse;
 		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
 		wheel.wheel.y = -1.f;
 		wheel.wheel.mouse_x = center("Biome preview").x;
@@ -3123,7 +3142,12 @@ struct GameUiBackendProbe
 		capture("ownership");
 		// Let ImGui settle the preceding native-to-developer handoff before re-entry.
 		present(ownershipEditor);
-		clickAt(editorPoint);
+		SDL_WarpMouseInWindow(engine.window, editorPoint.x, editorPoint.y);
+		engine.imgui->observePointer(editorPoint.x, editorPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_DOWN, editorPoint.x, editorPoint.y);
+		present(ownershipEditor);
+		engine.imgui->observePointer(editorPoint.x, editorPoint.y);
+		button(SDL_EVENT_MOUSE_BUTTON_UP, editorPoint.x, editorPoint.y);
 		for (int frame = 0; frame < 3 && !engine.imgui->editingText(); ++frame)
 			present(ownershipEditor);
 		CHECK(engine.imgui->editingText(), "a developer text field owns the keyboard before F1");
@@ -3328,6 +3352,7 @@ struct GameUiBackendProbe
 		CHECK(engine.playerHudView().hotbar.selectedName == "Dirt", "number key selects via the existing adapter");
 		SDL_Event wheel{};
 		wheel.type = SDL_EVENT_MOUSE_WHEEL;
+		wheel.wheel.which = kProofMouse;
 		wheel.wheel.windowID = SDL_GetWindowID(engine.window);
 		wheel.wheel.y = 1.f;
 		checked(SDL_PushEvent(&wheel), "queue gameplay scroll");
@@ -3690,8 +3715,14 @@ struct GameUiBackendProbe
 			frames(3);
 			captureWorkspace("developer-workspace.png");
 			tap(SDLK_F1);
-			frames(3);
-			captureWorkspace("player-hud.png");
+			for (const auto &[name, dayTime] : std::array{
+				std::pair{"player-hud.png", 0.35f}, std::pair{"player-hud-night.png", 0.0f}})
+			{
+				engine.shaderParams.dayTime = dayTime;
+				engine.tickDayCycle(0.0);
+				frames(3);
+				captureWorkspace(name);
+			}
 		}
 	}
 
@@ -3862,11 +3893,15 @@ struct GameUiBackendProbe
 		engine.setVSync(false);
 		resize(1920, 1080);
 		auto sample = std::move(engine.m_playerUi);
-		const auto measure = [&](bool uiEnabled, uint64_t tag) {
+		const auto measure = [&](const char *mode, bool devEnabled, uint64_t tag) {
 			constexpr unsigned measuredFrames = 600;
 			constexpr unsigned minGpuSamples = measuredFrames * 95 / 100;
+			const bool uiEnabled = bool(engine.m_playerUi);
+			const bool inventory = engine.inventoryPanelOpen();
 			frames(120);
-			std::vector<float> wall, gpuFrame, uiCpu, uiGpu;
+			std::vector<float> wall, gpuFrame, uiCpu, uiGpu, devCpu, devGpu;
+			int peakDevCommands = 0;
+			size_t peakDevUpload = 0;
 			uint64_t serial = gpuProfiler.latest().serial;
 			const bool expectEncode = uiEnabled && colorspace::outputTransferRequiresShaderEncode(
 				colorspace::classifyOutputTransfer(engine.swapchain->getImageFormat(), engine.swapchain->getColorSpace()));
@@ -3877,12 +3912,16 @@ struct GameUiBackendProbe
 				serial = gpu.serial;
 				const auto draw = size_t(GpuPass::GameUi);
 				const auto encode = size_t(GpuPass::GameUiEncode);
+				const auto dev = size_t(GpuPass::ImGui);
 				if (gpu.benchmarkTag != tag || !gpu.present[size_t(GpuPass::Frame)] ||
-					gpu.present[draw] != uiEnabled || gpu.present[encode] != expectEncode)
+					gpu.present[draw] != uiEnabled || gpu.present[encode] != expectEncode ||
+					gpu.present[dev] != devEnabled)
 					return;
 				gpuFrame.push_back(gpu.ms[size_t(GpuPass::Frame)]);
 				if (uiEnabled)
 					uiGpu.push_back(gpu.ms[draw] + (expectEncode ? gpu.ms[encode] : 0.f));
+				if (devEnabled)
+					devGpu.push_back(gpu.ms[dev]);
 			};
 			for (unsigned i = 0; i < measuredFrames; ++i)
 			{
@@ -3891,6 +3930,23 @@ struct GameUiBackendProbe
 				wall.push_back(prof.lastFrameMs());
 				if (uiEnabled)
 					uiCpu.push_back(prof.lastScopeMs("GameUIBuild") + prof.lastScopeMs("GameUIDraw"));
+				if (devEnabled)
+				{
+					devCpu.push_back(prof.lastScopeMs("DevUIBuild") + prof.lastScopeMs("DevUIDraw"));
+					const auto *draw = ImGui::GetDrawData();
+					if (draw && draw->Valid)
+					{
+						int commands = 0;
+						for (const auto *list : draw->CmdLists)
+							for (const auto &command : list->CmdBuffer)
+								if (!command.UserCallback && command.ElemCount)
+									++commands;
+						peakDevCommands = std::max(peakDevCommands, commands);
+						const size_t bytes = size_t(draw->TotalVtxCount) * sizeof(ImDrawVert) +
+							size_t(draw->TotalIdxCount) * sizeof(ImDrawIdx);
+						peakDevUpload = std::max(peakDevUpload, bytes);
+					}
+				}
 				collect();
 			}
 			// Slot reads happen before recording. Drain the final measured
@@ -3907,27 +3963,48 @@ struct GameUiBackendProbe
 					std::cout << ' ' << name << "_median=" << percentile(samples, 0.5f)
 						<< ' ' << name << "_p95=" << percentile(samples, 0.95f);
 			};
-			std::cout << (uiEnabled ? "game_ui" : "baseline") << " frames=" << wall.size()
+			std::cout << mode << " frames=" << wall.size()
 				<< " gpu_samples=" << gpuFrame.size() << " ui_gpu_samples=" << uiGpu.size();
 			report("frame", wall);
 			report("gpu", gpuFrame);
 			report("ui_cpu", uiCpu);
 			report("ui_gpu", uiGpu);
+			report("dev_cpu", devCpu);
+			report("dev_gpu", devGpu);
+			std::cout << " dev_peak_commands=" << peakDevCommands
+				<< " dev_peak_upload_bytes=" << peakDevUpload;
+			if (uiEnabled)
+			{
+				const auto stats = engine.m_playerUi->renderer().stats(0);
+				std::cout << " ui_draws=" << stats.draws << " ui_vertices=" << stats.vertices
+					<< " ui_sets=" << stats.descriptorSets << " ui_instance_bytes=" << stats.instanceBytes
+					<< " ui_font_bytes=" << stats.fontBytes << " ui_composition_bytes=" << stats.compositionBytes;
+				CHECK(stats.draws <= (inventory ? 32u : 8u) && stats.dropped == 0,
+					"the player screen stays within its draw budget");
+				if (!devEnabled && uiGpu.size() >= minGpuSamples)
+					CHECK(percentile(uiCpu, 0.95f) <= (inventory ? 0.50f : 0.25f) &&
+						percentile(uiGpu, 0.95f) <= (inventory ? 0.35f : 0.20f),
+						"the player screen stays within its p95 CPU and GPU budgets");
+			}
+			CHECK(!devEnabled || peakDevCommands > 0, "the Developer UI produces indexed draw commands");
 			std::cout << '\n';
 			CHECK(gpuFrame.size() >= minGpuSamples, "GPU sample coverage below " << minGpuSamples <<
-				"/" << measuredFrames << " with the expected passes, mode=" << (uiEnabled ? "game_ui" : "baseline"));
+				"/" << measuredFrames << " with the expected passes, mode=" << mode);
 		};
-		measure(false, 1);
+		measure("baseline", false, 1);
 		engine.m_playerUi = std::move(sample);
-		measure(true, 2);
-		measure(true, 3);
+		measure("game_ui", false, 2);
+		engine.setDeveloperWorkspaceVisible(true);
+		measure("game_ui_and_developer", true, 3);
+		engine.setDeveloperWorkspaceVisible(false);
+		measure("game_ui", false, 4);
+		engine.setInventoryOpen(true);
+		checked(engine.inventoryPanelOpen(), "open the native inventory for timing");
+		measure("inventory", false, 5);
+		engine.setInventoryOpen(false);
 		sample = std::move(engine.m_playerUi);
-		measure(false, 4);
+		measure("baseline", false, 6);
 		engine.m_playerUi = std::move(sample);
-		const auto stats = engine.m_playerUi->renderer().stats(0);
-		std::cout << "ui_resources draws=" << stats.draws << " vertices=" << stats.vertices
-			<< " sets=" << stats.descriptorSets << " instance_bytes=" << stats.instanceBytes
-			<< " font_bytes=" << stats.fontBytes << " composition_bytes=" << stats.compositionBytes << '\n';
 	}
 };
 
