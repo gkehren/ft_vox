@@ -105,7 +105,7 @@ jobs:
           if (-not [int]::TryParse($env:FT_VOX_GAME_UI_STYLE_REPEAT, [ref]$runs) -or $runs -lt 1 -or $runs -gt 100) {
             throw 'FT_VOX_GAME_UI_STYLE_REPEAT must be an integer from 1 to 100'
           }
-          ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat "until-fail:$runs" --output-on-failure --timeout 60
+          ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat "until-fail:$runs" --verbose --timeout 60
 
   cpu-sanitizers:
     runs-on: ubuntu-latest

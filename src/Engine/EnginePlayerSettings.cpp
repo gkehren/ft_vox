@@ -33,7 +33,7 @@ void Engine::loadPlayerUiPreferences()
 	m_playerUiSettings = {};
 	m_playerUiDirty = false;
 	m_playerUiError.clear();
-	LoadStatus status = LoadStatus::Corrupt;
+	LoadStatus status = LoadStatus::Unavailable;
 	bool hasCurrentRecord = false;
 	try
 	{
@@ -44,15 +44,18 @@ void Engine::loadPlayerUiPreferences()
 	}
 	catch (const std::exception &)
 	{
-		status = LoadStatus::Corrupt;
+		status = LoadStatus::Unavailable;
 	}
+	m_playerUiPersistenceSuspended = status == LoadStatus::Busy || status == LoadStatus::Unavailable;
 	if (status == LoadStatus::Corrupt)
 	{
 		m_playerUiDirty = true;
 		m_playerUiError = "Could not read saved player settings. Defaults apply.";
 	}
-	else if (status == LoadStatus::Busy)
-		m_playerUiError = "Saved player settings are busy. Defaults apply for this launch.";
+	else if (m_playerUiPersistenceSuspended)
+		m_playerUiError = status == LoadStatus::Busy
+			? "Saved player settings are busy. Changes apply only to this session."
+			: "Saved player settings are unavailable. Changes apply only to this session.";
 	if (!m_playerUiError.empty())
 		std::cerr << "[ui] " << m_playerUiError << '\n';
 	if (m_playerUi)
@@ -95,6 +98,8 @@ void Engine::finishStartupDisplay(std::optional<bool> vsync)
 
 void Engine::persistPlayerUiPreferences()
 {
+	if (m_playerUiPersistenceSuspended)
+		return;
 	bool saved = false;
 	try
 	{
@@ -470,7 +475,7 @@ void Engine::publishPlayerSettingsView()
 	view.fxaaOverridden = m_playerFxaaOverride.has_value();
 	view.sensitivity = static_cast<int>(std::lround(camera.getMouseSensitivity() * 100.f / kDefaultCameraSensitivity));
 	view.invertY = m_playerUiSettings.invertY;
-	view.saveFailed = m_playerUiDirty;
+	view.saveFailed = m_playerUiDirty && !m_playerUiPersistenceSuspended;
 	view.notice = m_playerSettingsNotice;
 	if (!m_playerUiError.empty())
 	{

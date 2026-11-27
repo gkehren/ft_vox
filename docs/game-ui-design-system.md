@@ -326,13 +326,13 @@ correction.
 | --- | --- | --- | --- |
 | R01 | The selection highlight is built **with** its horizontal scroll offset and intersected with the editor clip *before* the visibility test, then that same rect is painted — for committed text and for IME preedit selections. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping`: a scrolled field at 100/150/200% × 1×/0.5× density still emits exactly one highlight quad, inside `editorClip`, plus its caret |
 | R02 | A failed DPI query stays invalid end to end: `scaleInputs` reports `contentScaleValid=false`, the controller keeps the last valid Auto scale (no revision bump), `Fixed` ignores the failure, an identical restore is a no-op, and the host skips the atlas refresh while the density is unknown. | `PlayerUiScale.hpp`, `GameUiSample.*` | `GameUiStyle::scaling` conversion → controller matrix (0/NaN/0-density, restore, Fixed, Auto-after-Fixed) |
-| R03 | `PlayerUiSettings::load` reads a bounded record from one open handle, rejects oversized records and distinguishes missing, corrupt or unreadable, and Windows sharing contention. | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences`: two readers and 40 alternating writes check complete records. A blocked replacement preserves the previous record and cleans its staging file. |
+| R03 | `PlayerUiSettings::load` reads a bounded record from one open handle and distinguishes missing records, invalid content, access failures and Windows sharing contention. | `PlayerUiPreferences.cpp` | `GameUiStyle::preferences`: two readers and 40 alternating writes check complete records. A blocked replacement preserves the previous record and cleans its staging file. |
 | R04 | `sliderGeometry` gives the label and the percentage readout disjoint rects with a token gap; the label elides instead of painting over the value. | `PlayerUiWidgets.cpp` | `GameUiInteraction::selectionAndSliderClipping` (label `z` ≤ value `x` at 100/200% and 240/80/12 px, no glyph straddles the boundary) |
 | R05 | `fill`/`ring`/`sectionHeader`/`divider`/`fittedLabel`/`labelAligned`/`progress` clamp to their own rect: no inverted band, border width clamped to the box, header rule clamped to `rect.w`, and a rect that cannot show half a line paints no text. | `PlayerUiComponents.cpp` | `GameUiComponents::degenerateGeometry` (empty, inverted, fractional, 3 px wide, 0.5 px tall) |
 | R06 | `style::slotTokens` is the one resolver for slot visuals (face, border colour, border width, tint, indicator); `toggleFace`/`sliderFill`/`sliderTrackFace` give toggles and sliders pressed and hover feedback. Precedence documented above. | `PlayerUiStyle.hpp`, `PlayerUiComponents.cpp` | `GameUiStyle::states` asserts resolved colours, widths and the dim tint for `Error\|Focused`, `Pending\|Focused`, `Selected\|Disabled\|Focused`, `Disabled\|Error` |
 | R07 | `Renderer::setFont` is transactional: it validates the replacement, creates and uploads the new atlas, `waitIdle()`s, rebinds the descriptors and only then destroys the old image and publishes `m_face`/`m_facePixels`/`m_fontScale`; a failure destroys the partial image and keeps the previous face, and an unchanged invalid density is not retried every frame. | `GameUiRenderer.*`, `GameUiSample.*` | GPU proofs (design-system, showcase, present) run on the production swap path with validation enabled |
 | R08 | `ToastQueue::advance` ages entries in place and compacts with a move only when an entry actually expires (never self-moves, retired slots cleared). | `PlayerUiComponents.cpp` | `GameUiComponents::notificationLifetime` asserts stable `std::string` buffers/capacity across 20 steps, ordering, expiry, stickiness and capacity |
-| R09 | A corrupt or unreadable preference record marks the settings dirty so an explicit selection of the current default rewrites it; a missing record stays a fresh install and nothing is overwritten at startup. | `EngineUiInput.cpp` | `GameUiStyle::preferences` corrupt → explicit save → valid record; missing stays `Missing` |
+| R09 | A malformed or oversized record can be repaired by an explicit save. An unread record suspends persistence for the session. | `EnginePlayerSettings.cpp` | `GameUiStyle::preferences` and the native Settings proof cover repair, missing records and write protection. |
 | R10 | The destructive action uses `ButtonVariant::Danger` in the gallery sample and in the real exit confirmation, Cancel stays first so it takes the initial focus, and Enter on a freshly opened dialog activates Cancel. | `GameUiShowcase.cpp`, `GameUiGallery.cpp` | design-system proof (gallery sample variants), showcase proof (danger styling + `ConfirmExit` → Enter → `Pause`) |
 
 ### Round 3 (S01–S04)
@@ -365,24 +365,39 @@ ordinary reader/writer race.
 
 Windows reads and atomic replacements share a 40-attempt retry policy. A read
 that exhausts a sharing, byte-lock or delete-pending conflict reports `Busy`.
-Startup shows a busy notice and uses defaults for the launch without falling
-back to the legacy record or marking settings for repair. The reader decodes
-bytes from a single successful handle. Every successful load in the race check
-must match one of the two complete records, and every write must succeed.
+Exhausted access denied and other I/O failures report `Unavailable`, including
+POSIX access errors. `Corrupt` describes malformed or oversized records.
+Only a missing current record permits legacy fallback.
+
+Startup uses defaults on `Busy` or `Unavailable` and suspends every preference
+write until the next startup. Settings changes and resets still apply in memory.
+Settings displays a persistent session-only notice, and the retry-save control
+is reserved for eligible writes that failed. A successful startup load resumes
+normal persistence with the complete stored record.
+
+The reader decodes bytes from a single successful handle. Both readers must
+participate while the writer is active, every load must return one complete
+record, and every write must succeed. The retry fixture scripts recovery and
+exhaustion and releases a real exclusive handle at the first retry boundary.
 
 To diagnose a recurrence, set `FT_VOX_PLAYER_SETTINGS_TRACE=1` in the Windows
 test process. It records the open, read or rename phase, Win32 error, attempt
 number and elapsed microseconds for each failure. The existing `cpu-windows`
-job enables traces on test failure. Set the repository Actions variable
+job prints traces on test failure. Set the repository Actions variable
 `FT_VOX_GAME_UI_STYLE_REPEAT` to a count from 1 to 100 to opt in to its stress
-step. The equivalent local PowerShell run is:
+step. That step prints retry diagnostics for passing and failing executions.
+Delete the variable after the diagnostic campaign. The equivalent local
+PowerShell run is:
 
 ```powershell
 $env:FT_VOX_PLAYER_SETTINGS_TRACE = '1'
-ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat until-fail:40 --output-on-failure
+ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat until-fail:40 --verbose
 ```
 
-Use `-V` in place of `--output-on-failure` to see traces from passing runs too.
+The fixture markers delimit the ordinary reader/writer race. A recovered retry
+has `final_error=0`. The deliberate exclusive-open and byte-lock fixtures
+exhaust 40 attempts with errors 32 and 33 respectively, outside those markers.
+The delete-pending fixture uses the error reported by the filesystem.
 
 ### IME platform facts (F09)
 

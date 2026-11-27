@@ -517,6 +517,7 @@ private:
 	std::string m_playerUiError;
 	std::string m_playerSettingsNotice;
 	bool m_playerUiDirty{};
+	bool m_playerUiPersistenceSuspended{};
 	bool m_playerVSyncOverride{};
 	std::optional<bool> m_playerFxaaOverride;
 	// Present while a settings-originated request awaits swapchain recreation.

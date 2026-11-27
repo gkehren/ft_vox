@@ -2452,20 +2452,6 @@ struct GameUiBackendProbe
 		engine.loadPlayerUiPreferences();
 		CHECK(engine.m_playerUiSettings.scale == (ScalePolicy{ScaleMode::Fixed, 1.f}) && !fs::exists(record),
 			"the legacy player scale loads without a migration write");
-#if defined(_WIN32)
-		{
-			const PlayerUiSettings lockedSettings{{ScaleMode::Fixed, 1.5f}};
-			CHECK(lockedSettings.save(record), "seed the current settings path before locking it");
-			const HANDLE held = CreateFileW(record.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL, nullptr);
-			checked(held != INVALID_HANDLE_VALUE, "lock the current settings path for the startup read");
-			engine.loadPlayerUiPreferences();
-			CloseHandle(held);
-			CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && !engine.m_playerUiDirty &&
-				engine.m_playerUiError.find("busy") != std::string::npos && readText(record) == lockedSettings.serialize(),
-				"busy current settings preserve the file, bypass legacy fallback and do not offer a repair write");
-		}
-#endif
 		fs::create_directories(record.parent_path());
 		std::ofstream(record, std::ios::binary) << legacyBytes;
 		engine.loadPlayerUiPreferences();
@@ -2940,9 +2926,94 @@ struct GameUiBackendProbe
 		CHECK(engine.sim.get() == solo && restored.slots == inventory.slots &&
 				engine.camera.getMouseSensitivity() == cameraSensitivity(125),
 			"returning to solo preserves player preferences and the suspended world's inventory");
+		playerSettingsWriteProtection(out / "locked-settings");
 		device.waitIdle();
 		CHECK(device.validationErrorCount() - errorsBefore == device.rtssValidationErrorCount() - rtssBefore,
 			"the Settings proof has no unexpected Vulkan validation errors");
+	}
+
+	void playerSettingsWriteProtection(const std::filesystem::path &root)
+	{
+		using namespace gameui;
+		namespace fs = std::filesystem;
+		const auto previousRoot = engine.m_savesRoot;
+		engine.setSavesRootForTests(root);
+		const auto record = root / kPlayerSettingsPath;
+		const auto legacy = root / kLegacyPlayerSettingsPath;
+		fs::create_directories(legacy.parent_path());
+		std::ofstream(legacy, std::ios::binary) << kLegacyPlayerUiSettingsHeader << "\nscale fixed 1.00\n";
+		fs::create_directories(record);
+		engine.loadPlayerUiPreferences();
+		CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && engine.m_playerUiPersistenceSuspended &&
+			!engine.m_playerUiDirty && engine.m_playerUiError.find("unavailable") != std::string::npos,
+			"an unavailable current path suspends persistence and bypasses valid legacy settings");
+		fs::remove(record);
+		engine.handlePlayerSettingsRequest(SetInvertY{true});
+		CHECK(engine.m_playerUiSettings.invertY && !fs::exists(record),
+			"removing an inaccessible path does not re-enable settings persistence");
+#if defined(_WIN32)
+		{
+			auto &sample = *engine.m_playerUi;
+			const PlayerUiSettings lockedSettings{{ScaleMode::Fixed, 1.5f}, kDefaultWindowSize, true, false, 250, true};
+			CHECK(lockedSettings.save(record), "seed the current settings path before locking it");
+			const HANDLE held = CreateFileW(record.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+				FILE_ATTRIBUTE_NORMAL, nullptr);
+			checked(held != INVALID_HANDLE_VALUE, "lock the current settings path for the startup read");
+			engine.loadPlayerUiPreferences();
+			CloseHandle(held);
+			CHECK(engine.m_playerUiSettings == PlayerUiSettings{} && !engine.m_playerUiDirty &&
+				engine.m_playerUiPersistenceSuspended &&
+				engine.m_playerUiError.find("busy") != std::string::npos && readText(record) == lockedSettings.serialize(),
+				"busy startup suspends persistence and bypasses valid legacy settings");
+
+			engine.showMainMenu();
+			sample.openScreen(Screen::Settings);
+			windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+			present();
+			engine.handlePlayerSettingsRequest(SetSensitivity{150});
+			engine.handlePlayerSettingsRequest(SetFxaa{false});
+			engine.handlePlayerSettingsRequest(SetInvertY{true});
+			engine.handlePlayerSettingsRequest(SetVSync{false});
+			frames(2);
+			CHECK(engine.m_playerUiSettings.sensitivity == 150 && sample.m_settingsView.sensitivity == 150 &&
+				!sample.m_settingsView.fxaa && sample.m_settingsView.invertY &&
+				!sample.m_settingsView.vsync && !sample.m_settingsView.saveFailed &&
+				sample.m_settingsView.notice.find("only to this session") != std::string::npos &&
+				readText(record) == lockedSettings.serialize(),
+				"input and graphics changes apply for the session and keep the original record and notice");
+
+			const ScalePolicy sessionScale{ScaleMode::Fixed, 1.25f};
+			engine.handlePlayerSettingsRequest(PreviewDisplay{std::nullopt, sessionScale});
+			frames(3);
+			engine.handlePlayerSettingsRequest(SettingsAction::Keep);
+			CHECK(!engine.m_playerDisplayPreview && engine.m_playerUiSettings.scale == sessionScale &&
+				readText(record) == lockedSettings.serialize(), "keeping a display preview applies only to the session");
+
+			engine.handlePlayerSettingsRequest(SettingsAction::Reset);
+			frames(3);
+			if (engine.m_playerDisplayPreview)
+				engine.handlePlayerSettingsRequest(SettingsAction::Keep);
+			frames(2);
+			engine.handlePlayerSettingsRequest(SettingsAction::RetrySave);
+			present();
+			CHECK(!engine.m_playerDisplayPreview && engine.m_playerUiSettings == PlayerUiSettings{} &&
+				engine.m_playerUiPersistenceSuspended && !sample.m_settingsView.saveFailed &&
+				sample.m_settingsView.notice.find("only to this session") != std::string::npos &&
+				readText(record) == lockedSettings.serialize(),
+				"reset and a submitted RetrySave keep the original record and the session-only notice");
+
+			engine.loadPlayerUiPreferences();
+			frames(3);
+			CHECK(!engine.m_playerUiPersistenceSuspended && engine.m_playerUiError.empty() &&
+				engine.m_playerUiSettings == lockedSettings, "a successful subsequent startup restores normal persistence");
+			engine.handlePlayerSettingsRequest(SetSensitivity{150});
+			auto expected = lockedSettings;
+			expected.sensitivity = 150;
+			CHECK(readText(record) == expected.serialize(), "the next startup can save edits to the complete loaded record");
+			engine.handlePlayerSettingsRequest(SetSensitivity{kDefaultSensitivity});
+		}
+#endif
+		engine.setSavesRootForTests(previousRoot);
 	}
 
 	void playerSettingsRestartProof(const std::filesystem::path &out)
