@@ -308,6 +308,14 @@ console works without running a benchmark. Console sampling is throttled to
 
 Controls summary lives in root `README.md` (WASD, break/place, borders, etc.).
 
+The native player screens use bounded view data and typed intents. Engine
+owns session transitions and sends gameplay commands to the solo simulation
+or the authoritative server. The Game UI reads confirmed inventory state,
+including after a rejected action or reconnect. The Developer UI reads the
+same host's derived diagnostics and keeps separate layout and input state.
+The [closure matrix](game-ui-closure.md) maps these boundaries to CPU tests
+and native Vulkan fixtures.
+
 ### Profiler capture reset
 
 Profiler capture reset (`Profiler::clearHistory`, also used after world reload)

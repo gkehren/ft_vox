@@ -538,3 +538,14 @@ reported the existing swapchain validation warnings documented in the
 
 See the [server guide](dedicated-server.md#connect-two-graphical-clients)
 for the normal two-process commands and keyboard controls.
+
+### Combined UI closure (#309)
+
+Run `test_hosted_closure_native.py --full-ui` with the same client, server and
+output arguments as the hosted smoke. It runs the native menu fixture first,
+then uses a separate saves root for the owner and guest checkpoint restart.
+The result includes role screenshots, per-phase logs and state witnesses.
+Use a fresh destination each run. The evidence directory contains private
+profile credentials and hosted saves. Share selected logs and captures.
+The [UI closure report](game-ui-closure.md) tracks desktop interaction
+separately from the SDL-driven fixtures.

@@ -467,6 +467,30 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 		paint.fittedLabel({{area.rect.x, top, area.rect.z, top + line}}, state,
 			style::TextRole::Caption, theme.palette.inkMuted, 0.f);
 	}
+	// A presentation-only composition. Each slot still uses the same
+	// atlas-backed view as inventory; a real crafting screen supplies its
+	// own bounded snapshot and routes its actions through the session host.
+	{
+		const auto layout = craftingGalleryLayout(placed(kCraftingGallerySection), theme, s);
+		paint.confirmation(layout.modal, "Crafting table", "");
+		std::array<SlotView, 9> inputs{};
+		inputs[0] = sampleSlot(kSampleStacks[0], m_draws.atlasGeneration(), style::State::Selected);
+		inputs[4] = sampleSlot(kSampleStacks[2], m_draws.atlasGeneration(), style::State::Rest);
+		inputs[0].label = "Cobblestone";
+		inputs[4].label = "Dirt";
+		paint.slotGrid(layout.inputs, inputs);
+		if (!layout.output.empty())
+		{
+			SlotView emptyOutput{};
+			emptyOutput.state = style::State::Disabled;
+			paint.slot(layout.output, emptyOutput);
+			paint.fittedLabel(layout.outputLabel,
+				"Output", style::TextRole::Caption, theme.palette.inkMuted, 0.f);
+		}
+		const auto input = slotIndexAt(layout.inputs, pointer);
+		if (input >= 0 && hit(m_gallery.body, pointer) && !inputs[size_t(input)].label.empty())
+			paint.tooltip(layout.modal.panel, pointer, inputs[size_t(input)].label);
+	}
 	// Section headers last so scrolling content never overdraws them.
 	for (size_t index = 0; index < gallerySections().size(); ++index)
 	{

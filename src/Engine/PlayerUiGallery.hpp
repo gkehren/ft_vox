@@ -14,7 +14,7 @@
 // viewport — is asserted headlessly (tests/test_game_ui_components.cpp) instead
 // of depending on a GPU frame.
 
-#include <Engine/PlayerUiStyle.hpp>
+#include <Engine/PlayerUiComponents.hpp>
 #include <Renderer/GameUiGeometry.hpp>
 
 #include <span>
@@ -56,6 +56,17 @@ GalleryLayout galleryLayout(Clip view, const style::Theme &theme, float scale);
 /// Rect of `index` inside the gallery body at its authored height. The caller
 /// intersects with the gallery clip to scroll.
 Clip gallerySectionRect(const GalleryLayout &layout, const style::Theme &theme, size_t index);
+
+inline constexpr size_t kCraftingGallerySection = 10;
+
+struct CraftingGalleryLayout
+{
+	ConfirmationLayout modal;
+	SlotGrid inputs;
+	Clip output, outputLabel;
+};
+
+CraftingGalleryLayout craftingGalleryLayout(Clip section, const style::Theme &theme, float scale);
 
 // --- HUD mock --------------------------------------------------------------
 

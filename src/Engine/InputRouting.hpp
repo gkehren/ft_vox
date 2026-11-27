@@ -62,8 +62,3 @@ inline KeyRoute classifyKeyRoute(int sdlKeycode, SDL_Keymod mods = SDL_KMOD_NONE
 		return KeyRoute::NotGameUIShortcut;
 	}
 }
-
-inline bool escapeShouldQuit(bool uiCapturesKeyboard, bool modalDialogOpen)
-{
-	return !uiCapturesKeyboard && !modalDialogOpen;
-}

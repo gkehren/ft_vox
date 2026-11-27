@@ -97,6 +97,51 @@ void routing()
 		"focus regain reconciles an omitted release and quarantines held input");
 }
 
+void sessionLifecycle()
+{
+	ScreenStack stack;
+	stack.reset(Screen::MainMenu);
+	const auto context = [&](bool connected, bool interactive = true) {
+		return InputContext{.interactive = interactive, .nativeScreen = stack.nativeScreen(),
+			.modal = stack.suppressDeveloper(), .paused = stack.pausesWorld(connected)};
+	};
+	const auto workspaceAvailable = [&] {
+		return ui::developerUiAvailable(true, stack.suppressDeveloper(), ui::Workspace::Visible);
+	};
+	CHECK(stack.push(Screen::Worlds) && stack.push(Screen::CreateWorld) && stack.push(Screen::Loading),
+		"new game navigation reaches the loading screen");
+	CHECK(stack.pausesWorld(false) && !workspaceAvailable() && !context(false).allowsMovement(),
+		"loading suspends solo play and owns the viewport");
+	CHECK(stack.push(Screen::SessionError) && context(false).choose(Key, false, true) == PlayerUi &&
+		!workspaceAvailable(), "a failed open gives its recovery screen the Back key");
+	stack.reset();
+
+	InputRouter router;
+	constexpr size_t movementKey = 26;
+	CHECK(router.key(movementKey, true, false, context(false).choose(Key)) == Gameplay,
+		"a fresh world accepts movement");
+	CHECK(stack.push(Screen::Pause) && stack.push(Screen::Settings) && !workspaceAvailable() &&
+		stack.pausesWorld(false) && !stack.pausesWorld(true),
+		"settings over Pause suspends solo simulation while a remote world stays live");
+	router.cancelGameplay();
+	CHECK(stack.back() && workspaceAvailable() && stack.back(), "Back restores Pause and then the HUD");
+	CHECK(!router.gameplayKey(movementKey) &&
+		router.key(movementKey, false, false, context(false).choose(Key)) == Blocked,
+		"returning to the HUD does not replay a held movement key");
+
+	CHECK(stack.push(Screen::Pause) && stack.push(Screen::Multiplayer) &&
+		stack.push(Screen::MultiplayerAdmin), "multiplayer administration has its own route from Pause");
+	stack.focus(42);
+	CHECK(stack.push(Screen::MultiplayerConfirm) && !workspaceAvailable() &&
+		context(true).choose(Pointer) == PlayerUi &&
+		context(true, false).choose(Pointer) == Blocked,
+		"focused confirmation owns input, and focus loss blocks it");
+	CHECK(stack.back() && stack.focus() == 42, "cancelling confirmation restores the administration focus");
+	stack.reset();
+	CHECK(stack.top() == Screen::Hud && stack.focus() == 0 && !stack.contains(Screen::MultiplayerAdmin) &&
+		context(false).allowsMovement(), "returning to solo starts with a clean HUD stack");
+}
+
 // Workspace visibility and input ownership (issue #303 F01/F04).
 void workspaceVisibility()
 {
@@ -672,6 +717,7 @@ void changeNotifications()
 int main()
 {
 	routing();
+	sessionLifecycle();
 	pointerGestures();
 	workspaceVisibility();
 	transitionRecovery();

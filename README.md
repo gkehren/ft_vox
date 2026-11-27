@@ -39,6 +39,9 @@ and automated visual-regression testing.
 - Player controller on a shared voxel collision solver
 - Passive wildlife (cow, pig, sheep, chicken) with ambient wander AI
 - Optional Developer UI with graphics, streaming, world map and chunk inspector panels (F1 or `--dev-ui`)
+
+See the [Game UI controls](docs/game-ui-interaction.md) and the
+[player and developer verification matrix](docs/game-ui-closure.md).
 - CPU workload telemetry and GPU frame profiling
 - Automated offscreen visual-regression tests
 

@@ -71,17 +71,29 @@ def main() -> None:
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="new directory for logs and isolated saves")
-    parser.add_argument("--menu", action="store_true", help="drive the native Host/Join and administration screens")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--menu", action="store_true", help="drive the native Host/Join and administration screens")
+    mode.add_argument("--full-ui", action="store_true",
+                      help="run the native menu and the two-client restart in separate save roots")
     args = parser.parse_args()
     server, client, root = args.server.resolve(), args.client.resolve(), args.output.resolve()
     resources = server.parent / "ressources"
     if not (resources / "default-resource-pack.zip").is_file():
         parser.error("build ft_vox so its runtime resources sit next to ft_vox_server")
     root.mkdir(parents=True)
-    for role in ("owner", "guest"):
-        work = root / role
-        work.mkdir()
-        shutil.copytree(resources, work / "ressources")
+
+    def setup(parent: Path) -> Path:
+        for role in ("owner", "guest"):
+            work = parent / role
+            work.mkdir(parents=True)
+            shutil.copytree(resources, work / "ressources")
+        return parent
+
+    if args.full_ui:
+        run_phase(client, server, setup(root / "native-menu"), "menu")
+        root = setup(root / "checkpoint-restart")
+    else:
+        setup(root)
     if args.menu:
         run_phase(client, server, root, "menu")
         print("Native multiplayer menu passed in both graphical clients.")

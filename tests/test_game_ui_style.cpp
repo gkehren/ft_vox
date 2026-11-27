@@ -368,6 +368,22 @@ void preferences()
 	const PlayerUiSettings custom{{ScaleMode::Fixed, 1.75f}, {1280, 720}, false, false, 250, true};
 	CHECK(custom.save(path) && reloaded.load(path) == LoadStatus::Ok && reloaded == custom,
 		"all client preferences round-trip together");
+	const auto checkScale = [](ScalePolicy scale) {
+		for (const auto window : kWindowSizes)
+			for (const int sensitivity : kSensitivitySteps)
+				for (const bool vsync : {false, true})
+					for (const bool fxaa : {false, true})
+						for (const bool invertY : {false, true})
+						{
+							const PlayerUiSettings offered{scale, window, vsync, fxaa, sensitivity, invertY};
+							PlayerUiSettings parsed;
+							CHECK(offered.valid() && parsed.parse(offered.serialize()) && parsed == offered,
+								"every advertised settings combination round-trips");
+						}
+	};
+	checkScale({});
+	for (const float scale : kUserScales)
+		checkScale({ScaleMode::Fixed, scale});
 	const auto rejects = [&](std::string_view from, std::string_view to) {
 		auto malformed = custom.serialize();
 		malformed.replace(malformed.find(from), from.size(), to);

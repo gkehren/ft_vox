@@ -1,6 +1,6 @@
 # Game UI interaction
 
-Phase C (#301) adds the screen stack, event ownership and reusable widget behavior. Start the graphical game from its build output and open the showcase with Escape → **Widget showcase**.
+The native player UI runs on a regular launch. Start the graphical game from its build output to create or open a local world, join or host a private game, or open Settings. Use Escape → **Widget showcase** in a world to exercise the reusable widgets.
 
 ```sh
 ft_vox --seed 42 --game-ui --quality low
@@ -12,11 +12,13 @@ The player HUD is passive and Inventory is a native screen with either Developer
 
 | Surface | Input and session behavior |
 | --- | --- |
-| HUD | Gameplay owns available controls. Escape opens the game menu. Solo P opens the same menu. |
+| HUD | WASD moves, the mouse aims, LMB breaks and RMB places. Use 1–9 or the wheel to pick a hotbar slot and Q to drop one item. Escape opens the game menu. Solo P opens the same menu. |
 | Inventory | E opens it and releases the cursor. E, Escape or Close restores the previous capture state. The screen owns gameplay input while solo simulation and the server continue; Developer UI keyboard ownership (active controls, navigation, non-modal popups — a persistent latch, not passive ImGui focus) takes precedence and cancels the armed gesture, and clicking an inventory slot (either mouse button) hands keyboard ownership back. The held-stack preview follows the active input modality: pointer-anchored on mouse interaction, anchored to the focused slot during keyboard navigation. [Inventory controls](game-ui-migration.md#native-player-inventory-304) |
 | Game menu | Resume, Escape or solo P returns to the HUD and restores cursor capture. Solo simulation uses the existing host suspension policy. In a connected world, Engine sends neutral controls and continues receiving state and presenting the remote world. |
 | Widget showcase | Tab and Shift+Tab traverse available controls. Enter and Space activate buttons and toggles. Arrows adjust the slider or select a list row. Wheel scrolls the visible list or the panel. Back restores focus to the opener. Changes are local to the demonstration. |
 | Exit confirmation | Escape or Cancel dismisses the confirmation and restores focus. The full-window modal temporarily hides Developer UI and vetoes view shortcuts. Confirm uses the existing exit and save path. A hosted shutdown returns to the Host panel for progress and recovery. |
+| Multiplayer | Main Menu or Pause → Multiplayer opens profiles, Host, Join and connection recovery. The launcher with verified local authority has administration controls. Other clients can inspect session status and the roster. |
+| Settings | Main Menu or Pause → Settings edits client preferences. Display changes that require confirmation expose Keep and Revert. Controls lists the gameplay bindings. |
 
 Escape opens the Game Menu, and `--game-ui` enables the optional widget strip. F1 or Ctrl+Shift+D toggles the Developer UI once per press. F6 toggles gameplay HUD hints. An open inventory fits the new game view and cancels its held stack. A full-window native modal keeps focus while F1 changes the visibility requested for after dismissal. Session changes clear stale focus, gestures and fields before attaching the new world. [Developer UI separation](game-ui-migration.md#developer-ui-separation-308)
 
@@ -34,7 +36,7 @@ Pointer policy distinguishes three overlay behaviors:
 | Passive occluding overlay | Blocks the press so an obscured native control cannot be activated | Claims nothing; gameplay continues to receive keys and text |
 | Pass-through overlay | Ignored; the surface below stays reachable | Claims nothing |
 
-A window that sets `ImGuiWindowFlags_NoMouseInputs` occludes by default; the read-only status overlay and the multiplayer status line opt out by calling `ImGuiLayer::markCurrentWindowPassThrough()`. Overlays that intentionally shield a visually obscured control therefore keep that behavior, and new passive surfaces must state their intent. The remaining Developer UI toggle and panel-layout work stays in #308.
+A window that sets `ImGuiWindowFlags_NoMouseInputs` occludes by default. The read-only status overlay and the multiplayer status line opt out by calling `ImGuiLayer::markCurrentWindowPassThrough()`. F1 restores the existing dock layout and yields back to the player UI when the workspace hides.
 
 Focus loss and native modal suppression cancel developer ownership, pending ImGui edges, active widgets and SDL capture. Focus notifications survive cancellation. The vendored SDL backend captures on routed mouse edges and exposes a small capture-reset hook. Engine disables SDL auto-capture so a physical button that the router has quarantined cannot keep OS capture. On a failed relative-mode request, Engine reports SDL's error and reads back the actual mode. Gameplay input stays blocked until an explicit capture request or a screen transition succeeds.
 
