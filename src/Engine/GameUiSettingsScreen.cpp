@@ -99,16 +99,14 @@ void GameUiSample::buildSettingsScreen(Screen screen, StackLayout &column)
 		m_controlsRows = {"WASD  Move", "Mouse  Look", "Space  Jump or swim up",
 			"Shift  Sprint or swim down", "Left / right click  Break / place block",
 			"Mouse wheel  Cycle hotbar"};
-		for (const auto key : {SDLK_1, SDLK_Q, SDLK_E, SDLK_C})
+		for (const auto key : {SDLK_1, SDLK_Q, SDLK_E, SDLK_C, SDLK_F1, SDLK_F6, SDLK_F10})
 			if (const auto *ref = ui::findShortcut(key))
 			{
 				m_settingsLabels.emplace_back(std::string(ref->key) + "  " + ref->action);
 				m_controlsRows.push_back(m_settingsLabels.back());
 			}
 		m_controlsRows.insert(m_controlsRows.end(), {"Esc  Pause or go back", "Tab / Shift+Tab  Move focus",
-			"Enter / Space  Activate focused control", "Ctrl+Shift+D  Toggle developer workspace",
-			"F1-F12  Developer tools and shortcuts", "F10  Toggle VSync for this run",
-			"V  Debug flight (solo)"});
+			"Enter / Space  Activate focused control", "F5  Developer Help", "V  Debug flight (solo)"});
 		const auto &theme = style::baseline();
 		const float listHeader = style::lineHeight(style::TextRole::Caption) + theme.space.xxs;
 		const float available = size(m_widgets.viewport().clip).y / m_screenScale - 68.f - listHeader;

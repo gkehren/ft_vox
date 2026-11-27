@@ -153,7 +153,7 @@ static void sampleScopeHistories(UiState &state)
 
 // --- Per-domain heavy snapshots (10 Hz, sampled independently) ---
 
-static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+static void sampleStreamingDomain(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
 	auto &s = state.streaming;
 	if (frame.chunks)
@@ -196,7 +196,7 @@ static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, doub
 	state.activeChunks.push(float(s.loadedChunks));
 }
 
-static void sampleMemoryDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+static void sampleMemoryDomain(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
 	auto &m = state.memory;
 	m.sampledAt = nowSeconds;
@@ -248,7 +248,7 @@ static void sampleMemoryDomain(UiState &state, const GameUIFrame &frame, double 
 
 // --- Per-frame state refresh ---
 
-void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeconds)
+void updateDebugUiState(UiState &state, const DeveloperUiFrame &frame, double nowSeconds)
 {
 	// Cheap frame-level snapshot: every frame, main-thread scalar reads.
 	{
@@ -262,7 +262,7 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 		Profiler &prof = GetProfiler();
 		state.frame.fps = frame.fps;
 		// CPU frame time comes from the profiler's full-frame scope, not the
-		// paced simulation delta (GameUIFrame::frameMs): vsync pacing and
+		// paced simulation delta (DeveloperUiFrame::frameMs): vsync pacing and
 		// stall absorption make the two diverge (issue #179 review).
 		state.frame.cpuFrameMs = prof.lastFrameMs();
 		state.frame.simulationDtMs = frame.frameMs;

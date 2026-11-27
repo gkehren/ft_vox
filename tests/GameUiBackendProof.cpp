@@ -1,3 +1,4 @@
+#include <Engine/EngineMultiplayerActions.hpp>
 #include <Engine/Engine.hpp>
 #include <Engine/EngineMultiplayer.hpp>
 #include <Engine/GameUiSample.hpp>
@@ -217,10 +218,9 @@ struct GameUiBackendProbe
 		engine.handleEvents();
 		engine.pumpPlayerSession();
 		present();
-		GameUIFrame join;
-		engine.populateJoinUi(join);
+		const auto join = engine.multiplayerActions();
 		CHECK(sample.screens().top() == Screen::Multiplayer && !engine.viewWorld() &&
-			join.connectServer && join.startHostedServer && join.hostedServer,
+			join.connectServer && join.startHostedServer,
 			"pointer opens the existing Host and Join controls without a simulation");
 		join.connectServer({"invalid-endpoint", "", {}});
 		engine.applySessionRequests();
@@ -1178,7 +1178,7 @@ struct GameUiBackendProbe
 		engine.resourceRetire.beginFrame(engine.frameNumber);
 		engine.worldRenderer->arenas().beginFrame(engine.frameNumber);
 		engine.stagingRing.beginFrame(slot);
-		if (!engine.m_inspectionView)
+		if (engine.developerUiAvailable() || extraDevUi)
 		{
 			PROFILE_SCOPE("DevUIBuild");
 			engine.imgui->beginFrame();
@@ -1187,6 +1187,7 @@ struct GameUiBackendProbe
 				extraDevUi();
 			engine.imgui->endFrame();
 		}
+		engine.applyOverlayToggles();
 		const auto renderExtent = engine.swapchain->getExtent();
 		engine.updateFrameUniforms(slot, int(renderExtent.width), int(renderExtent.height), 5.f);
 		engine.recordFrame(slot, image, 0, gpuTag);
@@ -1291,6 +1292,7 @@ struct GameUiBackendProbe
 	void showcaseProof()
 	{
 		init();
+		engine.setDeveloperWorkspaceVisible(true);
 		auto &context = *engine.vkContext;
 		const auto before = context.validationErrorCount();
 		const auto rtssBefore = context.rtssValidationErrorCount();
@@ -1872,11 +1874,12 @@ struct GameUiBackendProbe
 	void presentProof(const std::filesystem::path &out)
 	{
 		init();
+		engine.setDeveloperWorkspaceVisible(true);
 		const auto &context = *engine.vkContext;
 		const auto before = context.validationErrorCount();
 		const auto rtssBefore = context.rtssValidationErrorCount();
-		engine.gameUi->shell().queueDefaultLayout();
-		engine.gameUi->enableDefaultDeveloperPanels();
+		engine.developerUi->shell().queueDefaultLayout();
+		engine.developerUi->enableDefaultDeveloperPanels();
 		resize(1920, 1080);
 		frames(16);
 		resize(1160, 680);
@@ -2146,7 +2149,6 @@ struct GameUiBackendProbe
 		engine.setSavesRootForTests(out / "saves");
 		engine.enableGameUi(false, false);
 		engine.running = true;
-		engine.showMainMenu();
 		auto &sample = *engine.m_playerUi;
 		auto &device = *engine.vkContext;
 		const auto errorsBefore = device.validationErrorCount();
@@ -2175,9 +2177,13 @@ struct GameUiBackendProbe
 			"a corrupt legacy record is reported without creating a current record");
 		std::ofstream(legacy, std::ios::binary) << legacyBytes;
 		engine.loadPlayerUiPreferences();
+		engine.setDeveloperWorkspaceVisible(true);
 		engine.imgui->requestUiScale(1.5f);
 		resize(960, 540);
 		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		engine.setDeveloperWorkspaceVisible(false);
+		engine.showMainMenu();
 		present();
 
 		const auto click = [&](std::string_view label) {
@@ -3088,6 +3094,19 @@ struct GameUiBackendProbe
 		CHECK(int(sample.screens().focus()) == focusResume + 1,
 			"native keyboard navigation resumes after the developer handoff");
 		capture("ownership");
+		// Let ImGui settle the preceding native-to-developer handoff before re-entry.
+		present(ownershipEditor);
+		clickAt(editorPoint);
+		for (int frame = 0; frame < 3 && !engine.imgui->editingText(); ++frame)
+			present(ownershipEditor);
+		CHECK(engine.imgui->editingText(), "a developer text field owns the keyboard before F1");
+		tap(SDLK_F1);
+		present();
+		CHECK(!engine.developerWorkspaceVisible() && !engine.imgui->editingText() &&
+			!engine.imgui->ownsKeyboard() && engine.inventoryPanelOpen() && !engine.mouseCaptured &&
+			snapshot() == beforeEditor && !held(), "F1 releases developer text input without acting on inventory");
+		tap(SDLK_F1);
+		present(ownershipEditor);
 
 		// PR #316 round 3 F01: keyboard ownership with a NON-TEXTUAL widget.
 		// A focused button stays the owner after its ActiveId releases; Tab,
@@ -3206,26 +3225,26 @@ struct GameUiBackendProbe
 		CHECK(errors == rtss, "inventory adds no validation errors outside known RTSS messages");
 	}
 
-	void playerHudProof()
+	void playerHudProof(const std::filesystem::path &output)
 	{
 		init();
+		engine.running = true;
 		auto &sample = *engine.m_playerUi;
 		const auto &context = *engine.vkContext;
 		const auto errorsBefore = context.validationErrorCount();
 		const auto rtssBefore = context.rtssValidationErrorCount();
 		sample.setPreviewStripVisible(false);
-		// F01/F04: the launch state is a hidden workspace (--no-dev-ui), and the
+		// Normal launch starts with a hidden workspace, and the
 		// whole workspace can be shown, hidden and restored at runtime. The
 		// dockspace identity must survive every transition, so the central game
 		// view keeps its exact rectangle (that rectangle IS the persisted split
 		// tree: side/bottom docks included).
-		engine.setDeveloperWorkspaceVisible(false);
 		frames(2);
 		CHECK(!engine.developerUiAvailable() && !engine.developerWorkspaceVisible(),
 			"the proof starts without the developer workspace");
 		engine.setDeveloperWorkspaceVisible(true);
 		frames(3);
-		const auto dockedView = engine.gameUi->shell().gameViewRect();
+		const auto dockedView = engine.developerUi->shell().gameViewRect();
 		CHECK(engine.developerUiAvailable() && dockedView.size.x > 0.f && dockedView.size.y > 0.f,
 			"showing the workspace restores the developer chrome and its input ownership");
 		for (int round = 0; round < 3; ++round)
@@ -3236,7 +3255,7 @@ struct GameUiBackendProbe
 				"hiding the workspace removes the chrome and its input ownership");
 			engine.setDeveloperWorkspaceVisible(true);
 			frames(2);
-			const auto restored = engine.gameUi->shell().gameViewRect();
+			const auto restored = engine.developerUi->shell().gameViewRect();
 			CHECK(engine.developerUiAvailable() &&
 					std::abs(restored.pos.x - dockedView.pos.x) < 0.5f &&
 					std::abs(restored.pos.y - dockedView.pos.y) < 0.5f &&
@@ -3307,7 +3326,7 @@ struct GameUiBackendProbe
 		// the optional hints (F6) are off — same band, more copy.
 		const auto hudSelectionGlyphs = [&] {
 			const auto scene = sample.m_draws.bounds();
-			const auto area = engine.gameUi->shell().gameViewRect();
+			const auto area = engine.developerUi->shell().gameViewRect();
 			const ImVec2 origin = ImGui::GetMainViewport()->Pos;
 			const gameui::Clip safe{{area.pos.x - origin.x, area.pos.y - origin.y,
 				area.pos.x - origin.x + area.size.x, area.pos.y - origin.y + area.size.y}};
@@ -3326,7 +3345,7 @@ struct GameUiBackendProbe
 		present();
 		CHECK(engine.playerHudView().creative && !engine.playerHudView().creativeBlock.empty(),
 			"debug flight exposes the creative block selection");
-		if (engine.gameUi->showOverlayHints())
+		if (engine.m_showHudHints)
 		{
 			tap(SDLK_F6);
 			present();
@@ -3342,19 +3361,23 @@ struct GameUiBackendProbe
 		CHECK(plainGlyphs > 0 && creativeGlyphs > plainGlyphs,
 			"the creative prefix adds copy to the selection band (creative=" << creativeGlyphs
 				<< ", inventory=" << plainGlyphs << ')');
-		if (!engine.gameUi->showOverlayHints())
+		if (!engine.m_showHudHints)
 		{
 			tap(SDLK_F6);
 			present();
 		}
+		engine.setDeveloperWorkspaceVisible(false);
+		sample.setScalePolicy({gameui::ScaleMode::Fixed, 1.f});
+		resize(1280, 720);
+		frames(2);
 		tap(SDLK_ESCAPE);
 		present();
 		CHECK(engine.nativePause() && !hasStoneIcon(), "pause supersedes the gameplay HUD");
 		const auto toggle = std::ranges::find_if(sample.m_widgets.widgets(),
 			[](const gameui::Widget &widget) { return widget.label == "Hide HUD"; });
 		checked(toggle != sample.m_widgets.widgets().end(), "pause exposes the HUD toggle");
-		const auto bounds = sample.m_widgets.bounds(*toggle);
-		clickAt(glm::vec2(bounds.rect) + gameui::size(bounds) * 0.5f);
+		sample.m_screens.focus(toggle->id);
+		tap(SDLK_RETURN);
 		present();
 		tap(SDLK_ESCAPE);
 		present();
@@ -3381,7 +3404,7 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.lastRecordedStats()->frameNumber == hudFrame, "active benchmarks skip player UI preparation");
 		engine.m_benchmark.cancel();
-		workspaceProof();
+		workspaceProof(output);
 		context.waitIdle();
 		const auto errors = context.validationErrorCount() - errorsBefore;
 		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;
@@ -3390,9 +3413,9 @@ struct GameUiBackendProbe
 	}
 
 	/// Exercise the workspace shortcut, dock tree and input cancellation with SDL events.
-	void workspaceProof()
+	void workspaceProof(const std::filesystem::path &output)
 	{
-		auto &shell = engine.gameUi->shell();
+		auto &shell = engine.developerUi->shell();
 		const SDL_Keymod chord = SDL_KMOD_CTRL | SDL_KMOD_SHIFT;
 		engine.setDeveloperWorkspaceVisible(true);
 		engine.setInventoryOpen(false);
@@ -3400,18 +3423,18 @@ struct GameUiBackendProbe
 		CHECK(engine.developerWorkspaceVisible() && shell.dockspaceId() != 0,
 			"the workspace proof starts with a visible workspace and a live dockspace");
 
-		// (1) One press, one transition, both directions.
+		// F1 is primary. Keep the earlier chord available.
+		tap(SDLK_F1);
+		present();
+		CHECK(!engine.developerWorkspaceVisible(), "F1 hides the whole workspace");
 		tap(SDLK_D, chord);
 		present();
-		CHECK(!engine.developerWorkspaceVisible(), "Ctrl+Shift+D hides the whole workspace");
-		tap(SDLK_D, chord);
-		present();
-		CHECK(engine.developerWorkspaceVisible(), "Ctrl+Shift+D shows it again");
+		CHECK(engine.developerWorkspaceVisible(), "Ctrl+Shift+D still shows it again");
 
 		// (2) Repeats and incomplete chords are not the shortcut.
-		key(SDLK_D, SDL_EVENT_KEY_DOWN, true, chord);
+		key(SDLK_F1, SDL_EVENT_KEY_DOWN, true);
 		present();
-		key(SDLK_D, SDL_EVENT_KEY_UP, false, chord);
+		key(SDLK_F1, SDL_EVENT_KEY_UP, false);
 		present();
 		CHECK(engine.developerWorkspaceVisible(), "a key repeat does not toggle the workspace again");
 		for (const auto partial : std::array<SDL_Keymod, 4>{SDL_KMOD_NONE, SDL_KMOD_CTRL, SDL_KMOD_SHIFT,
@@ -3453,10 +3476,7 @@ struct GameUiBackendProbe
 		CHECK(!engine.developerWorkspaceVisible(),
 			"the chord works again once the benchmark ended");
 
-		// (5) F09: with the workspace hidden and the inventory closed only the
-		// dockspace is maintained, so the developer frame is not built at all.
-		// The main menu bar belongs to that frame, so the last frame it was
-		// submitted in makes the difference observable.
+		// Neither the ImGui frame nor the menu bar advances while hidden.
 		const auto menuBarFrame = [] {
 			const ImGuiWindow *bar = ImGui::FindWindowByName("##MainMenuBar");
 			return bar ? bar->LastFrameActive : 0;
@@ -3465,6 +3485,7 @@ struct GameUiBackendProbe
 		engine.setDeveloperWorkspaceVisible(false);
 		frames(4);
 		const int hiddenBarFrame = menuBarFrame();
+		const int hiddenImGuiFrame = ImGui::GetFrameCount();
 		const auto hiddenDockspace = shell.dockspaceId();
 		const auto medianDevBuild = [&](int samples) {
 			std::vector<float> values;
@@ -3476,8 +3497,9 @@ struct GameUiBackendProbe
 			return percentile(values, 0.5f);
 		};
 		const auto hiddenMs = medianDevBuild(40);
-		CHECK(hiddenDockspace != 0 && hiddenBarFrame > 0 && menuBarFrame() == hiddenBarFrame,
-			"the full-window path maintains the dockspace without building the developer frame");
+		CHECK(hiddenDockspace != 0 && hiddenBarFrame > 0 && menuBarFrame() == hiddenBarFrame &&
+			ImGui::GetFrameCount() == hiddenImGuiFrame && hiddenMs == 0.f,
+			"the hidden workspace skips ImGui frames and retains its dockspace");
 		// The developer keys still own their overlay toggles on that path: B has to
 		// reach the overlay layer even though no developer panel is drawn.
 		const bool bordersBefore = engine.worldRenderer->overlays().showChunkBorders();
@@ -3494,8 +3516,55 @@ struct GameUiBackendProbe
 		CHECK(menuBarFrame() >= ImGui::GetFrameCount() - 1,
 			"the developer frame is built again as soon as the workspace returns");
 
-		// A player screen can remain open as the workspace changes around it.
+		// Escape opens the native Pause screen without changing the workspace
+		// request. F1 changes the workspace without navigating the screen.
+		tap(SDLK_ESCAPE);
+		present();
+		const auto focus = engine.m_playerUi->screens().focus();
+		tap(SDLK_F1);
+		present();
+		CHECK(!engine.developerWorkspaceVisible() && engine.nativePause() &&
+			engine.m_playerUi->screens().top() == gameui::Screen::Pause &&
+			engine.m_playerUi->screens().focus() == focus && !engine.mouseCaptured,
+			"F1 keeps solo Pause and its cursor and focus while hiding developer tools");
+		tap(SDLK_F1);
+		present();
+		tap(SDLK_ESCAPE);
+		frames(2);
+		CHECK(engine.developerWorkspaceVisible() && !engine.nativePause() &&
+			engine.m_playerUi->screens().top() == gameui::Screen::Hud,
+			"closing Pause restores gameplay with the requested Developer UI visibility");
+
 		auto &sample = *engine.m_playerUi;
+		tap(SDLK_ESCAPE);
+		present();
+		const auto quit = std::ranges::find(sample.m_widgets.widgets(), "Exit to desktop", &gameui::Widget::label);
+		checked(quit != sample.m_widgets.widgets().end(), "Pause has a native Quit action");
+		sample.m_screens.focus(quit->id);
+		tap(SDLK_RETURN);
+		present();
+		checked(sample.screens().top() == gameui::Screen::ConfirmExit, "open the native quit confirmation");
+		const int modalFrame = ImGui::GetFrameCount();
+		const auto modalFocus = sample.screens().focus();
+		tap(SDLK_F1);
+		present();
+		CHECK(!engine.developerWorkspaceVisible() && !engine.developerUiAvailable() &&
+			ImGui::GetFrameCount() == modalFrame && sample.screens().top() == gameui::Screen::ConfirmExit &&
+			sample.screens().focus() == modalFocus && engine.running && !engine.mouseCaptured,
+			"F1 keeps the quit confirmation, native focus and free cursor without building ImGui or quitting");
+		tap(SDLK_F1);
+		present();
+		CHECK(engine.developerWorkspaceVisible() && !engine.developerUiAvailable() &&
+			sample.screens().top() == gameui::Screen::ConfirmExit && engine.running,
+			"requesting Developer UI while confirming quit keeps the native modal in control");
+		tap(SDLK_ESCAPE);
+		present();
+		CHECK(engine.developerUiAvailable() && sample.screens().top() == gameui::Screen::Pause,
+			"dismissing the native modal restores the requested workspace");
+		tap(SDLK_ESCAPE);
+		frames(2);
+
+		// A player screen can remain open as the workspace changes around it.
 		tap(SDLK_E);
 		frames(2);
 		const auto dockedPanel = sample.m_inventoryLayout.panel;
@@ -3511,6 +3580,66 @@ struct GameUiBackendProbe
 			shell.dockspaceId() == dockId, "restoring the workspace restores the inventory safe area");
 		tap(SDLK_E);
 		present();
+
+		// Each documented developer tool shortcut opens its matching panel
+		// directly from hidden, including a panel already enabled in the layout.
+		for (const auto &[shortcut, window] : std::array{
+			std::pair{SDLK_F2, ui::windows::kGraphics}, std::pair{SDLK_F3, ui::windows::kStreaming},
+			std::pair{SDLK_F4, ui::windows::kWorld}, std::pair{SDLK_F5, ui::windows::kHelp},
+			std::pair{SDLK_F7, ui::windows::kPerformance}, std::pair{SDLK_F8, ui::windows::kOverview},
+			std::pair{SDLK_F9, ui::windows::kChunkInspector}, std::pair{SDLK_F11, ui::windows::kMemory},
+			std::pair{SDLK_F12, ui::windows::kRenderDebug}})
+		{
+			tap(SDLK_F1);
+			present();
+			tap(shortcut);
+			frames(2);
+			const auto *panel = ImGui::FindWindowByName(window);
+			CHECK(engine.developerUiAvailable() && panel && panel->LastFrameActive == ImGui::GetFrameCount(),
+				"shortcut opens the workspace and submits " << window);
+		}
+		tap(SDLK_H);
+		present();
+		CHECK(engine.developerUi->isLayoutTilesHidden(), "H hides just the layout tiles");
+		tap(SDLK_H);
+		present();
+		CHECK(!engine.developerUi->isLayoutTilesHidden(), "H restores the saved tiles");
+		shell.queueResetLayout();
+		frames(2);
+		const auto *graphics = ImGui::FindWindowByName(ui::windows::kGraphics);
+		CHECK(graphics && graphics->DockId == 0, "reset undocks Graphics");
+		shell.queueDefaultLayout();
+		frames(2);
+		graphics = ImGui::FindWindowByName(ui::windows::kGraphics);
+		CHECK(graphics && graphics->DockId != 0, "default layout redocks Graphics");
+		if (!output.empty())
+		{
+			std::filesystem::create_directories(output);
+			auto captureWorkspace = [&](const char *name) {
+				engine.vkContext->waitIdle();
+				const auto extent = engine.swapchain->getExtent();
+				const auto allocator = engine.vkContext->getAllocator();
+				Readback target{*engine.vkContext};
+				target.output = createImage2D(allocator, engine.vkContext->getDevice(), extent.width, extent.height,
+					engine.swapchain->getImageFormat(), VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+				target.buffer = createBuffer(allocator, VkDeviceSize(extent.width) * extent.height * 4,
+					VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+					VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+				sample.renderer().prepare(0, extent, sample.m_draws, engine.worldRenderer->getTextureManager(),
+					engine.m_atlasVersion);
+				std::function<void(VkCommandBuffer)> dev;
+				if (engine.developerUiAvailable())
+					dev = [&](VkCommandBuffer cmd) { engine.imgui->recordDraw(cmd); };
+				checked(visual::writePng((output / name).string(), capture(target, &sample.renderer(), dev)),
+					"write developer workspace screenshot");
+			};
+			engine.stepDerivedProjectionForTests(1.0 / 60.0);
+			frames(3);
+			captureWorkspace("developer-workspace.png");
+			tap(SDLK_F1);
+			frames(3);
+			captureWorkspace("player-hud.png");
+		}
 	}
 
 	void performance()
@@ -3654,9 +3783,9 @@ int runGameUiPerformance(Engine &engine)
 	return testmain::exitCode();
 }
 
-int runPlayerHudProof(Engine &engine)
+int runPlayerHudProof(Engine &engine, const std::filesystem::path &output)
 {
-	GameUiBackendProbe(engine).playerHudProof();
+	GameUiBackendProbe(engine).playerHudProof(output);
 	if (testmain::fails == 0)
 		std::cout << "PASS: live player HUD proof (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();

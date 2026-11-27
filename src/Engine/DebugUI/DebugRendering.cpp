@@ -13,7 +13,7 @@
 #include <Engine/DebugUI/GraphicsUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/GpuProfile.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
 
@@ -25,7 +25,7 @@
 namespace debugui
 {
 
-void drawRendering(UiState &s, GameUIFrame &frame)
+void drawRendering(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.rendering)
 		return;
@@ -67,7 +67,7 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 	ImGui::End();
 }
 
-void drawRenderDebug(UiState &s, GameUIFrame &frame)
+void drawRenderDebug(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.renderDebug)
 		return;

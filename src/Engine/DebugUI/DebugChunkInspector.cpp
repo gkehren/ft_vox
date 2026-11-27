@@ -38,7 +38,7 @@ const char *eventKindName(const char *kind)
 }
 } // namespace
 
-void drawChunkInspector(UiState &s, GameUIFrame &frame)
+void drawChunkInspector(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.chunkInspector)
 		return;
@@ -50,14 +50,14 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 		return;
 	}
 
-	if (!frame.chunks || !frame.camera)
+	if (!frame.chunks || !frame.hasWorld)
 	{
 		ImGui::TextDisabled("Chunk manager not ready.");
 		ImGui::End();
 		return;
 	}
 	RenderWorldBridge &chunks = *frame.chunks;
-	const glm::vec3 camPos = frame.camera->getPosition();
+	const glm::vec3 camPos = frame.player.position;
 
 	// Selection: chunk under the player by default.
 	const glm::ivec3 playerChunk(int(std::floor(camPos.x / CHUNK_SIZE)), 0,

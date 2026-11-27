@@ -6,7 +6,7 @@ Phase C (#301) adds the screen stack, event ownership and reusable widget behavi
 ft_vox --seed 42 --game-ui --quality low
 ```
 
-The player HUD is passive and Inventory is a native screen in both standard and `--no-dev-ui` launches. The opt-in renderer strip has one scale control when the cursor is free.
+The player HUD is passive and Inventory is a native screen with either Developer UI visibility. The opt-in renderer strip has one scale control when the cursor is free.
 
 ## Navigation
 
@@ -18,7 +18,7 @@ The player HUD is passive and Inventory is a native screen in both standard and 
 | Widget showcase | Tab and Shift+Tab traverse available controls. Enter and Space activate buttons and toggles. Arrows adjust the slider or select a list row. Wheel scrolls the visible list or the panel. Back restores focus to the opener. Changes are local to the demonstration. |
 | Exit confirmation | Escape or Cancel dismisses the confirmation and restores focus. The full-window modal temporarily hides Developer UI and vetoes view shortcuts. Confirm uses the existing exit and save path. A hosted shutdown returns to the Host panel for progress and recovery. |
 
-Escape opens the game menu in normal play. `--game-ui` enables the optional widget strip. Function keys still run once per press, with F6 controlling player HUD hints and F1 cycling developer diagnostics. Ctrl+Shift+D shows or hides the complete developer workspace while keeping its dockspace and layout alive. An open inventory fits the new game view and cancels its held stack. The F1 Developer UI toggle is tracked in #308. Session changes clear stale focus, gestures and fields before attaching the new world. The screen stack also represents Main Menu and Loading for the future lifecycle screens. [Live HUD and controls](game-ui-migration.md#live-player-hud-303)
+Escape opens the Game Menu, and `--game-ui` enables the optional widget strip. F1 or Ctrl+Shift+D toggles the Developer UI once per press. F6 toggles gameplay HUD hints. An open inventory fits the new game view and cancels its held stack. A full-window native modal keeps focus while F1 changes the visibility requested for after dismissal. Session changes clear stale focus, gestures and fields before attaching the new world. [Developer UI separation](game-ui-migration.md#developer-ui-separation-308)
 
 ## Input and geometry
 

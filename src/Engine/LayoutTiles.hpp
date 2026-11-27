@@ -3,7 +3,7 @@
 // Pure state behind the H "layout tiles" shortcut: capture / hide / restore
 // of the developer-panel tile flags. No ImGui and no engine dependencies
 // beyond the plain PanelState struct, so the save/restore contract is
-// unit-testable headlessly (test_ui_shell). GameUI owns the hidden-mode
+// unit-testable headlessly (test_ui_shell). DeveloperUi owns the hidden-mode
 // flag and drives these helpers from the H shortcut and the View menu.
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
@@ -94,7 +94,7 @@ inline void restoreLayoutTiles(debugui::PanelState &panels, const LayoutTilesSna
 // shell tests exercise the same rule: any user action that changes an
 // H-managed tile while hidden must leave hidden mode first (abandoning the
 // saved snapshot). `leaveHidden` is ShellToggles::leaveLayoutTilesHidden —
-// the callback GameUI wires to GameUI::leaveLayoutTilesHidden(). Overlay-
+// the callback DeveloperUi wires to DeveloperUi::leaveLayoutTilesHidden(). Overlay-
 // only controls (Status Overlay, on-screen hints, VSync, chunk borders)
 // are excluded and keep plain flag writes.
 

@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <Engine/EngineMultiplayerActions.hpp>
 #include <Engine/GameUiSample.hpp>
 
 void Engine::loadHosting()
@@ -22,12 +23,8 @@ void Engine::loadHosting()
 	}
 }
 
-void Engine::populateHostingUi(GameUIFrame &frame)
+void Engine::populateHostingActions(MultiplayerActions &frame)
 {
-	frame.hostedServer = &m_hostSnapshot;
-	frame.hostWorlds = m_hostWorlds;
-	frame.hostError = m_hostError;
-	frame.exitAfterHostedStop = m_exitAfterHostedStop;
 	frame.startHostedServer = [this](hosting::Options options, bool autoJoin, std::string_view name) {
 		if (blocksNetworkSessionRequests())
 			return;
@@ -137,9 +134,6 @@ void Engine::requestExit()
 	if (m_playerUi && !m_uiSpike)
 		m_playerUi->resetScreens();
 	setInventoryOpen(false);
-	m_showDeveloperUi = true;
-	if (gameUi)
-		gameUi->showHostPanel();
 	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0)
 		SDL_RestoreWindow(window);
 	setMouseCaptured(false);

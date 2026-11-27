@@ -56,7 +56,7 @@ inline int worldToNearestMapPixel(float world, float center, float step, int siz
 
 /// Canonical description of a biome-map sampling grid. It is the single
 /// source of truth mapping pixels <-> world positions <-> voxel columns for
-/// both TerrainGenerator::getBiomeRegion() and the GameUI biome map.
+/// both TerrainGenerator::getBiomeRegion() and the DeveloperUi biome map.
 ///
 /// With `worldAt(x) = center + (x - size * 0.5f) * step`, the parity
 /// contract is deliberately asymmetric and assumed as-is:
@@ -106,7 +106,7 @@ struct BiomeRegionGrid
 };
 
 /// Single factory for biome-map grids so every producer (TerrainGenerator,
-/// GameUI, tests) builds the same description from the same inputs.
+/// DeveloperUi, tests) builds the same description from the same inputs.
 inline BiomeRegionGrid makeBiomeRegionGrid(float centerX, float centerZ,
 										   float step, int width, int height)
 {

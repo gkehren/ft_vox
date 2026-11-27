@@ -478,7 +478,7 @@ add_test(NAME TerrainGeneration COMMAND test_terrain)
 # ---------------------------------------------------------------------------
 add_executable(test_biome_map
     test_biome_map.cpp
-    ${CMAKE_SOURCE_DIR}/src/Engine/GameUIBiomeMap.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DeveloperUiBiomeMap.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
 )

@@ -766,16 +766,17 @@ bool Engine::submitRemoteInventoryAction(inventoryui::Action action)
 	return true;
 }
 
-void Engine::populateRemoteUi(GameUIFrame &frame)
+ui::RemoteSessionView Engine::remoteSessionView() const
 {
-	auto &remote = *m_remote;
+	ui::RemoteSessionView frame;
+	if (!m_remote)
+		return frame;
+	const auto &remote = *m_remote;
 	const auto now = Clock::now();
 	frame.multiplayerStatus = remote.connectionStatus(now);
 	frame.multiplayerEndpoint = remote.endpoint;
 	frame.multiplayerProfile = remote.namedProfile.empty() ?
 		std::string_view{"Startup profile"} : std::string_view{remote.namedProfile};
-	frame.multiplayerAction = remote.actionStatus(now);
-	const auto status = remote.transport.status();
 	if (ui::hasLiveNetworkStats(frame.multiplayerStatus->state))
 	{
 		auto &network = frame.networkStats;
@@ -792,22 +793,7 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 				remote.prediction.backlog(), stats.corrections, stats.hardResets, stats.lastCorrection, stats.maxCorrection};
 		}
 	}
-	if (!frame.switchingSession && remote.canReconnect())
-		frame.joinServer = [this] {
-			if (!switchingSession() && !blocksNetworkSessionRequests())
-				m_remote->joinRequested = true;
-		};
-	else if (!frame.switchingSession && status != ClientStatus::Leaving)
-		frame.leaveServer = [this] {
-			if (!switchingSession() && !blocksNetworkSessionRequests())
-				m_remote->leaveRequested = true;
-		};
-	if (const auto *player = remote.localPlayer())
-	{
-		frame.player.grounded = (player->flags & wire::PlayerState::grounded) != 0;
-		frame.player.waitingForTerrain = (player->flags & wire::PlayerState::waitingForTerrain) != 0;
-		frame.player.speed = glm::length(glm::vec3(player->velocity[0], player->velocity[1], player->velocity[2]));
-	}
+	return frame;
 }
 
 int Engine::worldSeed() const

@@ -1,45 +1,23 @@
 #pragma once
 
-// Input routing policy for keyboard events while ImGui may own the keyboard
-// (issue #76; F8/F9/F11/F12 added with the developer console, issue #179).
-// Pure and header-only so the policy stays unit-testable
-// without ImGui or the engine.
-//
-// Policy summary:
-// - F1-F12 (panel toggles, F10 = VSync) are intentional GLOBAL shortcuts:
-//   they are function keys no text field can produce, so they keep working
-//   even while ImGui captures the keyboard.
-// - Ctrl+Shift+D shows/hides the complete developer workspace (issue #303
-//   F04). It is global for the same reason: hiding the workspace has to be
-//   reachable while a developer text field owns the keyboard. The plain D key
-//   stays a normal text key.
-// - Gameplay keys (P = pause, C = mouse capture, B = chunk borders,
-//   T = creative block cycle, 1-9 = hotbar selection, Q = drop item,
-//   E = inventory panel) act on game state and MUST be suppressed while
-//   ImGui captures the keyboard: typing 'p' in an InputText would
-//   otherwise pause the world, 'c' would steal the cursor, 'b'/'t' would
-//   toggle overlays, digits would type into the field AND select slots.
-//   Classification and execution are separate: P/H are executed by GameUI,
-//   C/B/T/1-9/Q/E by Engine - all only when the UI does not capture the
-//   keyboard (issue #227: the gameplay keys issue simulation commands).
-// - Escape is special: it is offered to the active UI/modal first
-//   (ImGuiFileDialog cancels itself via IGFD_EXIT_KEY); the app quits only
-//   when the UI does not own the keyboard and no application modal is open.
+// Engine-wide function keys can run while Developer UI owns the keyboard.
+// Only the workspace toggle runs through a full-window native modal.
+// The router sends gameplay and navigation keys to their current input owner.
 #include <SDL3/SDL_keycode.h>
 
 enum class KeyRoute
 {
-		GlobalShortcut,    // F1-F12 application/developer shortcuts
+	GlobalShortcut,    // Function keys and the workspace chord
 	GameplayShortcut,  // P pause; C/B/T are Engine-owned gameplay keys
-	NotGameUIShortcut  // not handled by GameUI shortcut routing
+	NotGameUIShortcut  // No registered shortcut
 };
 
-/// Ctrl+Shift+D: the one chord that shows and hides the developer workspace.
+/// F1 and the legacy Ctrl+Shift+D chord show and hide the developer workspace.
 /// Plain D is untouched, so text fields keep typing normally.
 inline bool isWorkspaceToggle(int sdlKeycode, SDL_Keymod mods)
 {
 	const bool chord = (mods & SDL_KMOD_CTRL) != 0 && (mods & SDL_KMOD_SHIFT) != 0;
-	return chord && sdlKeycode == SDLK_D;
+	return sdlKeycode == SDLK_F1 || (chord && sdlKeycode == SDLK_D);
 }
 
 inline KeyRoute classifyKeyRoute(int sdlKeycode, SDL_Keymod mods = SDL_KMOD_NONE)

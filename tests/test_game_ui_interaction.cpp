@@ -103,8 +103,6 @@ void workspaceVisibility()
 	using enum ui::Workspace;
 	CHECK(ui::toggled(Visible) == Hidden && ui::toggled(Hidden) == Visible,
 		"the workspace toggle is reversible without restarting the application");
-	CHECK(ui::keepDockSpaceAliveOnly(Hidden) && !ui::keepDockSpaceAliveOnly(Visible),
-		"only the hidden workspace uses the dockspace maintenance path: the identity never changes");
 
 	// Hidden workspace, inventory closed: no developer surface owns input, so
 	// gameplay keeps the pointer, the keyboard and movement.
@@ -133,8 +131,6 @@ void workspaceVisibility()
 	// visibility: it removes the developer layer entirely.
 	CHECK(!ui::developerUiAvailable(true, true, Visible),
 		"a native player screen removes developer input even with the workspace visible");
-	CHECK(ui::developerUiPresent(true, false) && !ui::developerUiPresent(true, true),
-		"hiding the workspace keeps the ImGui frame, a native screen does not");
 
 	// Hiding ends developer-owned input: a held developer key is quarantined and
 	// still has to be released, so nothing leaks back into the hidden state.

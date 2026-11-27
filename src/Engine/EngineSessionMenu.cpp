@@ -159,8 +159,8 @@ void Engine::queuePlayerSession(gameui::SessionRequest request)
 	default: return;
 	}
 	cancelDeveloperInput();
-	if (gameUi)
-		gameUi->cancelDeveloperDialogs();
+	if (developerUi)
+		developerUi->cancelDeveloperDialogs();
 	setInventoryOpen(false);
 	if (action == Quit || action == Leave)
 		m_hostAutoProfile.reset();

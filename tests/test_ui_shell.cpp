@@ -161,6 +161,9 @@ static void checkShortcutMetadata()
 
 	// The documented global set is F1-F12 (F10 = VSync) plus the one workspace
 	// visibility chord (issue #303 F04).
+	CHECK(isWorkspaceToggle(SDLK_F1, SDL_KMOD_NONE) &&
+		std::string_view(ui::findShortcut(SDLK_F1)->action) == "Show / hide Developer UI",
+		"Controls documents F1 as the workspace toggle");
 	CHECK(globalCount == 13, "F1-F12 and the workspace chord documented");
 	for (int key : {SDLK_F1, SDLK_F2, SDLK_F3, SDLK_F4, SDLK_F5, SDLK_F6, SDLK_F7, SDLK_F8,
 					SDLK_F9, SDLK_F10, SDLK_F11, SDLK_F12,
@@ -200,8 +203,6 @@ static void checkWorkspace()
 	// the dockspace identity is kept in both states.
 	CHECK(ui::toggled(Visible) == Hidden && ui::toggled(Hidden) == Visible,
 		"workspace visibility is reversible");
-	CHECK(ui::keepDockSpaceAliveOnly(Hidden) && !ui::keepDockSpaceAliveOnly(Visible),
-		"the hidden workspace keeps the dockspace alive instead of removing it");
 	CHECK(ui::developerUiAvailable(true, false, Visible), "a visible workspace can own developer input");
 	CHECK(!ui::developerUiAvailable(true, false, Hidden) &&
 			!ui::developerUiAvailable(true, true, Visible) &&
@@ -279,14 +280,7 @@ static void checkPlayerUi()
 		CHECK(rebuilt[i].id == palette[i].id && rebuilt[i].name == palette[i].name,
 			  "palette rebuild is identical");
 
-	// Overlay density: F1 cycle covers every state exactly once, and the
-	// field-selection policy only adds world context at Detailed.
-	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Off) == StatusOverlayDensity::Minimal,
-		  "cycle Off -> Minimal");
-	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Minimal) == StatusOverlayDensity::Detailed,
-		  "cycle Minimal -> Detailed");
-	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Detailed) == StatusOverlayDensity::Off,
-		  "cycle Detailed -> Off");
+	// The density policy adds world context at Detailed.
 	CHECK(!statusOverlayShowsWorld(StatusOverlayDensity::Off), "Off shows nothing");
 	CHECK(!statusOverlayShowsWorld(StatusOverlayDensity::Minimal),
 		  "Minimal stays frame-health only");
@@ -309,7 +303,7 @@ static void checkPlayerUi()
 }
 
 // Layout tiles H-mode (pure model in Engine/LayoutTiles.hpp, driven by
-// GameUI::toggleLayoutTiles exactly as below): hidden mode is an explicit
+// DeveloperUi::toggleLayoutTiles exactly as below): hidden mode is an explicit
 // flag with a frozen snapshot — never derived from "some panel is visible".
 static void checkLayoutTiles()
 {
@@ -329,8 +323,6 @@ static void checkLayoutTiles()
 		const bool hidden = true;
 		CHECK(hidden, "H entered hidden mode");
 		CHECK(!ui::anyLayoutTileVisible(panels), "H hides every tile");
-		// Not tiles: Status Overlay density and on-screen hints survive H.
-		CHECK(panels.overlayHints, "overlay hints are not a tile and stay untouched");
 
 		ui::restoreLayoutTiles(panels, snapshot);
 		CHECK(panels.rendering && panels.streaming && panels.performance,
@@ -422,22 +414,21 @@ static void checkLayoutTiles()
 	{
 		PanelState panels{};
 		panels.statusOverlay = playerui::StatusOverlayDensity::Detailed;
-		panels.overlayHints = true;
 		CHECK(!ui::anyLayoutTileVisible(panels),
-			  "Status Overlay + hints are not tiles: an all-closed layout has no visible tiles");
+			  "Status Overlay is independent of the layout tiles");
 	}
 }
 
 // Menu-path contract (review round 2): View / Developer / Help / ft_vox
 // menu items change tiles ONLY through the same ui::toggleLayoutTile /
 // ui::openLayoutTile helpers UiShell::drawMainMenuBar calls, with the
-// callback GameUI wires into ShellToggles::leaveLayoutTilesHidden. These
+// callback DeveloperUi wires into ShellToggles::leaveLayoutTilesHidden. These
 // tests pin that exact rule: any menu action that opens an H-managed tile
 // while hidden must first leave hidden mode; overlay-only actions must not.
 static void checkLayoutTileMenuPaths()
 {
 	bool hidden = false;
-	const auto leaveHidden = [&] { hidden = false; }; // the GameUI-wired callback
+	const auto leaveHidden = [&] { hidden = false; }; // the DeveloperUi-wired callback
 
 	// View > Graphics while hidden.
 	hidden = true;

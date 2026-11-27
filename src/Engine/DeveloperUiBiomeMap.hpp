@@ -312,7 +312,7 @@ struct BiomeMapPanInput
 	glm::vec2 mouseDelta{0.f}; ///< io.MouseDelta for this frame.
 };
 
-/// Pan controller state owned by GameUI across frames.
+/// Pan controller state owned by DeveloperUi across frames.
 struct BiomeMapPan
 {
 	BiomeMapPanState state{BiomeMapPanState::Idle};
@@ -510,6 +510,6 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req);
 class ThreadPool;
 /// Engine-owned Low-priority tile scheduling. No worker waits for children.
 /// Request data lives until every tile retires; the last tile publishes.
-/// The pool must outlive submission/execution. GameUI enforces single-flight.
+/// The pool must outlive submission/execution. DeveloperUi enforces single-flight.
 std::future<BiomeMapResult> submitBiomeMap(ThreadPool &pool, BiomeMapRequest req);
 

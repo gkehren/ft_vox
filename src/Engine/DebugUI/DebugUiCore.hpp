@@ -5,7 +5,7 @@
 // sustained-condition health logic. Kept free of engine/ImGui includes so
 // the aggregation helpers are unit-testable without Vulkan or a window.
 //
-// Data flow: Engine fills GameUIFrame once per frame (as before);
+// Data flow: Engine fills DeveloperUiFrame once per frame (as before);
 // updateDebugUiState() (DebugUiEngine.hpp, defined in DebugUiCore.cpp)
 // samples it into the snapshots below at a throttled rate, and the domain
 // panels (DebugPanels.hpp) render from UiState. Panels keep direct access to
@@ -14,7 +14,7 @@
 // settings API, not debug state.
 
 #include <Core/WorkloadTelemetry.hpp>
-#include <Engine/GameUIResourcePack.hpp>
+#include <Engine/DeveloperUiResourcePack.hpp>
 #include <Engine/PlayerUi.hpp>
 
 #include <array>
@@ -199,14 +199,13 @@ struct PlayerDebugSnapshot
 	float isometricZoom{0.f};
 };
 
-// --- Console state owned by GameUI ---
+// --- Console state owned by DeveloperUi ---
 
 struct PanelState
 {
-	/// Read-only Status Overlay density (issue #184): F1 cycles, the View
-	/// menu offers the same three states. Replaces the old catch-all HUD.
+	/// Read-only Status Overlay density selected from the View menu.
 	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Off};
-	/// Interactive Player / Gameplay panel (View menu).
+	/// Creative and debug controls in the Developer menu.
 	bool playerPanel{false};
 	bool multiplayer{false};
 	bool overview{false};
@@ -220,7 +219,6 @@ struct PanelState
 	bool benchmark{false};
 	bool world{false};
 	bool help{false};
-	bool overlayHints{true};
 };
 
 /// Per-scope CPU statistics maintained while the Performance panel is open.
@@ -269,7 +267,7 @@ struct DebugHealth
 	void update(const class UiState &state, float dt);
 };
 
-/// Per-domain snapshot container + bounded histories. Owned by GameUI;
+/// Per-domain snapshot container + bounded histories. Owned by DeveloperUi;
 /// refreshed by updateDebugUiState().
 class UiState
 {

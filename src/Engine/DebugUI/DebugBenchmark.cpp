@@ -4,7 +4,7 @@
 
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/GpuProfile.hpp>
@@ -14,7 +14,7 @@
 namespace debugui
 {
 
-void drawBenchmarkPanel(UiState &s, GameUIFrame &frame)
+void drawBenchmarkPanel(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.benchmark)
 		return;
@@ -92,7 +92,7 @@ void drawBenchmarkPanel(UiState &s, GameUIFrame &frame)
 	ImGui::End();
 }
 
-void drawBenchmarkReport(UiState &s, GameUIFrame &frame)
+void drawBenchmarkReport(UiState &s, DeveloperUiFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
 	if (!frame.benchmark)

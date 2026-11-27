@@ -294,6 +294,15 @@ void ImGuiLayer::cancelInput()
 	ImGui::ClearDragDrop();
 }
 
+void ImGuiLayer::dismissFocusAndPopups()
+{
+	if (!m_initialized)
+		return;
+	if (!ImGui::GetCurrentContext()->OpenPopupStack.empty())
+		ImGui::ClosePopupToLevel(0, false);
+	ImGui::FocusWindow(nullptr);
+}
+
 void ImGuiLayer::stopTextInput()
 {
 	auto &context = *ImGui::GetCurrentContext();

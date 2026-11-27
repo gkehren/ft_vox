@@ -1,4 +1,4 @@
-#include "Engine/GameUIBiomeMap.hpp"
+#include "Engine/DeveloperUiBiomeMap.hpp"
 #include <Chunk/TerrainGenerator.hpp>
 
 #include <cmath>

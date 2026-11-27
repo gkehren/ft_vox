@@ -1,5 +1,5 @@
-#include "Engine/GameUIResourcePack.hpp"
-#include "Engine/GameUI.hpp"
+#include "Engine/DeveloperUiResourcePack.hpp"
+#include "Engine/DeveloperUi.hpp"
 
 #include <ImGuiFileDialog.h>
 #include <imgui/imgui.h>
@@ -12,7 +12,7 @@ namespace
 	constexpr const char *kResourcePackDlgKey = "ChooseResourcePackZip";
 }
 
-void GameUI::cancelDeveloperDialogs()
+void DeveloperUi::cancelDeveloperDialogs()
 {
 	// The browser is a developer-owned modal surface: hiding the workspace must
 	// not leave it open but invisible, still holding developer input state
@@ -24,7 +24,7 @@ void GameUI::cancelDeveloperDialogs()
 namespace
 {
 
-	void tryApply(GameUIFrame &frame, ResourcePackUiState &state, const char *path)
+	void tryApply(DeveloperUiFrame &frame, ResourcePackUiState &state, const char *path)
 	{
 		if (!frame.applyResourcePack)
 		{
@@ -34,7 +34,7 @@ namespace
 			return;
 		}
 
-		const GameUIFrame::ResourcePackUiResult r = frame.applyResourcePack(path ? path : "");
+		const DeveloperUiFrame::ResourcePackUiResult r = frame.applyResourcePack(path ? path : "");
 		state.status = r.message.empty() ? (r.atlasOk ? "Done." : "Failed.") : r.message;
 		state.statusError = r.isError;
 		state.statusWarning = r.isWarning && !r.isError;
@@ -49,7 +49,7 @@ namespace
 	}
 } // namespace
 
-void drawResourcePackSection(GameUIFrame &frame, ResourcePackUiState &state, bool &showGraphics)
+void drawResourcePackSection(DeveloperUiFrame &frame, ResourcePackUiState &state, bool &showGraphics)
 {
 	(void)showGraphics;
 	if (!ImGui::CollapsingHeader("Resource pack", ImGuiTreeNodeFlags_DefaultOpen))

@@ -1,6 +1,7 @@
 #include "EngineMultiplayer.hpp"
 
 #include <Engine/ClientProfile.hpp>
+#include <Engine/EngineMultiplayerActions.hpp>
 #include <Engine/GameUiSample.hpp>
 
 #include <cassert>
@@ -35,16 +36,14 @@ void Engine::persistJoinPreferences()
 	m_joinPreferencesError = "Could not save multiplayer preferences. Changes apply for this run.";
 }
 
-void Engine::populateJoinUi(GameUIFrame &frame)
+MultiplayerActions Engine::multiplayerActions()
 {
+	MultiplayerActions frame;
 	if (m_benchmark.isActive())
-		return;
+		return frame;
 
-	frame.joinPreferences = &m_joinPreferences;
-	populateHostingUi(frame);
-	frame.joinProfiles = &m_joinProfiles;
-	frame.joinError = m_joinError;
-	frame.joinPreferencesError = m_joinPreferencesError;
+	frame.joinPreferencesLoaded = true;
+	populateHostingActions(frame);
 	frame.switchingSession = switchingSession() || blocksNetworkSessionRequests();
 	frame.connectServer = [this](client::JoinRequest request) {
 		if (!switchingSession() && !blocksNetworkSessionRequests())
@@ -105,6 +104,20 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 			m_joinError = "Could not validate the server endpoint.";
 		}
 	};
+	if (m_remote && !frame.switchingSession)
+	{
+		if (m_remote->canReconnect())
+			frame.joinServer = [this] {
+				if (m_remote && !switchingSession() && !blocksNetworkSessionRequests())
+					m_remote->joinRequested = true;
+			};
+		else if (m_remote->transport.status() != net::udp::ClientStatus::Leaving)
+			frame.leaveServer = [this] {
+				if (m_remote && !switchingSession() && !blocksNetworkSessionRequests())
+					m_remote->leaveRequested = true;
+			};
+	}
+	return frame;
 }
 
 std::optional<Engine::NamedProfile> Engine::loadNamedProfile(std::string_view name, std::string &error) const

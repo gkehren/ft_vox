@@ -1,6 +1,77 @@
 # Game UI migration and parity
 
-Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Phase A adds an isolated preview. A normal launch still follows the existing solo, Join and Host paths and the existing ImGui controls.
+Epic #298 separates the player-facing Game UI from the Dear ImGui Developer UI. The [architecture decision](adr/game-ui-backend.md) defines the renderer, ownership and input contracts. Normal play starts in the native Game UI. The Developer UI is available on demand. The sections below record the earlier migration checkpoints and the current ownership split.
+
+## Developer UI separation (#308)
+
+**F1** shows or hides Developer UI. **Ctrl+Shift+D** remains an alias. Pass
+`--dev-ui` to request the workspace on launch. Developer panel shortcuts
+**F2–F5**, **F7–F9**, **F11** and **F12** open their tool directly from hidden.
+**H** hides and restores the current layout tiles within the workspace.
+**F6** toggles native HUD hints and **F10** requests a session-only VSync
+change at the swapchain boundary.
+
+The Vulkan scene projects across the full output. Native HUD, Inventory
+and Pause use the central dock area when the workspace is visible. With
+the workspace hidden they use the full window. ImGui submits over the
+native layer. **C** releases or recaptures a gameplay cursor. Showing
+Developer UI preserves the current cursor state. Hiding it cancels ImGui
+pointer presses, text input and open popups. Inventory drops its held
+gesture when its layout changes. Full-window native screens and
+confirmations keep input and suppress ImGui drawing. F1 updates the
+workspace visibility to apply on dismissal. Connected Pause remains
+local and the server continues to tick.
+
+Engine builds `DeveloperUiFrame` only for a visible workspace or an explicit
+biome-map benchmark. Hidden frames skip ImGui frame construction. The live
+context and existing window IDs preserve dock associations, and
+`imgui.ini` persists layout and developer scale between launches.
+ImGui initialization, swapchain recreation and shutdown stay independent
+of visibility. Native presentation receives bounded view models and submits
+typed intents. Developer network and server views receive read-only
+diagnostics. Native join, hosting and administration keep the existing
+Engine adapters and verification checks.
+
+| Surface | Route and parity |
+| --- | --- |
+| Graphics and Resource Packs | F2, including quality presets, per-pass controls and pack browse/apply/reset. Game Menu → Settings is the editable home for FXAA and VSync. Developer Graphics reports their live state. |
+| Streaming and workload | F3, F11 and Developer → Memory. Streaming budgets, memory, queues and live workload remain available. |
+| World and biome map | F4. Solo map, overlays and navigation remain available. Remote World continues to display the connected view. |
+| Help and About | F5 opens developer Controls. The Game Menu provides its own Settings → Controls and About. |
+| Performance, Overview, Chunk Inspector, Render Debug | F7, F8, F9 and F12. Developer also exposes Player Diagnostics. |
+| Creative and debugging | Developer → Creative / debug controls. Retains solo flight, camera, creative block, target, demo players and passive mobs, with chunk borders available from Developer or B. Mouse sensitivity and inversion are in native Settings. |
+| Status density and layout | View → Status overlay (Off, Minimal, Detailed). View → Reset layout / Apply default developer layout. |
+| Benchmark and report | Developer → Benchmark for interactive profiling and reports. CLI benchmark and explicit `--benchmark-map` remain available. |
+| Network and server monitoring | Developer → Network / server monitoring. Keeps client prediction and traffic metrics, fresh server counters and the hosted roster. |
+| Player HUD, Inventory, Join, Host and administration | Native HUD, E and Escape → Multiplayer. Connection, profiles, hosting, stop and verified administration commands live in that flow. The retired ImGui forms shared those actions and kept separate drafts and confirmation state. |
+
+### Verification on Windows and Vulkan
+
+Captured the same seed and camera with [Developer UI visible](images/developer-ui/developer-workspace.png)
+and [Developer UI hidden](images/developer-ui/player-hud.png) at 1280 × 720
+on an NVIDIA GeForce RTX 4070 Ti (Vulkan 1.4.357). Both images use the engine
+scene and UI composition path. The visible shot places the same native
+hotbar inside the center dock area. The HUD proof confirmed that the ImGui
+frame counter stayed fixed during the hidden interval and that the dock
+tree resumed when reopened.
+
+| Check | Result |
+| --- | --- |
+| Windows Release graphics-off build and CTest | 55/55 passed, including CoreIncludeGuard and HeadlessDeps. |
+| Windows Release graphical build and focused CTest | Game and server built. 10/10 selected UI, graphics and biome-map tests passed. |
+| Vulkan HUD/workspace proof | 66 checks passed. Covers default hidden, F1 and its alias, key repeat, drag cancellation, Pause, quit confirmation, Inventory, panel shortcuts, H, reset/default layout, swapchain, atlas and world changes. |
+| Vulkan presentation and Settings | Present proof passed 39 checks. Settings passed 46 checks and the fresh-process restart proof passed, including independent developer scale and visibility and display rollback. |
+| Graphical join and native hosted flows | Join smoke passed 63 checks, including reconnect with Developer UI hidden and F1 during connected play and Pause. Native Host/Join passed for owner and guest, including verified administration. The two-client hosted closure passed the inventory matrix, checkpoint and restart. |
+| Production CLI benchmark | Wrote reports for the standard hidden run and the explicit `--benchmark-map 0.5` run. |
+| Vulkan validation | The successful GPU runs reported the documented RTSS swapchain diagnostics. The HUD proof counted 14 such messages and zero additional errors. |
+
+The separate solo inventory proof exercised F1 while a real ImGui text editor
+owned the keyboard. Its existing ten pointer and inventory assertions also
+failed on the pre-change binary on this desktop. The hosted inventory matrix
+passed its ten operations with the original 117-item budget conserved. The
+showcase proof reproduced the same two slider assertions on both binaries.
+The Vulkan proofs injected SDL events and the resulting captures were reviewed
+visually.
 
 ## Native player inventory (#304)
 

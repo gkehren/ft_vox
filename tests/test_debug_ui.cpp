@@ -196,8 +196,8 @@ void testUpdateDebugUiState()
 	Camera camera;
 	camera.setPosition(glm::vec3(160.f, 90.f, 200.f));
 
-	GameUIFrame f{};
-	f.camera = &camera;
+	DeveloperUiFrame f{};
+	f.hasWorld = true;
 	f.chunks = &manager;
 	f.pool = &pool;
 
@@ -275,7 +275,7 @@ void testUpdateDebugUiState()
 void testScopeStatsLifecycle()
 {
 	std::cout << "[ScopeStats lifecycle] ";
-	GameUIFrame f{};
+	DeveloperUiFrame f{};
 	debugui::UiState state;
 	state.panels.performance = true;
 	Profiler &prof = GetProfiler();
@@ -379,7 +379,7 @@ void testPlayerDiagnosticsSnapshot()
 {
 	std::cout << "[PlayerDiagnostics snapshot] ";
 	debugui::UiState state;
-	GameUIFrame f{};
+	DeveloperUiFrame f{};
 
 	// Closed panel: the snapshot stays untouched (no hidden per-frame cost).
 	debugui::updateDebugUiState(state, f, 500.0);
@@ -484,7 +484,7 @@ void testStreamingHealthSubset()
 	both.panels.overview = true;
 	both.panels.streaming = true;
 	both.streaming.pendingMesh = 128;
-	GameUIFrame frame{};
+	DeveloperUiFrame frame{};
 	debugui::updateDebugUiState(both, frame, 1000.0);
 	CHECK(both.health.meshBacklog.conditionSeconds() > 0.f &&
 			  both.health.meshBacklog.conditionSeconds() <= 0.02f,

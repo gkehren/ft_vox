@@ -27,11 +27,11 @@ struct ShortcutRef
 // entries stay gated behind !wantCaptureKeyboard at their call sites
 // (InputRouting policy).
 inline constexpr ShortcutRef kShortcuts[] = {
-	{SDLK_F1, "F1", "Status overlay density", true},
+	{SDLK_F1, "F1", "Show / hide Developer UI", true},
 	{SDLK_F2, "F2", "Graphics", true},
 	{SDLK_F3, "F3", "Streaming", true},
 	{SDLK_F4, "F4", "World / biome map", true},
-	{SDLK_F5, "F5", "Help / controls", true},
+	{SDLK_F5, "F5", "Developer Help / controls", true},
 	{SDLK_F6, "F6", "On-screen hints", true},
 	{SDLK_F7, "F7", "Performance", true},
 	{SDLK_F8, "F8", "Overview", true},

@@ -18,9 +18,8 @@
 #include <Engine/DebugUI/DebugUiCore.hpp>
 #include <Engine/LayoutTiles.hpp>
 #include <Engine/UiShell.hpp>
-#include <Engine/GameUIBiomeMap.hpp>
+#include <Engine/DeveloperUiBiomeMap.hpp>
 #include <Engine/MultiplayerUi.hpp>
-#include <Engine/MultiplayerJoin.hpp>
 #include <Hosting/ServerSupervisor.hpp>
 #include <Sim/GameSimulation.hpp>
 
@@ -39,7 +38,7 @@ class StagingRing;
 
 /// Plain-copy world-save snapshot for the World panel (issue #180, Phase 5).
 /// Filled by Engine::drawUi from RenderWorldBridge::worldPersistence()->status();
-/// deliberately value-only so GameUI keeps no dependency on the save layer.
+/// deliberately value-only so DeveloperUi keeps no dependency on the save layer.
 struct WorldSaveUiState
 {
 	bool active{false}; ///< persistence running for this session
@@ -133,9 +132,9 @@ inline SaveUiPresentation computeSaveUiPresentation(const WorldSaveUiState &stat
 /// the callbacks for actions that need engine coordination. The player is
 /// carried as the read-only playerui::PlayerSnapshot value (issue #184), so
 /// UI surfaces never touch physics::PlayerController directly.
-struct GameUIFrame
+struct DeveloperUiFrame
 {
-	Camera *camera{nullptr};
+	bool hasWorld{};
 	/// Read-only player view (position/motion/selection context + raw physics
 	/// counters for the developer console). Filled by Engine::drawUi.
 	playerui::PlayerSnapshot player{};
@@ -145,7 +144,6 @@ struct GameUIFrame
 	/// through Engine instead of writing the Camera directly, keeping the
 	/// UI surfaces snapshot-only for display data.
 	std::function<void(float)> setCameraMovementSpeed;
-	std::function<void(float)> setMouseSensitivity;
 	std::function<void(float)> setIsometricZoom;
 	RenderWorldBridge *chunks{nullptr};
 	ChunkPool *pool{nullptr};
@@ -181,28 +179,8 @@ struct GameUIFrame
 	std::function<void(bool)> setMobsEnabled;
 	size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
-	std::optional<ui::MultiplayerStatus> multiplayerStatus;
-	const char *multiplayerAction{nullptr};
-	std::string_view multiplayerEndpoint;
-	std::string_view multiplayerProfile;
-	ui::NetworkStats networkStats;
-	std::function<void()> joinServer;
-	std::function<void()> leaveServer;
-	std::function<void()> returnToSolo;
-	const client::JoinPreferences *joinPreferences{};
-	const std::vector<std::string> *joinProfiles{};
-	std::string joinError, joinPreferencesError;
-	std::function<void(client::JoinRequest)> connectServer;
-	std::function<void(std::string_view)> selectJoinProfile, createJoinProfile, toggleFavorite;
-	bool switchingSession{};
+	ui::RemoteSessionView remote;
 	const hosting::Snapshot *hostedServer{};
-	std::span<const std::string> hostWorlds;
-	std::string hostError;
-	bool exitAfterHostedStop{};
-	std::function<void(hosting::Options, bool, std::string_view)> startHostedServer;
-	std::function<void()> stopHostedServer, forceStopHostedServer;
-	std::function<void(std::string_view)> joinHostedServer;
-	std::function<std::string(uint64_t, localcontrol::Operation, sim::PlayerId, std::string_view)> administerHostedServer;
 
 	int seed{0};
 	uint64_t worldGenerationId{0};
@@ -221,7 +199,7 @@ struct GameUIFrame
 	const char *presentModeName{nullptr};
 	bool validation{false};
 
-	std::function<void(bool)> setVSync;
+	bool *hudHints{};
 	/// True while a VSync change awaits the deferred swapchain recreate
 	/// (Graphics ▸ Display marks the present mode "(applying)").
 	bool vsyncPending{false};
@@ -234,7 +212,7 @@ struct GameUIFrame
 	std::function<void(float)> setUiScale;
 	std::function<void()> requestExit;
 	/// Runtime developer-workspace visibility action (issue #303 F04): the menu
-	/// item and the Ctrl+Shift+D shortcut perform the same transition.
+	/// item and F1 perform the same transition.
 	std::function<void()> toggleDeveloperWorkspace;
 
 	/// Active pack root (empty = bundled). Owned by Engine.
@@ -256,22 +234,14 @@ struct GameUIFrame
 	std::function<std::future<BiomeMapResult>(BiomeMapRequest)> submitBiomeMap;
 };
 
-#include <Engine/GameUIResourcePack.hpp>
+#include <Engine/DeveloperUiResourcePack.hpp>
 
-/// Multi-panel ImGui surface for the Vulkan engine.
-///
-/// GameUI itself is only the shell: main menu bar, read-only Status Overlay
-/// (F1), the interactive Player / Gameplay panel, biome-map window, help,
-/// on-screen hints, input shortcuts and biome-map plumbing (issue #184).
-/// Every developer-tool panel (Overview, Performance, Rendering, Streaming,
-/// Player Diagnostics, Chunk inspector, Memory, Benchmark) lives in
-/// src/Engine/DebugUI/ and consumes the read-only snapshots in
-/// debugui::UiState (issue #179).
-class GameUI
+/// Owns the ImGui workspace, developer controls and diagnostic presentation.
+class DeveloperUi
 {
 public:
-	GameUI() = default;
-	~GameUI();
+	DeveloperUi() = default;
+	~DeveloperUi();
 
 	void init(VkContext &context, ImmediateCommands &imm);
 	void shutdown();
@@ -279,27 +249,16 @@ public:
 	void onImGuiVulkanBackendRecreate();
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
-	void draw(GameUIFrame &frame);
-	/// Keep the dock tree alive while the developer workspace is hidden.
-	void maintainDockspace();
+	void draw(DeveloperUiFrame &frame);
 	/// Close developer-owned modal surfaces when the workspace is hidden
 	/// (issue #303 F04): a file browser must not survive as an invisible open
 	/// dialog that still owns developer input state.
 	void cancelDeveloperDialogs();
 
-	/// Keyboard shortcut handling, split by input-routing policy (issue #76):
-	/// - handleGlobalShortcut: intentional global non-text shortcuts
-	///   (F1-F12 panel toggles, F10 VSync) - honored even while ImGui
-	///   captures the keyboard.
-	/// - handleGameplayShortcut: gameplay state changes (P pause) - the
-	///   caller must only invoke these while ImGui does NOT capture the
-	///   keyboard, so typing in a text field stays inert.
-	/// Returns true if the key was consumed.
-	bool handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame);
-	bool handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame);
+	/// Opens the requested tool from a hidden workspace, otherwise toggles its panel.
+	void handlePanelShortcut(int sdlKeycode, bool openingWorkspace);
 
-	/// Used by Engine to prevent application quit while the modal handles
-	/// Escape itself (ImGuiFileDialog cancels via IGFD_EXIT_KEY).
+	/// The file dialog owns Escape while open.
 	bool isFileDialogOpen() const;
 
 	bool showStatusOverlay() const
@@ -342,7 +301,6 @@ public:
 	/// Application shell (dockspace, menus, layout actions). Engine queues the
 	/// default developer layout here on first run.
 	ui::UiShell &shell() { return m_shell; }
-	bool showOverlayHints() const { return m_debug.panels.overlayHints; }
 
 	/// Open the primary panels used by the default developer layout so the
 	/// docked slots materialize on the first frame. Overview stays closed to
@@ -370,7 +328,6 @@ public:
 	/// re-capturing. The saved snapshot is abandoned and the panel opens on
 	/// the current visible state.
 	void leaveLayoutTilesHidden() { m_layoutTilesHidden = false; }
-	void showHostPanel();
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
@@ -412,16 +369,12 @@ private:
 		}
 	};
 
-	void drawStatusOverlay(GameUIFrame &frame);
-	void drawPlayerPanel(GameUIFrame &frame);
-	void drawMultiplayerPanel(const GameUIFrame &frame);
-	void drawJoinPanel(const GameUIFrame &frame);
-	void drawHostPanel(const GameUIFrame &frame);
+	void drawStatusOverlay(DeveloperUiFrame &frame);
+	void drawPlayerPanel(DeveloperUiFrame &frame);
+	void drawMultiplayerPanel(const DeveloperUiFrame &frame);
 	void drawHostedPlayers(const hosting::Snapshot *server);
-	void drawHostedAdministration(const GameUIFrame &frame);
-	void drawHostProfile(const GameUIFrame &frame);
-	void drawWorld(GameUIFrame &frame);
-	void drawHelp(GameUIFrame &frame);
+	void drawWorld(DeveloperUiFrame &frame);
+	void drawHelp(DeveloperUiFrame &frame);
 	void requestBiomeMapRefresh()
 	{
 		m_mapNeedsUpdate = true;
@@ -441,7 +394,7 @@ private:
 		m_mapNeedsUpdate = true;
 	}
 
-	void tickBiomeMap(GameUIFrame &frame);
+	void tickBiomeMap(DeveloperUiFrame &frame);
 	void ensureBiomeTexture(int size);
 
 	/// Developer-console state: panel visibility + debug snapshots + bounded
@@ -456,24 +409,8 @@ private:
 	/// the next H. Never written while the layout is hidden — manual panel
 	/// opens abandon the snapshot via leaveLayoutTilesHidden() instead.
 	ui::LayoutTilesSnapshot m_savedTilesState{};
-	client::JoinDraft m_joinDraft;
-	bool m_joinDraftInitialized{};
-	hosting::Options m_hostOptions;
-	std::array<char, 64> m_hostWorld{}, m_hostAddress{};
-	std::array<char, 128> m_hostProfile{};
 	sim::PlayerId m_hostPlayerSelection;
-	struct AdminConfirmation
-	{
-		localcontrol::Operation operation;
-		sim::PlayerId target;
-		std::string profile;
-	};
-	std::optional<AdminConfirmation> m_adminConfirmation;
-	uint64_t m_adminLaunch{};
-	sim::PlayerId m_adminSelection, m_lastAdminRosterSelection;
-	std::string m_adminProfile, m_adminError;
 	uint64_t m_hostSelectionLaunch{};
-	bool m_hostAutoJoin{true}, m_focusHostPanel{}, m_hostProfileInitialized{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};
@@ -522,7 +459,7 @@ private:
 	// in total). The scratch holds only scratch floats - no seed- or
 	// world-dependent state - so it survives world/seed changes and is
 	// never reset on map invalidation; shared ownership releases it at
-	// GameUI destruction. Shared ownership keeps it alive for the duration
+	// DeveloperUi destruction. Shared ownership keeps it alive for the duration
 	// of an in-flight job.
 	std::shared_ptr<TerrainGenerator::BiomeRegionScratch> m_mapScratch;
 

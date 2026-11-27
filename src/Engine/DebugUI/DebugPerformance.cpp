@@ -7,7 +7,7 @@
 
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/GpuProfile.hpp>
@@ -31,7 +31,7 @@ float historyMax(const MetricHistory &h, float floorMax)
 }
 } // namespace
 
-void drawPerformance(UiState &s, GameUIFrame &frame)
+void drawPerformance(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.performance)
 		return;

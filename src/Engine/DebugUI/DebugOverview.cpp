@@ -6,7 +6,7 @@
 
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
-#include <Engine/GameUI.hpp>
+#include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 
 #include <imgui/imgui.h>
@@ -16,7 +16,7 @@
 namespace debugui
 {
 
-void drawOverview(UiState &s, GameUIFrame &frame)
+void drawOverview(UiState &s, DeveloperUiFrame &frame)
 {
 	if (!s.panels.overview)
 		return;
