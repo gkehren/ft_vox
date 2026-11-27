@@ -336,8 +336,16 @@ GameUiSample::InputResult GameUiSample::applyWidgetEvent(WidgetEvent event)
 void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 {
 	auto *field = interactive && m_screens.nativeScreen() && m_screens.top() != Screen::Inventory &&
-		m_layoutRevision == m_screens.revision()
+		m_screenRevision == m_screens.revision()
 		? m_widgets.editor(m_screens.focus()) : nullptr;
+	// Keep the existing IME session across resize and display/DPI changes.
+	// The next layout publishes a fresh anchor in window coordinates.
+	if (field && m_layoutRevision != m_screens.revision())
+	{
+		if (field == m_sdlEditor)
+			return;
+		field = nullptr;
+	}
 	const auto geometry = field
 		? m_widgets.editorGeometry(m_screens.focus(), font(), m_screenScale, m_fontScale)
 		: TextGeometry{};
@@ -350,9 +358,8 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 		SDL_StopTextInput(window);
 		m_sdlEditor = nullptr;
 	}
-	if (!field || (!SDL_TextInputActive(window) && !SDL_StartTextInput(window)))
+	if (!field)
 		return;
-	m_sdlEditor = field;
 	const auto &clip = geometry.clip.rect;
 	const int left = int(std::floor(clip.x));
 	const int top = int(std::floor(std::clamp(geometry.origin.y, clip.y, clip.w)));
@@ -361,6 +368,8 @@ void GameUiSample::updateTextInput(SDL_Window *window, bool interactive)
 	const SDL_Rect area{left, top, std::max(1, int(std::ceil(clip.z)) - left),
 		std::max(1, int(std::ceil(std::min(clip.w, geometry.origin.y + geometry.lineHeight))) - top)};
 	SDL_SetTextInputArea(window, &area, int(std::lround(geometry.caretX)) - left);
+	if (SDL_TextInputActive(window) || SDL_StartTextInput(window))
+		m_sdlEditor = field;
 }
 
 bool GameUiSample::yieldTextInput(SDL_Window *window)
@@ -381,9 +390,10 @@ bool GameUiSample::canFocusWidget(float x, float y) const
 	return m_layoutRevision == m_screens.revision() && m_widgets.focusableAt({x, y});
 }
 
-GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event)
+GameUiSample::InputResult GameUiSample::handleScreenEvent(SDL_Window *window, const SDL_Event &event)
 {
-	if (m_layoutRevision != m_screens.revision())
+	const bool textEvent = event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_TEXT_EDITING;
+	if (m_layoutRevision != m_screens.revision() && (!textEvent || m_screenRevision != m_screens.revision()))
 		return InputResult::Consumed;
 	auto focus = m_screens.focus();
 	WidgetEvent result;
@@ -399,8 +409,14 @@ GameUiSample::InputResult GameUiSample::handleScreenEvent(const SDL_Event &event
 		break;
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		if (event.button.button == SDL_BUTTON_LEFT)
+		{
+			const bool composing = m_sdlEditor && !m_sdlEditor->composition().empty();
 			result = m_widgets.press({event.button.x, event.button.y}, focus, font(), m_screenScale,
 				(SDL_GetModState() & SDL_KMOD_SHIFT) != 0, m_fontScale, style::baseline());
+			// A click in the same field can cancel preedit without changing focus.
+			if (composing && m_sdlEditor == m_widgets.editor(focus) && m_sdlEditor->composition().empty())
+				SDL_ClearComposition(window);
+		}
 		break;
 	case SDL_EVENT_MOUSE_MOTION:
 		result = m_widgets.drag({event.motion.x, event.motion.y}, m_screenScale,

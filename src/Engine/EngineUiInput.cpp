@@ -245,7 +245,10 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 		case SDL_EVENT_WINDOW_HIDDEN:
 		case SDL_EVENT_WINDOW_MINIMIZED:
 			if (m_playerUi)
+			{
 				m_playerUi->cancelInventoryGesture();
+				m_playerUi->updateTextInput(window, false);
+			}
 			// F01 (round 2): focus loss, hiding and minimization release
 			// keyboard ownership — the next focus owner gets a clean slate
 			// instead of a stale Developer UI latch.
@@ -410,7 +413,7 @@ bool Engine::routeUiEvent(const SDL_Event &event)
 				submitInventoryAction(action);
 		}
 		else
-			deliver(m_playerUi->handleScreenEvent(event));
+			deliver(m_playerUi->handleScreenEvent(window, event));
 		syncUiInput();
 	}
 	else if (owner == DeveloperUi && imgui && !policy.modal)

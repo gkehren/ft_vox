@@ -1385,6 +1385,8 @@ struct GameUiBackendProbe
 		CHECK(sample.screens().top() == Screen::Showcase && sample.m_sdlEditor == &sample.m_field && SDL_TextInputActive(engine.window),
 			"keyboard opens showcase and starts SDL text input at the first field (screen=" <<
 			int(sample.screens().top()) << ", focus=" << sample.screens().focus() << ")");
+		CHECK(std::string_view(SDL_GetHint(SDL_HINT_IME_IMPLEMENTED_UI)) == "composition",
+			"SDL uses player preedit with OS-owned candidates");
 		SDL_Event editing{};
 		editing.type = SDL_EVENT_TEXT_EDITING;
 		editing.edit.windowID = SDL_GetWindowID(engine.window);
@@ -1456,7 +1458,68 @@ struct GameUiBackendProbe
 			textGeometry.glyphScale == gameui::textStyle(gameui::style::TextRole::Body,
 				sample.m_screenScale, sample.m_fontScale).glyphScale(),
 			"SDL candidate location follows the visible horizontally scrolled caret");
+		const auto queuePreedit = [&](const char *value, int start, int length) {
+			editing.edit.text = value;
+			editing.edit.start = start;
+			editing.edit.length = length;
+			checked(SDL_PushEvent(&editing), "queue IME preedit");
+		};
+		const auto priorScale = sample.m_scale.policy();
+		const auto supplementary = "\xf0\x9f\x8c\xb2\xf0\xa0\x80\x80"; // U+1F332 U+20000
+		std::string expected = sample.m_field.value();
+		for (const float scale : {1.f, 2.f})
+		{
+			sample.setScalePolicy({gameui::ScaleMode::Fixed, scale});
+			present();
+			click(center("Name"));
+			tap(SDLK_END);
+			windowEvent(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED);
+			const int second = gameui::kPlatformCompositionUnit == gameui::CompositionUnit::Utf16 ? 2 : 1;
+			queuePreedit(supplementary, second, second);
+			engine.handleEvents();
+			CHECK(sample.m_screenScale == scale && sample.m_sdlEditor == &sample.m_field &&
+				SDL_TextInputActive(engine.window) && sample.m_field.value() == expected &&
+				sample.m_field.composition() == supplementary && sample.m_field.compositionCursor() == 4 &&
+				sample.m_field.compositionEnd() == 8,
+				"supplementary preedit and selection survive pending display geometry at " << scale);
+			present();
+			const auto rebuilt = sample.m_widgets.editorGeometry(sample.screens().focus(), sample.font(),
+				sample.m_screenScale, sample.m_fontScale);
+			CHECK(SDL_GetTextInputArea(engine.window, &textArea, &cursor) &&
+				textArea.x + cursor == int(std::lround(rebuilt.caretX)) && sample.m_field.composition() == supplementary,
+				"rebuilt display geometry repoints the existing composition at " << scale);
+			windowEvent(SDL_EVENT_WINDOW_DISPLAY_CHANGED);
+			commitText(supplementary);
+			engine.handleEvents();
+			expected += supplementary;
+			CHECK(sample.m_field.value() == expected && sample.m_field.composition().empty(),
+				"supplementary commit reaches the editor once while display geometry is pending at " << scale);
+		}
+		sample.setScalePolicy(priorScale);
+		present();
+		queuePreedit("cancel", 0, 0);
+		click(center("Name"));
+		engine.handleEvents();
+		CHECK(sample.m_sdlEditor == &sample.m_field && sample.m_field.composition().empty() &&
+			sample.m_field.value() == expected, "clicking within a composing field clears its preedit in place");
+		queuePreedit("cancel", 0, 0);
+		tap(SDLK_TAB);
+		engine.handleEvents();
+		CHECK(!sample.m_sdlEditor && !SDL_TextInputActive(engine.window) && sample.m_field.composition().empty() &&
+			sample.m_field.value() == expected, "Tab cancels preedit when focus leaves the field");
+		click(center("Secondary name"));
+		queuePreedit("cancel", 0, 0);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_LOST);
+		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
+		present();
+		CHECK(sample.m_sdlEditor == &sample.m_secondaryField && SDL_TextInputActive(engine.window) &&
+			sample.m_secondaryField.composition().empty() && sample.m_secondaryField.value() == "Secondary",
+			"same-batch window blur and refocus do not revive the preedit");
+		queuePreedit("cancel", 0, 0);
 		click(center("Secondary level"));
+		engine.handleEvents();
+		CHECK(!sample.m_sdlEditor && sample.m_secondaryField.composition().empty() &&
+			sample.m_secondaryField.value() == "Secondary", "clicking another control cancels without committing");
 		click(center("Enable secondary name"));
 		click(center("Secondary name"));
 		text.text.text = "Ignored";
@@ -1520,10 +1583,13 @@ struct GameUiBackendProbe
 		present();
 		CHECK(sample.m_feature.value, "real pointer events hit the relocated control");
 
+		click(center("Name"));
+		queuePreedit("cancel", 0, 0);
 		tap(SDLK_ESCAPE);
 		present();
-		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id,
-			"back restores focus to the showcase opener");
+		CHECK(sample.screens().top() == Screen::Pause && sample.screens().focus() == widget("Widget showcase").id &&
+			!sample.m_sdlEditor && sample.m_field.composition().empty() && sample.m_field.value() == expected,
+			"back cancels preedit and restores focus to the showcase opener");
 		tap(SDLK_TAB);
 		tap(SDLK_RETURN);
 		present();

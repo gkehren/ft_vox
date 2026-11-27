@@ -30,7 +30,7 @@ public:
 	void init(SDL_Window *window, VkContext &context, ImmediateCommands &immediate,
 			  VkFormat format, VkColorSpaceKHR colorSpace, bool standalone);
 	InputResult handleEvent(SDL_Window *window, const SDL_Event &event, bool canClick);
-	InputResult handleScreenEvent(const SDL_Event &event);
+	InputResult handleScreenEvent(SDL_Window *window, const SDL_Event &event);
 	void cancelPointerPress()
 	{
 		m_armed = false;

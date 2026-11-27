@@ -362,10 +362,65 @@ bundled SDL 3.4.18:
 The player UI therefore normalizes with `CompositionUnit` (`kPlatformCompositionUnit`
 selects UTF-16 on Windows, scalars elsewhere). A UTF-16 index inside a surrogate
 pair rounds down, so a supplementary character can never be split into invalid
-bytes. Real OS-driven IME validation (Japanese/Chinese/Korean candidate windows,
-supplementary-plane input, focus handoff) still needs a manual pass on a Windows
-desktop and is tracked in [#314](https://github.com/gkehren/ft_vox/issues/314);
-the normalized geometry is covered headlessly.
+bytes. The font displays `?` for missing glyphs while the editor retains the
+original UTF-8, including supplementary characters.
+
+#### Preedit, candidate UI, and focus
+
+The engine sets `SDL_HINT_IME_IMPLEMENTED_UI` to `composition` before SDL
+initialization. The Windows backend uses that setting to emit editing events
+for the player field to paint. SDL leaves candidate selection and placement to
+the OS, so the game does not handle `SDL_EVENT_TEXT_EDITING_CANDIDATES`. SDL
+receives the visible editor rect and caret offset in window coordinates. The
+IME can place its candidate window outside that rect to avoid obscuring the
+text. The hint is process-wide. Developer ImGui fields can display committed
+text but do not paint inline preedit when the SDL backend sends it to the app.
+[SDL IME hint](https://wiki.libsdl.org/SDL3/SDL_HINT_IME_IMPLEMENTED_UI) ·
+[SDL 3.4.18 Windows backend](https://github.com/libsdl-org/SDL/blob/release-3.4.18/src/video/windows/SDL_windowskeyboard.c)
+
+A text commit delivered before a focus change stays in the originating field.
+Tab, clicking away, leaving the screen, or losing window focus cancels remaining
+preedit. Clicking inside the field repositions its caret and clears native
+preedit as well. Resize and display-scale changes keep the same focused SDL
+session while layout is rebuilt. Text events reaching that editor during the
+rebuild still apply, and the next frame sends the new anchor.
+
+#### Validation for [#314](https://github.com/gkehren/ft_vox/issues/314)
+
+`GameUiInteraction` covers composition range conversion and text geometry.
+The opt-in `test_engine_reload --game-ui-showcase-proof` drives the real SDL
+event router and Vulkan presentation with queued SDL events. It checks the
+scrolled caret anchor, U+1F332 and U+20000 preedit selection and a single UTF-8
+commit at 100% and 200%, cancellation on focus transfers, and continuity across
+display-change events. These checks exercise the application's SDL boundary.
+
+On Windows build 26300 with SDL 3.4.18, the showcase passed all 51 checks and the
+design-system gallery passed all 103 checks with Vulkan validation enabled.
+This environment exposed French and US English keyboard profiles. Live
+Japanese, Chinese and Korean candidate placement,
+supplementary-character composition, focus changes during OS composition, and
+moving an active composition between different-DPI monitors remain pending.
+Linux desktop IME coverage also remains pending.
+
+For the desktop pass, start `ft_vox --seed 42` and open **Pause → Widget
+showcase**. Set **Player UI scale** in **Settings** before opening the showcase.
+
+1. Use Microsoft Japanese IME, Microsoft Pinyin and Microsoft Korean IME in
+   turn. Fill **Name** with a long ASCII prefix, move to its end and compose a
+   phrase. Open the candidate list and check that it opens near the visible
+   caret in the horizontally scrolled field.
+2. At fixed 100% and 200%, use an IME that can compose U+1F332 or U+20000.
+   Inspect preedit selection, commit once and copy the field into a Unicode-
+   capable editor to verify the exact character behind the fallback glyph.
+3. With fresh preedit each time, Tab away, click **Secondary name**, and return
+   to Pause with Escape. Check that the old field contains only text already
+   committed and that revisiting it displays no preedit. Record any keystroke
+   the IME consumes before the game can navigate.
+4. In windowed mode, drag the game between monitors with different OS scale
+   factors while a candidate list is open. Verify that the preedit survives and
+   the candidate list follows the caret, then commit and verify the result.
+5. Record the OS, SDL version, IME, player scale, display scales and result for
+   each case on the issue. Repeat with an available IBus or Fcitx desktop IME.
 
 ## 8. Limitations and follow-ups
 
