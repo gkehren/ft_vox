@@ -664,8 +664,18 @@ pending until the window can render again, and its verification timer only
 accrues while the framebuffer is available. Engine verifies the restored
 logical size, framebuffer and scale before reporting success. A recoverable
 Vulkan configuration refusal rolls back and refreshes all swapchain consumers
-before the next acquisition. Fatal Vulkan errors follow the client error path.
+before the next acquisition. If exact rollback times out, Engine tries the
+available framebuffer with a supported Vulkan extent and preserves the
+previous UI scale and present mode where supported. A successful fallback
+reports that the resolution could not be restored exactly and keeps the file
+unchanged. Fallback creation and presentation attempts are bounded. Fatal
+Vulkan errors and an unusable fallback follow the client error path.
 Restore a maximized window to use the size selector.
+
+**Keep changes** is available after a frame successfully presents with the
+candidate settings. An out-of-date acquisition or presentation suspends
+confirmation until the replacement swapchain presents again. The original
+confirmation deadline keeps running.
 
 VSync changes at the next swapchain boundary. Off requires Vulkan's
 IMMEDIATE mode and a refused request leaves the previous mode active. The
@@ -691,6 +701,13 @@ writes the new record, and the legacy file remains available to older builds.
 The design gallery previews scale temporarily and restores the previous player
 policy when leaving. ImGui scale and docking use `imgui.ini`.
 
+Startup applies a saved window size through the same recoverable display path
+without showing a confirmation dialog. It verifies the size with the working
+present mode, then applies the saved or command-line VSync choice. If the size
+is refused, startup restores the initial size or uses the available framebuffer
+and reports the outcome in Settings. The saved record and unrelated preferences
+are preserved in either case.
+
 `--vsync` and the FXAA value selected by `--quality` take precedence over the
 record for the launch. Those controls show the active value and the override.
 Reset preserves the stored value for each overridden setting, so a subsequent
@@ -711,11 +728,12 @@ same UI and scene into readback images after setting the window size. Build
 `--player-settings-proof <fresh-output-dir>` to reproduce the captures.
 Invoke `--player-settings-restart-proof <same-output-dir>` in a fresh process
 to verify the persisted fixture against the startup loader.
-On the Windows RTX 4070 Ti, the Settings proof passed 35 checks and the
-fresh-process proof passed two. The tests inject both a rejected Vulkan
-swapchain configuration and a fatal device error, exercise real minimize
-and restore events, and compare the saved record after cancelled previews,
-CLI overrides, and a write retry.
+On the Windows RTX 4070 Ti, the Settings proof passed 46 checks and the
+fresh-process proof passed 10. The tests inject Vulkan configuration
+refusals, fatal device errors and SDL rollback failures. They check recovery
+and acquisition, preserve the confirmation deadline across recreation, and
+compare the saved record after startup, cancelled previews, CLI overrides,
+and a write retry.
 Validation reported only the known [RTSS diagnostics](vulkan-validation.md#srgbstorage-errors-from-rtss-issue-99).
 
 - [Settings at 960 × 540](images/player-settings/settings.png)

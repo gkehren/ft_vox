@@ -29,6 +29,7 @@ struct DisplayView
 	std::optional<WindowSize> window;
 	std::optional<ScalePolicy> scale;
 	int seconds{};
+	bool canKeep{};
 };
 
 struct SettingsView

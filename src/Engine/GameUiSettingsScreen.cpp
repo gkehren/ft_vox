@@ -127,7 +127,8 @@ void GameUiSample::buildSettingsScreen(Screen screen, StackLayout &column)
 	{
 		const auto &preview = *view.display;
 		if (preview.phase == DisplayPhase::Confirming)
-			label("Keep these changes? Reverting in " + std::to_string(preview.seconds) + " s");
+			label(std::string(preview.canKeep ? "Keep these changes? Reverting in " : "Checking display... Reverting in ") +
+				std::to_string(preview.seconds) + " s");
 		else
 			label(preview.phase == DisplayPhase::Applying ? "Applying display preview..." : "Restoring display...");
 		if (preview.window)
@@ -141,7 +142,7 @@ void GameUiSample::buildSettingsScreen(Screen screen, StackLayout &column)
 			label("Current UI scale  " + std::to_string(static_cast<int>(playerUiScale() * 100.f)) + "%");
 		}
 		if (preview.phase == DisplayPhase::Confirming)
-			button(Keep, "Keep changes");
+			button(Keep, "Keep changes", preview.canKeep);
 		if (preview.phase != DisplayPhase::Restoring)
 			button(Revert, "Revert changes");
 		return;

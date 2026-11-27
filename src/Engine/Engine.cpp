@@ -111,6 +111,7 @@ Engine::Engine(std::string resourcePackRoot)
 	swapchain = std::make_unique<VkSwapchain>();
 	swapchain->init(*vkContext, static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH),
 					renderSettings.vsyncEnabled);
+	m_swapchainFramebuffer = {pixelW, pixelH};
 
 	immediate = std::make_unique<ImmediateCommands>();
 	immediate->init(*vkContext);
@@ -645,6 +646,8 @@ void Engine::onResize(int width, int height)
 void Engine::requestSwapchainRecreate()
 {
 	m_swapchainRecreateRequested = true;
+	if (m_playerDisplayPreview)
+		m_playerDisplayPreview->presented = false;
 }
 
 bool Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
@@ -652,42 +655,60 @@ bool Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 	if (!swapchain || width == 0 || height == 0)
 		return false;
 
+	const auto framebuffer = gameui::WindowSize{static_cast<int>(width), static_cast<int>(height)};
+	auto *preview = m_playerDisplayPreview ? &*m_playerDisplayPreview : nullptr;
+	const bool exactResize = preview && preview->view.window && !preview->fallback;
 	const bool previousVSync = swapchain->isVSync();
 	const bool desiredVSync = m_pendingVSync.value_or(previousVSync);
 	const auto extent = swapchain->getExtent();
 	const bool currentSwapchain = swapchain->getSwapchain() && !m_swapchainRecreateRequested &&
-		extent.width == width && extent.height == height;
-	const bool resizingPreview = m_playerDisplayPreview && m_playerDisplayPreview->view.window.has_value();
-	if (resizingPreview && m_playerDisplayPreview->recoveringSwapchain)
+		m_swapchainFramebuffer == framebuffer && (!exactResize || (extent.width == width && extent.height == height));
+	if (exactResize && preview->recoveringSwapchain)
 	{
 		gameui::WindowSize logical;
 		SDL_GetWindowSize(window, &logical.width, &logical.height);
-		if (logical != m_playerDisplayPreview->previousWindow)
+		if (logical != preview->previousWindow)
 			return false;
 	}
 	if (currentSwapchain && desiredVSync == previousVSync)
 		return true;
 
+	constexpr unsigned kFallbackAttempts = 2;
+	if (preview)
+	{
+		preview->presented = false;
+		if (preview->fallback && ++preview->fallbackAttempts > kFallbackAttempts)
+			throw std::runtime_error("Could not present a frame after recovering the Vulkan swapchain");
+	}
 	PROFILE_SCOPE("SwapchainRecreate");
 	// VkSwapchain::recreate waits for the device before destroying WSI state.
 	// Every swapchain consumer is refreshed before the next image acquisition.
 	try
 	{
-		swapchain->recreate(width, height, desiredVSync, resizingPreview);
+		swapchain->recreate(width, height, desiredVSync, exactResize);
 	}
 	catch (const SwapchainConfigurationError &e)
 	{
-		if (!resizingPreview && !m_playerVSyncRequest)
+		if (!preview && !m_playerVSyncRequest)
 			throw;
-		if (resizingPreview)
+		if (preview)
 		{
-			auto &preview = *m_playerDisplayPreview;
-			if (!preview.recoveringSwapchain)
+			if (preview->fallback)
 			{
 				std::cerr << "[ui] " << e.what() << '\n';
-				revertPlayerDisplayPreview("This display rejected the requested size. Try a different size.");
-				setVSync(preview.previousVSync);
-				preview.recoveringSwapchain = true;
+				if (preview->fallbackAttempts >= kFallbackAttempts)
+					throw std::runtime_error(std::string("Could not recreate a usable Vulkan swapchain: ") + e.what());
+				if (!desiredVSync && !m_playerVSyncOverride)
+					setVSync(true);
+			}
+			else if (!preview->recoveringSwapchain)
+			{
+				std::cerr << "[ui] " << e.what() << '\n';
+				revertPlayerDisplayPreview(preview->operation == DisplayOperation::Startup ?
+					"This display rejected the saved window size. Choose a different size in Settings." :
+					"This display rejected the preview. Try a different window size.");
+				setVSync(preview->previousVSync);
+				preview->recoveringSwapchain = true;
 			}
 			requestSwapchainRecreate();
 			return false;
@@ -709,6 +730,7 @@ bool Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 
 	windowWidth = static_cast<int>(swapchain->getExtent().width);
 	windowHeight = static_cast<int>(swapchain->getExtent().height);
+	m_swapchainFramebuffer = framebuffer;
 	m_pendingVSync.reset();
 	m_swapchainRecreateRequested = false;
 	if (m_playerVSyncRequest)
@@ -2237,8 +2259,6 @@ void Engine::run()
 		const bool renderable = pixelW > 0 && pixelH > 0;
 		const bool swapchainReady = renderable && recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
 			static_cast<uint32_t>(pixelH));
-		if (renderable)
-			updatePlayerDisplayPreview(framebuffer, swapchainReady);
 		if (!swapchainReady)
 		{
 			if (m_remote)
@@ -2248,6 +2268,7 @@ void Engine::run()
 			resetFrameClock();
 			continue;
 		}
+		publishPlayerSettingsView();
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		// Inspection timeout check runs BEFORE acquisition: breaking after a
@@ -2351,7 +2372,9 @@ void Engine::run()
 		}
 
 		// (13) Presentation uniforms (underwater sample + frame UBO).
-		updateFrameUniforms(frameIndex, pixelW, pixelH, currentFrame);
+		const auto renderExtent = swapchain->getExtent();
+		updateFrameUniforms(frameIndex, static_cast<int>(renderExtent.width),
+			static_cast<int>(renderExtent.height), currentFrame);
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		const int uploadBudget = uploadBudgetThisFrame;
@@ -2367,7 +2390,10 @@ void Engine::run()
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
 			else
+			{
+				notePlayerDisplayFramePresented();
 				noteSessionFramePresented();
+			}
 		}
 
 		// (16) Live memory/workload gauges for the developer console (issue

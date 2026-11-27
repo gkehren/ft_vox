@@ -60,17 +60,35 @@ void Engine::loadPlayerUiPreferences()
 	applyPlayerMouseSensitivity(m_playerUiSettings.sensitivity);
 	if (!m_playerFxaaOverride)
 		worldRenderer->postSettings().fxaaEnabled = m_playerUiSettings.fxaa;
-	if (!m_playerVSyncOverride && !m_pendingVSync)
-		requestPlayerVSync(m_playerUiSettings.vsync, false);
-
+	auto vsync = m_pendingVSync;
+	if (!vsync && !m_playerVSyncOverride)
+		vsync = m_playerUiSettings.vsync;
 	const auto size = m_playerUiSettings.window;
-	if (size != windowSize(window) &&
-		(!canResize(window) || !SDL_SetWindowSize(window, size.width, size.height) ||
-			!SDL_SyncWindow(window) || size != windowSize(window)))
+	if (size != windowSize(window) && canResize(window))
 	{
-		m_playerSettingsNotice = "The window manager could not restore the saved window size.";
-		std::cerr << "[ui] " << m_playerSettingsNotice << '\n';
+		// Verify the size using the working present mode. Apply the saved or
+		// CLI mode afterwards, so a rejection cannot discard either request.
+		setVSync(swapchain->isVSync());
+		beginPlayerDisplayPreview(size, std::nullopt, DisplayOperation::Startup);
+		if (m_playerDisplayPreview)
+		{
+			m_playerDisplayPreview->startupVSync = vsync;
+			return;
+		}
 	}
+	if (size != windowSize(window))
+		m_playerSettingsNotice = "Could not apply the saved window size. Restore the window and choose a size in Settings.";
+	finishStartupDisplay(vsync);
+}
+
+void Engine::finishStartupDisplay(std::optional<bool> vsync)
+{
+	if (!vsync)
+		return;
+	if (m_playerVSyncOverride)
+		setVSync(*vsync);
+	else
+		requestPlayerVSync(*vsync, false);
 }
 
 void Engine::persistPlayerUiPreferences()
@@ -125,7 +143,7 @@ void Engine::finishPlayerVSync(bool applied)
 }
 
 void Engine::beginPlayerDisplayPreview(std::optional<WindowSize> size, std::optional<ScalePolicy> scale,
-	bool reset)
+	DisplayOperation operation)
 {
 	const auto actual = windowSize(window);
 	if (size && !canResize(window))
@@ -133,14 +151,16 @@ void Engine::beginPlayerDisplayPreview(std::optional<WindowSize> size, std::opti
 		m_playerSettingsNotice = "Restore the window before previewing a new size.";
 		return;
 	}
-	const auto previousScale = m_playerUi->scalePolicy();
+	const auto previousScale = operation == DisplayOperation::Startup ? m_playerUiSettings.scale : m_playerUi->scalePolicy();
 	m_playerDisplayPreview = DisplayPreview{
 		.view = {DisplayPhase::Applying, size, scale}, .previousWindow = actual,
 		.previousScale = previousScale, .deadline = Clock::now() + kResizeTimeout, .restoreCheck = {},
-		.reset = reset, .previousVSync = swapchain->isVSync()};
-	if (size && *size != actual && !SDL_SetWindowSize(window, size->width, size->height))
+		.operation = operation, .startupVSync = {}, .previousVSync = swapchain->isVSync()};
+	if (size && *size != actual && !m_setPlayerWindowSize(window, size->width, size->height))
 	{
-		revertPlayerDisplayPreview("The window manager refused this size. Try a different size.");
+		revertPlayerDisplayPreview(operation == DisplayOperation::Startup ?
+			"The window manager refused the saved window size. Choose a different size in Settings." :
+			"The window manager refused this size. Try a different size.");
 		return;
 	}
 	if (scale)
@@ -171,6 +191,7 @@ void Engine::revertPlayerDisplayPreview(std::string_view notice)
 		preview.view.window = preview.previousWindow;
 	}
 	preview.view.phase = DisplayPhase::Restoring;
+	preview.presented = false;
 }
 
 void Engine::resetPlayerSettingsDefaults(bool resetWindow)
@@ -205,6 +226,9 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 {
 	if (m_playerDisplayPreview)
 	{
+		const auto &active = *m_playerDisplayPreview;
+		if (active.operation == DisplayOperation::Startup)
+			return;
 		const auto *action = std::get_if<SettingsAction>(&request);
 		if (action && *action == SettingsAction::Revert)
 		{
@@ -212,11 +236,11 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 			return;
 		}
 		if (!action || *action != SettingsAction::Keep ||
-			m_playerDisplayPreview->view.phase != DisplayPhase::Confirming ||
+			active.view.phase != DisplayPhase::Confirming || !active.presented || Clock::now() >= active.deadline ||
 			!playerDisplayPreviewMatches(playerFramebufferSize()))
 			return;
 		auto preview = *std::exchange(m_playerDisplayPreview, std::nullopt);
-		if (preview.reset)
+		if (preview.operation == DisplayOperation::Reset)
 			resetPlayerSettingsDefaults(canResize(window) && windowSize(window) == kDefaultWindowSize);
 		else
 		{
@@ -282,6 +306,7 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 			const auto extent = swapchain->getExtent();
 			const bool resizable = canResize(window) && framebuffer.width > 0 && framebuffer.height > 0;
 			const bool defaultWindowApplied = resizable && windowSize(window) == kDefaultWindowSize &&
+				swapchain->getSwapchain() && !m_swapchainRecreateRequested && m_swapchainFramebuffer == framebuffer &&
 				extent.width == static_cast<uint32_t>(framebuffer.width) &&
 				extent.height == static_cast<uint32_t>(framebuffer.height);
 			const auto size = resizable && !defaultWindowApplied ?
@@ -289,7 +314,7 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 			const auto scale = m_playerUi->scalePolicy().mode == ScaleMode::Fixed ?
 				std::optional{ScalePolicy{}} : std::nullopt;
 			if (size || scale)
-				beginPlayerDisplayPreview(size, scale, true);
+				beginPlayerDisplayPreview(size, scale, DisplayOperation::Reset);
 			else
 				resetPlayerSettingsDefaults(defaultWindowApplied);
 			break;
@@ -306,25 +331,29 @@ void Engine::handlePlayerSettingsRequest(const SettingsRequest &request)
 
 void Engine::pumpPlayerSettings()
 {
-	if (!m_playerUi || m_uiSpike)
-		return;
-	const bool settingsOpen = m_playerUi->screens().top() == Screen::Settings && !m_benchmark.isActive();
+	const bool settingsOpen = m_playerUi && !m_uiSpike &&
+		m_playerUi->screens().top() == Screen::Settings && !m_benchmark.isActive();
 	if (m_playerDisplayPreview)
 	{
 		const auto &preview = *m_playerDisplayPreview;
 		const auto now = Clock::now();
-		if (preview.view.phase != DisplayPhase::Restoring && !settingsOpen)
+		const bool startup = preview.operation == DisplayOperation::Startup;
+		if (preview.view.phase != DisplayPhase::Restoring && !settingsOpen && !startup)
 			revertPlayerDisplayPreview();
 		else if (preview.view.phase != DisplayPhase::Restoring && now >= preview.deadline)
-			revertPlayerDisplayPreview(preview.view.phase == DisplayPhase::Applying ?
+			revertPlayerDisplayPreview(startup ? "Could not apply the saved window size. Choose a different size in Settings." :
+				preview.view.phase == DisplayPhase::Applying ?
 				"The display did not apply the requested settings." : "Display preview expired.");
 		else if (preview.view.phase == DisplayPhase::Confirming && preview.view.window &&
 			playerFramebufferSize().width > 0 && windowSize(window) != *preview.view.window)
 			revertPlayerDisplayPreview("The window size changed during the preview.");
 	}
-	const auto request = m_playerUi->takeSettingsRequest();
-	if (settingsOpen && request)
-		handlePlayerSettingsRequest(*request);
+	if (m_playerUi)
+	{
+		const auto request = m_playerUi->takeSettingsRequest();
+		if (settingsOpen && request)
+			handlePlayerSettingsRequest(*request);
+	}
 
 	if (!m_playerDisplayPreview || m_playerDisplayPreview->view.phase != DisplayPhase::Restoring)
 		return;
@@ -340,8 +369,18 @@ void Engine::pumpPlayerSettings()
 		preview.restoreElapsed += now - *preview.restoreCheck;
 	preview.restoreCheck = now;
 	if (std::exchange(preview.restoreWindowPending, false) &&
-		!SDL_SetWindowSize(window, preview.previousWindow.width, preview.previousWindow.height))
+		!m_setPlayerWindowSize(window, preview.previousWindow.width, preview.previousWindow.height))
 		std::cerr << "[ui] SDL refused a display rollback request: " << SDL_GetError() << '\n';
+	if (preview.restoreElapsed < kResizeTimeout)
+		return;
+	if (preview.fallback)
+		throw std::runtime_error("Could not verify a usable display after recovering the Vulkan swapchain");
+	preview.fallback = true;
+	preview.restoreElapsed = {};
+	setVSync(preview.previousVSync);
+	// A failed WSI recreation already requested another one. If this was
+	// only a refused SDL rollback, keep the usable swapchain for the current
+	// framebuffer and verify it by presenting a frame.
 }
 
 WindowSize Engine::playerFramebufferSize() const
@@ -357,42 +396,45 @@ WindowSize Engine::playerFramebufferSize() const
 bool Engine::playerDisplayPreviewMatches(WindowSize framebuffer) const
 {
 	const auto &preview = *m_playerDisplayPreview;
+	if (framebuffer.width <= 0 || framebuffer.height <= 0 || !swapchain->getSwapchain() ||
+		m_swapchainRecreateRequested || m_pendingVSync || m_swapchainFramebuffer != framebuffer ||
+		!m_playerUi->scaleAppliedForWindow(window, preview.view.scale.value_or(preview.previousScale)))
+		return false;
+	if (preview.fallback)
+		return true;
 	const auto extent = swapchain->getExtent();
-	return framebuffer.width > 0 && framebuffer.height > 0 && swapchain->getSwapchain() &&
+	return (!preview.view.window || (windowSize(window) == *preview.view.window &&
 		extent.width == static_cast<uint32_t>(framebuffer.width) &&
-		extent.height == static_cast<uint32_t>(framebuffer.height) &&
-		(!preview.view.window || windowSize(window) == *preview.view.window) &&
-		m_playerUi->scaleAppliedForWindow(window, preview.view.scale.value_or(preview.previousScale)) &&
+		extent.height == static_cast<uint32_t>(framebuffer.height))) &&
 		(!preview.recoveringSwapchain || swapchain->isVSync() == preview.previousVSync);
 }
 
-void Engine::updatePlayerDisplayPreview(WindowSize framebuffer, bool swapchainReady)
+void Engine::notePlayerDisplayFramePresented()
 {
-	if (m_playerDisplayPreview)
+	if (!m_playerDisplayPreview || !m_playerUi || !playerDisplayPreviewMatches(playerFramebufferSize()))
+		return;
+	auto &preview = *m_playerDisplayPreview;
+	preview.presented = true;
+	if (preview.view.phase == DisplayPhase::Applying && preview.operation != DisplayOperation::Startup)
 	{
-		auto &preview = *m_playerDisplayPreview;
-		const bool ready = swapchainReady && playerDisplayPreviewMatches(framebuffer);
-		if (ready && preview.view.phase == DisplayPhase::Applying)
-		{
-			preview.view.phase = DisplayPhase::Confirming;
-			preview.deadline = Clock::now() + kConfirmTimeout;
-		}
-		else if (ready && preview.view.phase == DisplayPhase::Restoring)
-		{
-			if (!m_playerSettingsNotice.empty())
-				m_playerSettingsNotice += " Previous display settings restored.";
-			m_playerDisplayPreview.reset();
-		}
-		else if (preview.view.phase == DisplayPhase::Restoring && preview.restoreCheck &&
-			preview.restoreElapsed >= kResizeTimeout)
-		{
-			if (!swapchainReady)
-				throw std::runtime_error("Could not recreate a usable Vulkan swapchain after rolling back display settings");
-			m_playerSettingsNotice = "Could not verify the previous display settings. Check the window size and try again.";
-			m_playerDisplayPreview.reset();
-		}
+		preview.view.phase = DisplayPhase::Confirming;
+		preview.deadline = Clock::now() + kConfirmTimeout;
 	}
-	publishPlayerSettingsView();
+	if (preview.view.phase == DisplayPhase::Confirming)
+		return;
+	const auto complete = *std::exchange(m_playerDisplayPreview, std::nullopt);
+	if (complete.fallback)
+	{
+		m_playerSettingsNotice = complete.operation == DisplayOperation::Startup ?
+			"Saved window size unavailable. Using the available size. Choose a supported size in Settings." :
+			"Could not restore the previous display exactly. Choose a supported window size in Settings.";
+		if (swapchain->isVSync() != complete.previousVSync)
+			m_playerSettingsNotice += " Using VSync on.";
+	}
+	else if (complete.view.phase == DisplayPhase::Restoring && !m_playerSettingsNotice.empty())
+		m_playerSettingsNotice += " Previous display settings restored.";
+	if (complete.operation == DisplayOperation::Startup)
+		finishStartupDisplay(complete.startupVSync);
 }
 
 void Engine::publishPlayerSettingsView()
@@ -418,11 +460,13 @@ void Engine::publishPlayerSettingsView()
 			view.notice += ' ';
 		view.notice += m_playerUiError;
 	}
-	if (m_playerDisplayPreview)
+	if (m_playerDisplayPreview && m_playerDisplayPreview->operation != DisplayOperation::Startup)
 	{
 		view.display = m_playerDisplayPreview->view;
-		view.display->seconds = static_cast<int>(std::max(0s,
-			std::chrono::ceil<std::chrono::seconds>(m_playerDisplayPreview->deadline - Clock::now())).count());
+		const auto remaining = m_playerDisplayPreview->deadline - Clock::now();
+		view.display->seconds = static_cast<int>(std::max(0s, std::chrono::ceil<std::chrono::seconds>(remaining)).count());
+		view.display->canKeep = view.display->phase == DisplayPhase::Confirming && remaining > 0s &&
+			m_playerDisplayPreview->presented && playerDisplayPreviewMatches(playerFramebufferSize());
 	}
 	m_playerUi->setSettingsView(std::move(view));
 }

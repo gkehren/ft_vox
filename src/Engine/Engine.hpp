@@ -192,11 +192,13 @@ private:
 	void persistPlayerUiPreferences();
 	void pumpPlayerSettings();
 	gameui::WindowSize playerFramebufferSize() const;
-	void updatePlayerDisplayPreview(gameui::WindowSize framebuffer, bool swapchainReady);
+	void notePlayerDisplayFramePresented();
 	bool playerDisplayPreviewMatches(gameui::WindowSize framebuffer) const;
 	void handlePlayerSettingsRequest(const gameui::SettingsRequest &request);
+	enum class DisplayOperation { Preview, Reset, Startup };
 	void beginPlayerDisplayPreview(std::optional<gameui::WindowSize> size,
-		std::optional<gameui::ScalePolicy> scale, bool reset = false);
+		std::optional<gameui::ScalePolicy> scale, DisplayOperation operation = DisplayOperation::Preview);
+	void finishStartupDisplay(std::optional<bool> vsync);
 	void revertPlayerDisplayPreview(std::string_view notice = {});
 	void publishPlayerSettingsView();
 	void requestPlayerVSync(bool enabled, bool persist);
@@ -392,6 +394,9 @@ private:
 	bool running{false};
 	bool mouseCaptured{true};
 	bool m_swapchainRecreateRequested{false};
+	// SDL framebuffer last used to configure the current swapchain. The
+	// supported Vulkan extent can differ when the surface clamps this size.
+	gameui::WindowSize m_swapchainFramebuffer{};
 	std::optional<bool> m_pendingVSync;
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
@@ -519,12 +524,17 @@ private:
 		std::chrono::steady_clock::time_point deadline;
 		std::optional<std::chrono::steady_clock::time_point> restoreCheck;
 		std::chrono::steady_clock::duration restoreElapsed{};
-		bool reset{};
+		DisplayOperation operation{};
+		std::optional<bool> startupVSync;
 		bool previousVSync{};
 		bool restoreWindowPending{};
 		bool recoveringSwapchain{};
+		bool presented{};
+		bool fallback{};
+		unsigned fallbackAttempts{};
 	};
 	std::optional<DisplayPreview> m_playerDisplayPreview;
+	decltype(&SDL_SetWindowSize) m_setPlayerWindowSize{SDL_SetWindowSize};
 	std::vector<std::string> m_joinProfiles;
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;

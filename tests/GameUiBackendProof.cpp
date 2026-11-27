@@ -61,6 +61,33 @@ struct SwapchainCreationFailure
 	}
 };
 
+struct WindowRollbackOverride
+{
+	static inline gameui::WindowSize target{};
+	static inline std::optional<gameui::WindowSize> substitute;
+	static inline int calls{};
+	decltype(&SDL_SetWindowSize) &setter;
+
+	WindowRollbackOverride(decltype(&SDL_SetWindowSize) &hook, gameui::WindowSize previous,
+		std::optional<gameui::WindowSize> replacement) : setter(hook)
+	{
+		target = previous;
+		substitute = replacement;
+		calls = 0;
+		setter = apply;
+	}
+	~WindowRollbackOverride() { setter = SDL_SetWindowSize; }
+
+	static bool SDLCALL apply(SDL_Window *window, int width, int height)
+	{
+		if (gameui::WindowSize{width, height} != target)
+			return SDL_SetWindowSize(window, width, height);
+		++calls;
+		return substitute ? SDL_SetWindowSize(window, substitute->width, substitute->height) :
+			SDL_SetError("injected window rollback refusal");
+	}
+};
+
 struct Readback
 {
 	VkContext &context;
@@ -1139,12 +1166,12 @@ struct GameUiBackendProbe
 		const auto size = engine.playerFramebufferSize();
 		const bool ready = size.width > 0 && size.height > 0 &&
 			engine.recreateSwapchainIfNeeded(uint32_t(size.width), uint32_t(size.height));
-		engine.updatePlayerDisplayPreview(size, ready);
 		if (!ready)
 		{
 			prof.endFrame();
 			return;
 		}
+		engine.publishPlayerSettingsView();
 		uint32_t image = 0;
 		checked(engine.frameCtx->beginFrame(*engine.swapchain, image), "acquire Game UI proof frame");
 		const uint32_t slot = engine.frameCtx->frameIndex();
@@ -1160,9 +1187,11 @@ struct GameUiBackendProbe
 				extraDevUi();
 			engine.imgui->endFrame();
 		}
-		engine.updateFrameUniforms(slot, size.width, size.height, 5.f);
+		const auto renderExtent = engine.swapchain->getExtent();
+		engine.updateFrameUniforms(slot, int(renderExtent.width), int(renderExtent.height), 5.f);
 		engine.recordFrame(slot, image, 0, gpuTag);
 		checked(engine.frameCtx->submitAndPresent(*engine.swapchain, image), "present Game UI proof frame");
+		engine.notePlayerDisplayFramePresented();
 		engine.noteSessionFramePresented();
 		++engine.frameNumber;
 		prof.endFrame();
@@ -2252,6 +2281,70 @@ struct GameUiBackendProbe
 				!fs::exists(record) && sample.m_settingsView.notice.find("Previous display settings restored") != std::string::npos,
 			"recovery refreshes swapchain consumers and verifies a successful rollback before reporting it");
 
+		// T12–T14. Retire the old swapchain, then let the SDL rollback fail
+		// or produce a different logical size. Advance only the recovery clock.
+		const auto degradedRecovery = [&](std::optional<WindowSize> substitute, bool failFallback) {
+			const WindowSize previous{960, 540}, requested{1280, 720};
+			const auto before = engine.frameNumber;
+			const auto bytes = readText(record);
+			WindowRollbackOverride rollback(engine.m_setPlayerWindowSize, previous, substitute);
+			engine.handlePlayerSettingsRequest(PreviewDisplay{requested, ScalePolicy{ScaleMode::Fixed, 1.25f}});
+			checked(SDL_SyncWindow(engine.window), "apply candidate size for degraded recovery");
+			{
+				SwapchainCreationFailure refusal(VK_ERROR_INITIALIZATION_FAILED);
+				present();
+				checked(refusal.calls == 1 && !engine.swapchain->getSwapchain() &&
+					engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->recoveringSwapchain,
+					"fail initial swapchain creation before degraded recovery");
+			}
+			present();
+			checked(SDL_SyncWindow(engine.window), "observe the SDL rollback outcome");
+			CHECK(rollback.calls == 1 && engine.frameNumber == before && readText(record) == bytes &&
+					engine.m_playerDisplayPreview && !engine.m_playerDisplayPreview->fallback,
+				"exact restoration is attempted before fallback and acquisition remains suspended");
+			engine.m_playerDisplayPreview->restoreElapsed = std::chrono::seconds(3);
+			if (failFallback)
+			{
+				SwapchainCreationFailure refusal(VK_ERROR_INITIALIZATION_FAILED);
+				present();
+				bool fatal = false;
+				try
+				{
+					const auto size = extent();
+					engine.recreateSwapchainIfNeeded(size.width, size.height);
+				}
+				catch (const SwapchainConfigurationError &)
+				{
+				}
+				catch (const std::runtime_error &e)
+				{
+					fatal = std::string_view(e.what()).starts_with("Could not recreate a usable Vulkan swapchain");
+				}
+				CHECK(fatal && refusal.calls == 2 && !engine.swapchain->getSwapchain() &&
+						engine.frameNumber == before && readText(record) == bytes,
+					"bounded fallback failures propagate a controlled error without acquiring a frame");
+			}
+			else
+			{
+				frames(3);
+				const auto extent = engine.swapchain->getExtent();
+				CHECK(!engine.m_playerDisplayPreview && engine.swapchain->getSwapchain() &&
+						engine.frameNumber >= before + 3 && !engine.m_swapchainRecreateRequested &&
+						engine.windowWidth == int(extent.width) && engine.windowHeight == int(extent.height) &&
+						sample.m_settingsView.window == substitute.value_or(requested) &&
+						sample.scalePolicyApplied({ScaleMode::Fixed, 1.f}) && engine.swapchain->isVSync() &&
+						sample.m_settingsView.notice.find("Could not restore the previous display exactly") != std::string::npos &&
+						readText(record) == bytes && !fs::exists(record),
+					"degraded recovery presents with refreshed consumers and leaves the record untouched");
+			}
+			engine.m_playerDisplayPreview.reset();
+			resize(previous.width, previous.height);
+			frames(2);
+		};
+		degradedRecovery(std::nullopt, false);
+		degradedRecovery(WindowSize{1100, 680}, false);
+		degradedRecovery(std::nullopt, true);
+
 		engine.beginPlayerDisplayPreview(WindowSize{1280, 720}, std::nullopt);
 		SDL_SyncWindow(engine.window);
 		const auto fatalExtent = extent();
@@ -2300,7 +2393,8 @@ struct GameUiBackendProbe
 			"restoring the window verifies the expired preview was rolled back");
 		stageDisplay();
 		tap(SDLK_ESCAPE);
-		present();
+		engine.handleEvents();
+		engine.pumpPlayerSettings();
 		checked(engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->view.phase == DisplayPhase::Restoring,
 			"rollback waits for the previous scale frame");
 		engine.m_playerDisplayPreview->restoreCheck = std::chrono::steady_clock::now() - std::chrono::seconds(10);
@@ -2316,7 +2410,51 @@ struct GameUiBackendProbe
 		CHECK(!sample.m_settingsView.display && sample.m_settingsView.window == (WindowSize{960, 540}) &&
 				sample.playerUiScale() == 1.f && !fs::exists(record) && sample.m_settingsView.notice.empty(),
 			"the interrupted rollback verifies on restore without reporting a false failure");
+		// T17. A refusal while confirmation is already visible still owns
+		// the original rollback context.
 		stageDisplay();
+		engine.requestSwapchainRecreate();
+		{
+			SwapchainCreationFailure refusal(VK_ERROR_INITIALIZATION_FAILED);
+			present();
+			CHECK(refusal.calls == 1 && engine.m_playerDisplayPreview &&
+					engine.m_playerDisplayPreview->view.phase == DisplayPhase::Restoring &&
+					!engine.swapchain->getSwapchain() && !fs::exists(record),
+				"a failed recreation during confirmation enters rollback without persisting");
+		}
+		present();
+		SDL_SyncWindow(engine.window);
+		frames(2);
+		CHECK(!engine.m_playerDisplayPreview && sample.m_settingsView.window == (WindowSize{960, 540}) &&
+				sample.scalePolicyApplied({ScaleMode::Fixed, 1.f}) && !fs::exists(record),
+			"failed confirmation recreation restores the original configuration");
+
+		// T15, T16 and T18. Test the Engine gate before recreation and
+		// between recreation and the first successful presentation.
+		stageDisplay();
+		checked(engine.m_playerDisplayPreview.has_value(), "start confirmation recreation checks");
+		const auto originalDeadline = engine.m_playerDisplayPreview->deadline;
+		engine.requestSwapchainRecreate();
+		engine.handlePlayerSettingsRequest(SettingsAction::Keep);
+		engine.publishPlayerSettingsView();
+		CHECK(!fs::exists(record) && sample.m_settingsView.display && !sample.m_settingsView.display->canKeep,
+			"pending recreation disables Keep in the view and at the Engine boundary");
+		const auto presentExtent = extent();
+		checked(engine.recreateSwapchainIfNeeded(presentExtent.width, presentExtent.height),
+			"recreate the candidate without presenting");
+		engine.handlePlayerSettingsRequest(SettingsAction::Keep);
+		CHECK(!fs::exists(record) && engine.m_playerDisplayPreview && !engine.m_playerDisplayPreview->presented,
+			"a new swapchain must present before confirmation can persist");
+		for (int i = 0; i < 2; ++i)
+		{
+			engine.requestSwapchainRecreate();
+			sample.m_settingsRequest = SettingsAction::Keep;
+			present();
+		}
+		frames(2);
+		CHECK(!fs::exists(record) && sample.m_settingsView.display && sample.m_settingsView.display->canKeep &&
+				engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->deadline == originalDeadline,
+			"successful presentation re-enables Keep and repeated recreation keeps the original deadline");
 		tap(SDLK_TAB, SDL_KMOD_SHIFT);
 		tap(SDLK_RETURN);
 		present();
@@ -2382,7 +2520,7 @@ struct GameUiBackendProbe
 		engine.camera.setMouseSensitivity(0.1f);
 		present();
 		engine.loadPlayerUiPreferences();
-		present();
+		frames(3);
 		CHECK(sample.m_settingsView.window == saved.window && sample.scalePolicy() == saved.scale &&
 				sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa &&
 				sample.m_settingsView.sensitivity == saved.sensitivity && sample.m_settingsView.invertY,
@@ -2483,10 +2621,17 @@ struct GameUiBackendProbe
 	void playerSettingsRestartProof(const std::filesystem::path &out)
 	{
 		using namespace gameui;
+		namespace fs = std::filesystem;
 		ImGui::GetIO().IniFilename = nullptr;
-		engine.setSavesRootForTests(out / "saves");
+		const auto root = out / "saves";
+		engine.setSavesRootForTests(root);
 		const auto record = engine.m_savesRoot / kPlayerSettingsPath;
+		fs::last_write_time(record, fs::file_time_type::clock::now() - std::chrono::hours(1));
+		const auto savedWriteTime = fs::last_write_time(record);
 		const auto bytes = readText(record);
+		auto &device = *engine.vkContext;
+		const auto errors = device.validationErrorCount();
+		const auto rtss = device.rtssValidationErrorCount();
 		PlayerUiSettings saved;
 		checked(saved.load(record) == LoadStatus::Ok, "load the previous process's Settings proof fixture");
 		engine.loadPlayerUiPreferences();
@@ -2497,15 +2642,128 @@ struct GameUiBackendProbe
 		auto &sample = *engine.m_playerUi;
 		sample.openScreen(Screen::Settings);
 		windowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED);
-		frames(2);
+		frames(3);
 		CHECK(saved.window == (WindowSize{1280, 720}) && saved.scale == (ScalePolicy{ScaleMode::Fixed, 1.25f}) &&
 				saved.sensitivity == 125 && saved.invertY && !saved.fxaa,
 			"restart fixture contains preferences changed in the previous process");
-		CHECK(sample.m_settingsView.window == saved.window && sample.scalePolicyApplied(saved.scale) &&
+		CHECK(!engine.m_playerDisplayPreview && !sample.m_settingsView.display &&
+				sample.m_settingsView.window == saved.window && sample.scalePolicyApplied(saved.scale) &&
 				sample.m_settingsView.vsync == saved.vsync && sample.m_settingsView.fxaa == saved.fxaa &&
 				engine.camera.getMouseSensitivity() == cameraSensitivity(saved.sensitivity) &&
-				sample.m_settingsView.invertY == saved.invertY && readText(record) == bytes,
+				sample.m_settingsView.invertY == saved.invertY && readText(record) == bytes &&
+				fs::last_write_time(record) == savedWriteTime,
 			"a fresh client process applies the persisted values without rewriting the record");
+
+		const WindowSize initial{1600, 900};
+		const auto startFromWorkingWindow = [&] {
+			engine.setVSync(true);
+			resize(initial.width, initial.height);
+			engine.showMainMenu();
+			frames(2);
+			engine.loadPlayerUiPreferences();
+			checked(SDL_SyncWindow(engine.window), "apply the saved startup resize");
+			checked(engine.m_playerDisplayPreview &&
+					engine.m_playerDisplayPreview->operation == Engine::DisplayOperation::Startup,
+				"startup owns a display transaction without interactive confirmation");
+		};
+		const auto rejectStartup = [&] {
+			SwapchainCreationFailure refusal(VK_ERROR_INITIALIZATION_FAILED);
+			const auto before = engine.frameNumber;
+			present();
+			CHECK(refusal.calls == 1 && engine.frameNumber == before && !engine.swapchain->getSwapchain() &&
+					engine.m_playerDisplayPreview && engine.m_playerDisplayPreview->recoveringSwapchain &&
+					readText(record) == bytes,
+				"startup resize refusal suspends acquisition and preserves the saved record");
+		};
+
+		// T19. Restore the initial viewport exactly and keep the native menu usable.
+		engine.setPlayerSettingsOverrides(true, false);
+		startFromWorkingWindow();
+		rejectStartup();
+		present();
+		SDL_SyncWindow(engine.window);
+		frames(3);
+		CHECK(engine.swapchain->getSwapchain() && !engine.m_playerDisplayPreview &&
+				sample.screens().top() == Screen::MainMenu && extent().width == uint32_t(initial.width) &&
+				engine.swapchain->isVSync() && sample.scalePolicyApplied(saved.scale) &&
+				engine.m_playerSettingsNotice.find("rejected the saved window size") != std::string::npos &&
+				readText(record) == bytes,
+			"startup rejection restores a usable menu with the initial size, CLI mode and saved scale");
+
+		// T20. Reject the saved size and make the window manager restore a
+		// different geometry. The pending VSync choice still gets its own apply.
+		engine.setPlayerSettingsOverrides(false, false);
+		startFromWorkingWindow();
+		CHECK(engine.m_playerDisplayPreview->startupVSync == saved.vsync && !engine.m_pendingVSync &&
+				engine.swapchain->isVSync(), "startup holds the saved present mode until size verification");
+		rejectStartup();
+		const WindowSize fallback{1100, 680};
+		{
+			WindowRollbackOverride rollback(engine.m_setPlayerWindowSize, initial, fallback);
+			present();
+			checked(SDL_SyncWindow(engine.window), "apply the startup fallback geometry");
+			checked(engine.m_playerDisplayPreview && rollback.calls == 1, "attempted the original startup size first");
+			engine.m_playerDisplayPreview->restoreElapsed = std::chrono::seconds(3);
+			present();
+		}
+		frames(3);
+		CHECK(!engine.m_playerDisplayPreview && sample.screens().top() == Screen::MainMenu &&
+				engine.swapchain->getSwapchain() && extent().width == uint32_t(fallback.width) &&
+				engine.swapchain->isVSync() == saved.vsync && engine.m_playerUiSettings == saved &&
+				engine.camera.getMouseSensitivity() == cameraSensitivity(saved.sensitivity) &&
+				engine.worldRenderer->postSettings().fxaaEnabled == saved.fxaa &&
+				engine.m_playerSettingsNotice.find("Saved window size unavailable") != std::string::npos &&
+				readText(record) == bytes, "startup fallback keeps unrelated preferences and applies the parked VSync choice");
+
+		// The fallback remains usable through a subsequent, explicit replacement.
+		engine.setSavesRootForTests(out / "startup-replacement");
+		const auto replacementRecord = engine.m_savesRoot / kPlayerSettingsPath;
+		fs::create_directories(replacementRecord.parent_path());
+		fs::copy_file(record, replacementRecord);
+		sample.openScreen(Screen::Settings);
+		present();
+		const WindowSize replacement{960, 540};
+		engine.handlePlayerSettingsRequest(PreviewDisplay{replacement, std::nullopt});
+		SDL_SyncWindow(engine.window);
+		frames(2);
+		engine.handlePlayerSettingsRequest(SettingsAction::Keep);
+		PlayerUiSettings replacementSaved;
+		auto expected = saved;
+		expected.window = replacement;
+		CHECK(replacementSaved.load(replacementRecord) == LoadStatus::Ok && replacementSaved == expected &&
+				!engine.m_playerDisplayPreview && readText(record) == bytes,
+			"the player can explicitly confirm a replacement after startup recovery");
+
+		// T22. The injected error never reaches the driver, but Engine must
+		// propagate it without transitioning to rollback or acquiring an image.
+		engine.setSavesRootForTests(root);
+		startFromWorkingWindow();
+		const auto size = extent();
+		const auto beforeFatal = engine.frameNumber;
+		{
+			SwapchainCreationFailure fatal(VK_ERROR_DEVICE_LOST);
+			bool propagated = false;
+			try
+			{
+				engine.recreateSwapchainIfNeeded(size.width, size.height);
+			}
+			catch (const SwapchainConfigurationError &)
+			{
+			}
+			catch (const std::runtime_error &)
+			{
+				propagated = true;
+			}
+			CHECK(fatal.calls == 1 && propagated && !engine.swapchain->getSwapchain() &&
+					engine.frameNumber == beforeFatal && engine.m_playerDisplayPreview &&
+					engine.m_playerDisplayPreview->view.phase == DisplayPhase::Applying &&
+					!engine.m_playerDisplayPreview->recoveringSwapchain && readText(record) == bytes &&
+					fs::last_write_time(record) == savedWriteTime,
+				"fatal Vulkan creation errors propagate from startup without configuration recovery");
+		}
+		device.waitIdle();
+		CHECK(device.validationErrorCount() - errors == device.rtssValidationErrorCount() - rtss,
+			"startup recovery has no unexpected Vulkan validation diagnostics");
 	}
 
 	void playerInventoryProof()
