@@ -46,8 +46,9 @@ public:
 	void push(float v);
 	void clear() { m_count = 0; }
 	size_t count() const { return m_count; }
-	/// Chronological (oldest first) view for plotting; empty when no sample.
-	const float *data() const { return m_samples.data(); }
+	/// Raw ring for CPU timing statistics. Use copyOrdered() for plots.
+	const auto &storage() const { return m_samples; }
+	size_t nextWrite() const { return m_write; }
 	float latest() const { return m_count ? m_samples[(m_write + kMetricHistorySize - 1) % kMetricHistorySize] : 0.f; }
 	/// Value from roughly `back` samples ago (0 = latest), clamped.
 	float back(size_t backIndex) const;
@@ -95,6 +96,7 @@ struct FrameDebugSnapshot
 	/// simulation delta — they diverge whenever pacing clamps dt or a stall
 	/// is absorbed by the frame clock (issue #179 review).
 	float cpuFrameMs{0.f};
+	bool cpuCaptureEnabled{true};
 	/// Paced simulation delta fed to gameplay ticks, kept separate so the
 	/// two can never be conflated again.
 	float simulationDtMs{0.f};
@@ -302,11 +304,16 @@ public:
 	std::array<ScopeStats, kMaxScopeStats> scopeStats{};
 	size_t scopeStatCount{0};
 	int selectedScopeGraph{-1}; // row highlighted/plotted, -1 = none
-	/// Profiler capture epoch at the last scope-stat sample. A change
-	/// (Clear history button, world reload, any Profiler::clearHistory)
-	/// resets the accumulated table so avg/peak/history never blend two
-	/// capture windows.
-	uint64_t lastProfilerEpoch{0};
+	uint64_t lastProfilerEpoch{};
+	uint64_t lastCpuFrameSerial{};
+	bool cpuStatsPending{};
+	bool scopeHistoryPending{};
+	bool cpuHealthHasBaseline{};
+
+	// GPU timing is global. The Overview ring stores distinct reads made
+	// during the visible interval, including delayed measurements.
+	std::optional<uint64_t> gpuCaptureGeneration;
+	uint64_t lastGpuObservationSerial{};
 
 	// Chunk inspector selection (chunk coordinates; Y is always 0 today).
 	glm::ivec3 inspectCoord{0, 0, 0};

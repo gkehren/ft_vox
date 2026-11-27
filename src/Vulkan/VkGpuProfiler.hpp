@@ -24,6 +24,8 @@ public:
     void setEnabled(bool enabled);
     bool enabled() const { return m_enabled; }
     bool supported() const { return m_supported; }
+    uint64_t captureEpoch() const { return m_epoch; }
+    uint64_t captureGeneration() const { return m_generation; }
     const char *status() const;
     const GpuFrameSample &latest() const { return m_latest; }
     const float *history() const { return m_history.data(); }

@@ -1179,6 +1179,7 @@ struct GameUiBackendProbe
 		}
 		engine.publishPlayerSettingsView();
 		uint32_t image = 0;
+		engine.frameCtx->gpuProfiler().syncCapture(prof.captureEpoch());
 		checked(engine.frameCtx->beginFrame(*engine.swapchain, image), "acquire Game UI proof frame");
 		const uint32_t slot = engine.frameCtx->frameIndex();
 		engine.resourceRetire.beginFrame(engine.frameNumber);
@@ -3658,6 +3659,7 @@ struct GameUiBackendProbe
 		frames(2);
 		const auto *graphics = ImGui::FindWindowByName(ui::windows::kGraphics);
 		CHECK(graphics && graphics->DockId == 0, "reset undocks Graphics");
+		profilingControlsProof();
 		shell.queueDefaultLayout();
 		frames(2);
 		graphics = ImGui::FindWindowByName(ui::windows::kGraphics);
@@ -3691,6 +3693,78 @@ struct GameUiBackendProbe
 			frames(3);
 			captureWorkspace("player-hud.png");
 		}
+	}
+
+	void profilingControlsProof()
+	{
+		auto &prof = GetProfiler();
+		auto &gpu = engine.frameCtx->gpuProfiler();
+		const auto &debug = engine.developerUi->m_debug;
+		checked(engine.setMouseCaptured(false), "release mouse for real Performance controls");
+		present([] { ImGui::SetWindowFocus(ui::windows::kPerformance); });
+		frames(3);
+		const auto *window = ImGui::FindWindowByName(ui::windows::kPerformance);
+		checked(window && window->Active && !window->Collapsed, "Performance controls are visible");
+		const auto origin = ImGui::GetMainViewport()->Pos;
+		const auto start = window->DC.CursorStartPos;
+		const float height = ImGui::GetFrameHeight();
+		const auto &style = ImGui::GetStyle();
+		const glm::vec2 captureButton{start.x - origin.x + height * 0.5f, start.y - origin.y + height * 0.5f};
+		const glm::vec2 clearButton{
+			start.x - origin.x + height + style.ItemInnerSpacing.x + ImGui::CalcTextSize("Capture").x +
+				style.ItemSpacing.x + style.FramePadding.x + ImGui::CalcTextSize("Clear history").x * 0.5f,
+			captureButton.y};
+		checked(prof.enabled() && debug.cpuFrameTimes.count() > 0, "CPU capture is producing Performance samples");
+
+		clickAt(captureButton);
+		for (int frame = 0; frame < 4 && prof.enabled(); ++frame)
+			present();
+		checked(!prof.enabled(), "clicking the actual Capture checkbox pauses the profiler");
+		const auto pausedSerial = prof.completedFrameSerial();
+		const auto pausedFrames = debug.cpuFrameTimes.count();
+		const auto pausedHistory = debug.cpuMs.count();
+		frames(4);
+		CHECK(prof.completedFrameSerial() == pausedSerial && debug.cpuFrameTimes.count() == pausedFrames &&
+			debug.cpuMs.count() == pausedHistory, "the Performance Capture control freezes CPU collection");
+
+		clickAt(captureButton);
+		for (int frame = 0; frame < 4 && !prof.enabled(); ++frame)
+			present();
+		checked(prof.enabled(), "clicking the Capture checkbox again enables capture");
+		frames(4);
+		CHECK(prof.completedFrameSerial() > pausedSerial && debug.cpuFrameTimes.count() > pausedFrames,
+			"reenabling Capture collects fresh frames through the real UI");
+
+		const auto oldEpoch = prof.captureEpoch();
+		clickAt(clearButton);
+		for (int frame = 0; frame < 4 && prof.captureEpoch() == oldEpoch; ++frame)
+			present();
+		const auto clearedEpoch = prof.captureEpoch();
+		checked(clearedEpoch != oldEpoch, "clicking Clear history advances the capture epoch");
+		CHECK(prof.historyCount() == 0 && debug.cpuFrameTimes.count() == 0 && debug.cpuMs.count() == 0 &&
+			debug.scopeStatCount == 0 && debug.frame.avgMs == 0.f && debug.frame.onePercentLowMs == 0.f &&
+			debug.gpuMs.count() == 0 && !debug.frame.gpuValid, "Clear history clears CPU and GPU displays immediately");
+		frames(4);
+		for (int round = 0; round < 2; ++round)
+		{
+			const auto cpuSerial = prof.completedFrameSerial();
+			const auto gpuGeneration = gpu.captureGeneration();
+			const auto gpuSerial = gpu.latest().serial;
+			const auto imGuiFrame = ImGui::GetFrameCount();
+			tap(SDLK_F1);
+			frames(4);
+			CHECK(!engine.developerWorkspaceVisible() && ImGui::GetFrameCount() == imGuiFrame &&
+				prof.completedFrameSerial() > cpuSerial &&
+				(!gpu.supported() || !gpu.enabled() || gpu.latest().serial > gpuSerial),
+				"Engine capture continues while F1 hides the workspace");
+			tap(SDLK_F1);
+			present();
+			CHECK(engine.developerWorkspaceVisible() && debug.cpuFrameTimes.count() == 0 &&
+				gpu.captureGeneration() == gpuGeneration && prof.captureEpoch() == clearedEpoch,
+				"reopening restarts local CPU sampling without resetting Engine capture");
+			frames(3);
+		}
+		checked(engine.setMouseCaptured(true), "restore gameplay capture after the profiling proof");
 	}
 
 	void workspaceCursorAndResizeProof()

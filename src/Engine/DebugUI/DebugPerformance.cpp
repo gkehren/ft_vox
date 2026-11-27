@@ -6,6 +6,7 @@
 // controls moved to the dedicated Benchmark panel.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/DebugUI/DebugUiEngine.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/DeveloperUi.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
@@ -47,15 +48,22 @@ void drawPerformance(UiState &s, DeveloperUiFrame &frame)
 
 	bool capturing = prof.enabled();
 	if (ImGui::Checkbox("Capture", &capturing))
+	{
 		prof.setEnabled(capturing);
+		syncDebugCpuCapture(s, prof);
+	}
 	ImGui::SameLine();
 	if (ImGui::Button("Clear history"))
 	{
 		prof.clearHistory();
-		if (frame.gpu) frame.gpu->syncCapture(prof.captureEpoch());
+		const auto epoch = prof.captureEpoch();
+		if (frame.gpu)
+			frame.gpu->syncCapture(epoch);
+		syncDebugCpuCapture(s, prof);
+		syncDebugGpuCapture(s, frame.gpu, epoch);
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("CPU scopes · previous frame");
+	ImGui::TextDisabled(capturing ? "CPU capture running" : "CPU capture paused");
 
 	if (frame.gameUiStats)
 	{
@@ -249,15 +257,19 @@ void drawPerformance(UiState &s, DeveloperUiFrame &frame)
 
 	// --- GPU ---
 	ImGui::SeparatorText("GPU frame / passes");
-	ImGui::TextDisabled("Engine capture includes frames with the workspace hidden.");
+	ImGui::TextDisabled("Global Engine capture. Delayed results can include hidden frames.");
 	if (frame.gpu)
 	{
 		auto &gpu = *frame.gpu;
 		bool enabled = gpu.enabled();
-		if (ImGui::Checkbox("GPU timestamps", &enabled)) gpu.setEnabled(enabled);
+		if (ImGui::Checkbox("GPU timestamps", &enabled))
+		{
+			gpu.setEnabled(enabled);
+			syncDebugGpuCapture(s, &gpu, prof.captureEpoch());
+		}
 		ImGui::TextDisabled("%s", gpu.status());
 		const GpuFrameSample &latest = gpu.latest();
-		if (latest.serial)
+		if (s.frame.gpuValid)
 		{
 			float maxPass = 0.001f;
 			for (size_t i = 0; i < kGpuPassCount; ++i)

@@ -174,7 +174,7 @@ void DeveloperUi::draw(DeveloperUiFrame &frame)
 	// Refresh debug snapshots/histories/health first (issue #179). Throttled
 	// internally; heavy sampling only runs while a consumer panel is open.
 	const double now = static_cast<double>(SDL_GetTicksNS()) * 1e-9;
-	if (m_lastDrawAt >= 0.0 && now - m_lastDrawAt > 0.5)
+	if (m_lastDrawAt < 0.0 || now - m_lastDrawAt > 0.5)
 		m_debug.interruptSampling();
 	m_lastDrawAt = now;
 	debugui::updateDebugUiState(m_debug, frame, now);
@@ -204,11 +204,12 @@ void DeveloperUi::draw(DeveloperUiFrame &frame)
 		drawPlayerPanel(frame);
 	if (m_debug.panels.multiplayer)
 		drawMultiplayerPanel(frame);
+	// Capture controls can clear the histories before Overview draws them.
+	debugui::drawPerformance(m_debug, frame);
 	debugui::drawOverview(m_debug, frame);
 	debugui::drawRendering(m_debug, frame);
 	debugui::drawRenderDebug(m_debug, frame);
 	debugui::drawStreaming(m_debug, frame);
-	debugui::drawPerformance(m_debug, frame);
 	debugui::drawPlayerDiagnostics(m_debug, frame);
 	debugui::drawChunkInspector(m_debug, frame);
 	debugui::drawMemory(m_debug, frame);

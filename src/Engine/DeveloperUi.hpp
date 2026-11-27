@@ -345,6 +345,8 @@ public:
 	void recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing);
 
 private:
+	friend struct GameUiBackendProbe;
+
 	struct BiomeMapJob
 	{
 		uint64_t requestId{0};

@@ -10,6 +10,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/Profiler.hpp>
+#include <Vulkan/VkGpuProfiler.hpp>
 
 #include <array>
 #include <chrono>
@@ -35,6 +36,17 @@ struct RenderBridgeProbe
 	static void recordEvent(RenderWorldBridge &m, Chunk *c, const char *kind, uint32_t sections = 0)
 	{
 		m.recordChunkEvent(c, kind, sections);
+	}
+};
+
+// Publish known frame/scope times through the normal profiler finalizer.
+struct ProfilerStateProbe
+{
+	static void publish(Profiler &profiler, float ms)
+	{
+		profiler.m_entryCount = 1;
+		profiler.m_entries[0] = {"Fixture", 0.f, ms * 0.5f};
+		profiler.finalizeFrame(ms);
 	}
 };
 
@@ -372,6 +384,182 @@ void testScopeStatsLifecycle()
 	CHECK(state.selectedScopeGraph == -1, "plot selection cleared on epoch change");
 	std::cout << "PASS\n";
 }
+
+void testCpuCaptureLifecycle()
+{
+	std::cout << "[CPU capture freshness] ";
+	auto &prof = GetProfiler();
+	prof.setEnabled(true);
+	prof.clearHistory();
+	debugui::UiState state;
+	state.panels.overview = state.panels.performance = true;
+	DeveloperUiFrame frame{};
+	const auto draw = [&](double t) { debugui::updateDebugUiState(state, frame, t); };
+	const auto capture = [&](double t, float ms) {
+		ProfilerStateProbe::publish(prof, ms);
+		draw(t);
+	};
+	capture(700.0, 45.f);
+	CHECK(state.cpuFrameTimes.count() == 1 && state.cpuMs.count() == 1 &&
+		  state.scopeStats[0].frames == 1 && state.scopeStats[0].history.count() == 1,
+		  "a completed frame is sampled into the CPU views and 10 Hz histories");
+	for (int i = 1; i <= 4; ++i)
+		draw(700.0 + i * 0.25);
+	CHECK(state.cpuFrameTimes.count() == 1 && state.cpuMs.count() == 1 &&
+		  state.scopeStats[0].frames == 1 && state.scopeStats[0].history.count() == 1,
+		  "repeated reads neither fold nor plot the same completed CPU frame");
+	CHECK(!state.health.slowFrames.active() && state.health.slowFrames.conditionSeconds() == 0.f,
+		  "a repeated slow sample does not create a sustained alert");
+
+	capture(701.01, 50.f); // inside the 10 Hz window, so sampling is pending
+	CHECK(state.cpuFrameTimes.count() == 2 && state.frame.avgMs == 45.f,
+		  "CPU summaries remain throttled when a new frame arrives");
+	const auto serial = prof.completedFrameSerial();
+	prof.beginFrame();
+	prof.setEnabled(false);
+	prof.endFrame();
+	CHECK(prof.completedFrameSerial() == serial, "pausing mid-frame discards the partial capture");
+	for (int i = 1; i <= 6; ++i)
+		draw(701.0 + i * 0.5);
+	CHECK(!state.frame.cpuCaptureEnabled && state.cpuFrameTimes.count() == 2 && state.cpuMs.count() == 1 &&
+		  state.frame.avgMs == 45.f && state.scopeStats[0].frames == 2 && state.scopeStats[0].history.count() == 1,
+		  "Capture off freezes all CPU statistics, including previously pending samples");
+	CHECK(!state.health.slowFrames.active(), "Capture off cannot raise a slow-frame alert");
+
+	prof.setEnabled(true);
+	draw(704.25);
+	CHECK(state.cpuFrameTimes.count() == 2 && state.scopeStats[0].frames == 2,
+		  "reenabling does not take a second copy of the frozen frame");
+	capture(704.5, 55.f);
+	CHECK(state.cpuFrameTimes.count() == 3 && state.cpuMs.count() == 2 &&
+		  state.scopeStats[0].frames == 3 && state.scopeStats[0].history.count() == 2,
+		  "the next completed frame restarts all enabled sampling");
+
+	state.health.slowFrames.update(true, 3.f);
+	prof.clearHistory();
+	debugui::syncDebugCpuCapture(state, prof); // the Clear history control uses this immediately
+	CHECK(state.cpuFrameTimes.count() == 0 && state.cpuMs.count() == 0 && state.scopeStatCount == 0 &&
+		  state.frame.avgMs == 0.f && state.frame.onePercentLowMs == 0.f && state.frame.cpuFrameMs == 0.f &&
+		  !state.health.slowFrames.active(), "Clear history immediately resets every local CPU metric and baseline");
+	capture(705.0, 10.f);
+	CHECK(state.cpuFrameTimes.count() == 1 && state.frame.avgMs == 10.f,
+		  "the next epoch starts with one new sample");
+	prof.clearHistory(); // external capture-epoch change, as in world reload
+	capture(705.25, 20.f);
+	CHECK(state.cpuFrameTimes.count() == 1 && state.scopeStats[0].frames == 1 &&
+		  state.frame.avgMs == 20.f && state.frame.onePercentLowMs == 20.f,
+		  "an external epoch reset does not mix data even when a fresh frame is already published");
+
+	state.interruptSampling();
+	ProfilerStateProbe::publish(prof, 60.f);
+	draw(706.0);
+	CHECK(prof.historyCount() == 2 && state.cpuFrameTimes.count() == 0 && state.scopeStatCount == 0,
+		  "reopening skips the prior hidden CPU frame without resetting global capture");
+	capture(706.25, 15.f);
+	CHECK(prof.historyCount() == 3 && state.cpuFrameTimes.count() == 1,
+		  "local sampling starts again as global capture continues");
+	prof.clearHistory();
+	std::cout << "PASS\n";
+}
+
+void testCpuMetricWindows()
+{
+	std::cout << "[Shared CPU metric windows] ";
+	auto &prof = GetProfiler();
+	prof.clearHistory();
+	debugui::UiState state;
+	state.panels.overview = true;
+	DeveloperUiFrame frame{};
+	double now = 800.0;
+	const auto capture = [&](float ms) {
+		ProfilerStateProbe::publish(prof, ms);
+		debugui::updateDebugUiState(state, frame, now);
+		now += 0.125;
+		CHECK(state.frame.avgMs == prof.avgFrameMs() && state.frame.onePercentLowMs == prof.onePercentLowMs(),
+			  "the same input sequence has identical metrics in both consumers");
+	};
+	debugui::updateDebugUiState(state, frame, now);
+	CHECK(state.frame.avgMs == 0.f && state.frame.onePercentLowMs == 0.f &&
+		  prof.avgFrameMs() == 0.f && prof.onePercentLowMs() == 0.f, "empty histories produce zeros");
+	now += 0.125;
+	capture(10.f);
+	capture(15.f);
+	capture(20.f);
+	CHECK(state.frame.avgMs == 15.f && state.frame.onePercentLowMs == 20.f,
+		  "a partial window uses all valid samples and the nearest-rank p99");
+	for (int i = 0; i < 60; ++i)
+		capture(80.f);
+	for (int i = 0; i < 180; ++i)
+		capture(16.f);
+	for (int i = 0; i < 60; ++i)
+		capture(25.f);
+	CHECK(state.cpuFrameTimes.count() == debugui::kMetricHistorySize && prof.historyCount() == Profiler::kHistorySize &&
+		  state.frame.avgMs == 25.f && state.frame.onePercentLowMs == 25.f,
+		  "wrapped rings average the newest 60 and select p99 from the newest 240");
+	for (int i = 0; i < 80; ++i)
+		capture(25.f); // let the prior warning clear through its normal hysteresis
+	capture(200.f);
+	CHECK(state.frame.onePercentLowMs == 25.f && !state.health.slowFrames.active(),
+		  "an isolated spike is outside p99 for a full window");
+	for (int i = 0; i < 20; ++i)
+		capture(40.f);
+	CHECK(state.frame.onePercentLowMs == 40.f && state.health.slowFrames.active(),
+		  "a sustained p99 above 33 ms raises the slow-frame alert");
+	prof.clearHistory();
+	std::cout << "PASS\n";
+}
+
+void testGpuCaptureObservations()
+{
+	std::cout << "[GPU capture observations] ";
+	debugui::UiState state;
+	VkGpuProfiler gpu;
+	constexpr auto pass = static_cast<size_t>(GpuPass::Frame);
+	GpuFrameSample sample;
+	sample.serial = 10;
+	sample.present[pass] = true;
+	sample.ms[pass] = 12.5f;
+	const auto observe = [&](bool record = true) {
+		debugui::observeGpuCapture(state, gpu.captureGeneration(), &sample, record);
+	};
+	observe(false);
+	CHECK(state.frame.gpuValid && state.gpuMs.count() == 0,
+		  "reading a global result for a label does not sample the Overview history");
+	observe();
+	observe();
+	CHECK(state.gpuMs.count() == 1 && state.gpuMs.latest() == 12.5f,
+		  "the same serial is observed at most once");
+	state.gpuMs.clear(); // the visible-interval reset preserves the consumed serial
+	observe();
+	CHECK(state.gpuMs.count() == 0, "an already observed serial is not replayed after visibility changes");
+	++sample.serial;
+	sample.ms[pass] = 16.f;
+	observe();
+	CHECK(state.gpuMs.count() == 1 && state.gpuMs.latest() == 16.f,
+		  "a new delayed global result can be observed in the current interval");
+
+	debugui::syncDebugGpuCapture(state, &gpu, 1); // CPU epoch changed ahead of the GPU owner
+	CHECK(!state.frame.gpuValid && state.gpuMs.count() == 0,
+		  "a mismatched capture epoch invalidates the previous GPU reading and observations");
+	gpu.syncCapture(1);
+	++sample.serial;
+	observe();
+	gpu.setEnabled(false);
+	debugui::syncDebugGpuCapture(state, &gpu, 1);
+	CHECK(!state.frame.gpuValid && state.gpuMs.count() == 0 && state.frame.gpuFrameMs == 0.f,
+		  "disabling GPU capture clears local observations and the latest value");
+	gpu.setEnabled(true);
+	debugui::syncDebugGpuCapture(state, &gpu, 1);
+	CHECK(!state.frame.gpuValid && state.gpuMs.count() == 0,
+		  "reenabling waits for a new completed GPU result");
+	++sample.serial;
+	observe();
+	gpu.syncCapture(2);
+	debugui::syncDebugGpuCapture(state, &gpu, 2);
+	CHECK(!state.frame.gpuValid && state.gpuMs.count() == 0,
+		  "a new GPU generation clears local results even when timestamps remain enabled");
+	std::cout << "PASS\n";
+}
 } // namespace
 
 void testPlayerDiagnosticsSnapshot()
@@ -503,6 +691,9 @@ int main()
 		testChunkSnapshotAndTrace();
 		testUpdateDebugUiState();
 		testScopeStatsLifecycle();
+		testCpuCaptureLifecycle();
+		testCpuMetricWindows();
+		testGpuCaptureObservations();
 		testPlayerDiagnosticsSnapshot();
 		testStreamingHealthSubset();
 	}

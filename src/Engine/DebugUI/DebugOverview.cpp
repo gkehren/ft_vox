@@ -35,7 +35,7 @@ void drawOverview(UiState &s, DeveloperUiFrame &frame)
 		ImGui::TextDisabled("Simulation tick %.2f ms (paced dt diverges from frame time)",
 							s.frame.simulationDtMs);
 	if (s.frame.gpuValid)
-		ImGui::Text("GPU frame: %.2f ms (pass intervals overlap)", s.frame.gpuFrameMs);
+		ImGui::Text("GPU frame: %.2f ms (delayed Engine capture)", s.frame.gpuFrameMs);
 	else
 		ImGui::TextDisabled("GPU frame: no timestamps");
 	ImGui::Text("avg %.2f ms   |   1%% low %.2f ms   |   VSync %s (%s)",
@@ -44,8 +44,14 @@ void drawOverview(UiState &s, DeveloperUiFrame &frame)
 	// World identity readouts that lost their old HUD home (issue #184).
 	ImGui::TextDisabled("Seed %d   |   viewport %d × %d",
 						frame.seed, frame.windowW, frame.windowH);
-	ImGui::TextDisabled("CPU frame history (10 Hz, 25 s window)");
+	ImGui::TextDisabled(s.frame.cpuCaptureEnabled ? "CPU frame history (up to 10 Hz)" : "CPU capture paused");
 	plotHistory("##ov_cpu", s.cpuMs, 0.f, ImVec2(-1.f, ui::scaled(56.f, scale)));
+	if (s.gpuMs.count())
+	{
+		ImGui::TextDisabled("GPU results observed here (up to 10 Hz)");
+		ImGui::TextDisabled("Delayed results can include hidden frames.");
+		plotHistory("##ov_gpu", s.gpuMs, 0.f, ImVec2(-1.f, ui::scaled(56.f, scale)));
+	}
 
 	// --- Streaming ---
 	ImGui::SeparatorText("Streaming");

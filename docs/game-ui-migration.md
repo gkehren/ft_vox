@@ -58,7 +58,22 @@ Developer panel histories and sustained alerts cover the current visible
 sampling interval. After hiding, modal suppression or a long presentation gap,
 they restart with fresh counter baselines. ImGui resumes with a fresh frame
 delta. Engine profiler and benchmark captures keep their independent timeline.
-The Performance GPU capture graph is labeled accordingly.
+
+Performance and Overview fold each completed CPU frame at most once. They use
+the same definitions as the Engine profiler, with a rolling mean over up to
+60 valid frames and a nearest-rank p99 over up to 240. Overview and scope plots
+sample fresh values at up to 10 Hz. Pausing Capture freezes the statistics
+and clears the slow-frame warning baseline. Clear history and other CPU
+capture epoch changes clear the CPU plots, average, p99, scope table and
+warning baseline. Reopening starts a new local interval while Engine capture
+continues.
+
+GPU timestamps and the Performance GPU graph belong to the global Engine
+capture. Overview records distinct results it observes while visible. A
+result may arrive after a delay and describe a frame rendered while the
+workspace was hidden. GPU disablement or a capture reset clears observations
+from the old capture. The Overview reuses published measurements without
+reading query pools or adding Vulkan waits.
 
 | Surface | Route and parity |
 | --- | --- |
@@ -99,6 +114,16 @@ showcase proof's two known slider assertions reproduced on this desktop.
 Those twelve failures are tracked separately from the correction checks.
 The hosted inventory matrix passed all ten operations and conserved the
 117-item budget. The Vulkan proofs injected SDL events.
+
+### Profiling review corrections (F07–F09)
+
+| Local check | Result |
+| --- | --- |
+| Graphics-off Release suite | 55/55 passed, including `ProfilerWorkerConsistency`. |
+| Focused graphical Release suite | 12/12 passed, including `DebugUiCore`, `ProfilerWorkerConsistency` and `GpuProfile`. The new deterministic fixtures cover CPU publication and capture epochs, partial and wrapped timing windows, slow-frame alerts, and GPU observation serials and generations. |
+| Vulkan workspace proof on RTX 4070 Ti | 87 checks passed. SDL clicks drove the actual Capture and Clear history controls. Two F1 cycles verified that global CPU and GPU capture continued while local histories restarted and hidden ImGui frames stayed at zero. Validation reported 28 known RTSS messages and zero additional errors. |
+| Production CLI benchmarks | Standard hidden and explicit `--benchmark-map 0.5` runs both wrote reports. |
+| Additional strict Vulkan resource smoke | GPU timestamp recycling, partial-query handling, reset and toggle passed. The strict overall validation assertion failed with the same 21 RTSS swapchain diagnostics on the baseline and revised builds. |
 
 ## Native player inventory (#304)
 
