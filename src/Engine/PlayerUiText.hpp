@@ -2,7 +2,7 @@
 
 // Player UI text service seam — issue #302, Epic #298 Phase D.
 //
-// One audited face, one glyph table, one documented fallback: the text roles
+// One audited family, two weights, one documented fallback: the text roles
 // of PlayerUiStyle.hpp are measured and painted through this header, and every
 // component fits its labels through `fitText` so variable-length strings never
 // silently overflow their control (the 16:9 / 21:9 / 100–200% evidence in
@@ -108,7 +108,7 @@ inline TextMetrics measureRole(FontView font, std::string_view text, style::Text
 							   float fontScale = 1.f)
 {
 	const auto style = textStyle(role, scale, fontScale);
-	return {font.measure(text, style.glyphScale()), style.lineHeight()};
+	return {font.forRole(role).measure(text, style.glyphScale()), style.lineHeight()};
 }
 
 /// Clip one glyph quad to `bounds`, remapping its UV rectangle so a partially
@@ -150,6 +150,12 @@ struct FittedText
 	bool elided{};
 };
 
+/// Arithmetic slack for widths reconstructed from floating-point clip edges.
+inline bool textWidthFits(float width, float available)
+{
+	return width <= available + 0.001f;
+}
+
 /// Fit `text` into `maxWidth` at a role/scale. A string that already fits is
 /// returned whole with `elided == false`. When no prefix plus ellipsis fits,
 /// the result is empty and the caller paints nothing — a control never draws a
@@ -157,13 +163,14 @@ struct FittedText
 inline FittedText fitText(FontView font, std::string_view text, style::TextRole role, float scale,
 						  float maxWidth)
 {
+	font = font.forRole(role);
 	const float roleScale = style::typeScale(role) * (scale > 0.f ? scale : 1.f);
 	if (maxWidth <= 0.f)
 		return {};
-	if (font.measure(text, roleScale) <= maxWidth)
+	if (textWidthFits(font.measure(text, roleScale), maxWidth))
 		return {text.size(), false};
 	const float ellipsis = font.measure("...", roleScale);
-	if (ellipsis > maxWidth)
+	if (!textWidthFits(ellipsis, maxWidth))
 		return {};
 	float width = 0.f;
 	size_t bytes = 0;
@@ -171,7 +178,7 @@ inline FittedText fitText(FontView font, std::string_view text, style::TextRole 
 	{
 		const size_t next = nextUtf8(text, i);
 		const float advance = font.measure(text.substr(i, next - i), roleScale);
-		if (width + advance + ellipsis > maxWidth)
+		if (!textWidthFits(width + advance + ellipsis, maxWidth))
 			break;
 		width += advance;
 		bytes = next;
@@ -191,71 +198,82 @@ struct WrappedLine
 	bool elided{};
 };
 
-/// Hard ceiling for a wrapped run, so a caller can size a fixed array. The HUD
-/// feedback block uses two body lines and the gallery one.
-inline constexpr size_t kMaxWrappedLines = 4;
+inline constexpr size_t kMaxWrappedLines = 16;
 
-/// Greedy word wrap measured with the same glyph table as painting, bounded to
-/// `lines.size()` lines. Words are kept whole and broken only when a single word
-/// cannot fit the width; the last line is elided when text remains, so a long
-/// session message never spills out of its band and never loses its beginning.
-/// Returns the number of lines written (0 when nothing fits).
-inline int wrapText(FontView font, std::string_view text, style::TextRole role, float scale,
-					float maxWidth, std::span<WrappedLine> lines)
+struct TextPage
 {
+	int count{};
+	size_t next{}; // byte at which a subsequent page must begin
+};
+
+/// Greedy word wrapping with hard breaks at newline and UTF-8 scalar boundaries.
+/// A clipped summary may append an ellipsis. A page always keeps a continuation.
+inline TextPage paginateText(FontView font, std::string_view text, style::TextRole role, float scale,
+	float maxWidth, std::span<WrappedLine> lines, bool ellipsize)
+{
+	TextPage page;
 	if (lines.empty() || text.empty() || maxWidth <= 0.f)
-		return 0;
+		return page;
+	font = font.forRole(role);
 	const float glyphs = style::typeScale(role) * (scale > 0.f ? scale : 1.f);
 	size_t start = 0;
-	while (start < text.size() && text[start] == ' ')
-		++start;
-	int count = 0;
-	while (start < text.size() && size_t(count) < lines.size())
+	while (start < text.size() && size_t(page.count) < lines.size())
 	{
-		const bool last = size_t(count + 1) == lines.size();
-		if (last)
-		{
-			// The last line elides through the one overflow rule.
-			const auto fitted = fitText(font, text.substr(start), role, scale, maxWidth);
-			if (fitted.bytes == 0)
-				break;
-			lines[size_t(count)] = {start, start + fitted.bytes, fitted.elided};
-			return count + 1;
-		}
-		// Longest word-boundary prefix that fits without an ellipsis.
-		size_t end = start;
-		for (size_t scan = start; scan < text.size();)
-		{
-			const size_t space = text.find(' ', scan);
-			const size_t wordEnd = space == std::string_view::npos ? text.size() : space;
-			if (font.measure(text.substr(start, wordEnd - start), glyphs) > maxWidth)
-				break;
-			end = wordEnd;
-			if (space == std::string_view::npos)
-				break;
-			scan = space + 1;
-		}
-		if (end == start)
-		{
-			// One word wider than the band: break it at the glyph budget. No
-			// ellipsis is reserved here — this line is not the last one.
-			while (end < text.size())
-			{
-				const size_t next = nextUtf8(text, end);
-				if (next <= end || font.measure(text.substr(start, next - start), glyphs) > maxWidth)
-					break;
-				end = next;
-			}
-			if (end == start)
-				break;
-		}
-		lines[size_t(count)] = {start, end, false};
-		start = end;
 		while (start < text.size() && text[start] == ' ')
 			++start;
-		++count;
+		page.next = start;
+		if (start == text.size())
+			break;
+		size_t end = start, space = start;
+		float width = 0.f;
+		while (end < text.size() && text[end] != '\n' && text[end] != '\r')
+		{
+			const size_t next = nextUtf8(text, end);
+			const float advance = font.measure(text.substr(end, next - end), glyphs);
+			if (!textWidthFits(width + advance, maxWidth))
+				break;
+			if (text[end] == ' ')
+				space = end;
+			width += advance;
+			end = next;
+		}
+		const bool newline = end < text.size() && (text[end] == '\n' || text[end] == '\r');
+		const bool wrap = end < text.size() && !newline;
+		if (wrap && space > start)
+			end = space;
+		if (wrap && end == start)
+			break;
+		size_t next = end;
+		if (newline)
+		{
+			if (text[next++] == '\r' && next < text.size() && text[next] == '\n')
+				++next;
+		}
+		while (next < text.size() && text[next] == ' ')
+			++next;
+		auto &line = lines[size_t(page.count++)];
+		line = {start, end, false};
+		if (ellipsize && size_t(page.count) == lines.size() && next < text.size())
+		{
+			// Keep the original end if it still leaves room for the ellipsis.
+			const auto ellipsis = font.measure("...", glyphs);
+			while (line.end > start && !textWidthFits(
+				font.measure(text.substr(start, line.end - start), glyphs) + ellipsis, maxWidth))
+			{
+				do { --line.end; }
+				while (line.end > start && (static_cast<unsigned char>(text[line.end]) & 0xc0) == 0x80);
+			}
+			line.elided = textWidthFits(ellipsis, maxWidth);
+		}
+		start = page.next = next;
 	}
-	return count;
+	return page;
+}
+
+inline int wrapText(FontView font, std::string_view text, style::TextRole role, float scale,
+	float maxWidth, std::span<WrappedLine> lines)
+{
+	return paginateText(font, text, role, scale, maxWidth, lines, true).count;
 }
 
 // --- Icons -----------------------------------------------------------------

@@ -224,15 +224,15 @@ void paintHud(const Surface &surface, const HudLayout &layout, const HudView &vi
 		if (text.empty() || band.empty())
 			return;
 		const float width = std::min(size(band).x,
-			surface.font().measure(text, surface.glyphScale(role)) + 2.f * insetX);
+			surface.font().forRole(role).measure(text, surface.glyphScale(role)) + 2.f * insetX);
 		const auto backing = anchor(band, {width, size(band).y}, {0.5f, 0.5f});
 		plate(backing);
-		surface.fittedLabel(inset(backing, surface.px(theme.space.xxs)), text, role,
+		surface.fittedLabel(padded(backing, insetX), text, role,
 			theme.palette.ink, 0.5f);
 	};
 
 	if (paint.reticle)
-		surface.crosshair(layout.scene, theme.palette.ink, theme.palette.surfaceSunken);
+		surface.crosshair(layout.scene, theme.palette.focus, glm::vec4(style::rgb(theme.palette.scrim), 1.f));
 
 	if (paint.status && !layout.status.empty())
 	{

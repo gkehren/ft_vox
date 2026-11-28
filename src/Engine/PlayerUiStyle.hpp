@@ -58,12 +58,17 @@ inline float contrastRatio(glm::vec3 a, glm::vec3 b)
 	return (lighter + 0.05f) / (darker + 0.05f);
 }
 
-/// Source-over composite in sRGB space with a linear alpha, the order the
-/// renderer blends SCRGB-authored tokens onto the scene.
+inline float linearToSrgb(float channel)
+{
+	return channel <= 0.0031308f ? 12.92f * channel : 1.055f * std::pow(channel, 1.f / 2.4f) - 0.055f;
+}
+
+/// Blend in linear light and return sRGB, matching the native UI attachments.
 inline glm::vec3 composite(glm::vec3 over, glm::vec3 under, float alpha)
 {
 	alpha = std::clamp(alpha, 0.f, 1.f);
-	return over * alpha + under * (1.f - alpha);
+	const glm::vec3 linear = srgbToLinear(over) * alpha + srgbToLinear(under) * (1.f - alpha);
+	return {linearToSrgb(linear.r), linearToSrgb(linear.g), linearToSrgb(linear.b)};
 }
 
 inline glm::vec3 rgb(glm::vec4 color)
@@ -73,9 +78,9 @@ inline glm::vec3 rgb(glm::vec4 color)
 
 /// WCAG AA floors used by the tests and the design-system gallery.
 inline constexpr float kMinBodyContrast = 4.5f;
-inline constexpr float kMinSecondaryContrast = 3.f;
-/// Disabled content is intentionally below the floor but must stay perceivable.
-inline constexpr float kMinDisabledContrast = 2.f;
+inline constexpr float kMinSecondaryContrast = kMinBodyContrast;
+inline constexpr float kMinDisabledContrast = kMinBodyContrast;
+inline constexpr float kMinIndicatorContrast = 3.f;
 
 // --- Palette ---------------------------------------------------------------
 
@@ -91,6 +96,8 @@ struct Palette
 	glm::vec4 canvas;       // opaque full-screen backdrop behind a screen
 	glm::vec4 surface;      // card face
 	glm::vec4 surfaceRaised;// headers, hovered/selected rows, fields
+	glm::vec4 control;      // secondary controls and hovered slots
+	glm::vec4 divider;      // decorative section rule
 	glm::vec4 surfaceSunken;// wells, slots, list bodies
 	glm::vec4 border;       // resting outline
 	glm::vec4 borderStrong; // selected outline
@@ -110,27 +117,30 @@ struct Palette
 
 /// Display roles are measured from the one audited face; the renderer scales
 /// the baked glyph table by pixels / kFontPixels (see PlayerUiText.hpp).
-inline constexpr float kFontPixels = 13.f;
+inline constexpr float kFontPixels = 15.f;
 
-enum class TextRole : uint8_t { Caption = 0, Body, Heading, Title };
-inline constexpr size_t kTextRoleCount = 4;
+enum class TextRole : uint8_t { Caption = 0, Body, Heading, Title, Count, Action };
+inline constexpr size_t kTextRoleCount = 6;
 
 struct TypeToken
 {
 	float pixels;
 	float lineHeight;
+	bool semibold;
 };
 
 inline constexpr TypeToken typeToken(TextRole role)
 {
 	switch (role)
 	{
-	case TextRole::Caption: return {11.f, 14.f};
-	case TextRole::Body: return {13.f, 17.f};
-	case TextRole::Heading: return {18.f, 23.f};
-	case TextRole::Title: return {26.f, 32.f};
+	case TextRole::Caption: return {13.f, 16.f, false};
+	case TextRole::Body: return {15.f, 20.f, false};
+	case TextRole::Heading: return {18.f, 23.f, true};
+	case TextRole::Title: return {24.f, 30.f, true};
+	case TextRole::Count: return {14.f, 17.f, true};
+	case TextRole::Action: return {15.f, 20.f, true};
 	}
-	return {13.f, 17.f};
+	return {15.f, 20.f, false};
 }
 
 /// Scale multiplier applied to the baked glyph table for a role.
@@ -181,6 +191,7 @@ struct Overlay
 	float scrim;    // modal scrim opacity
 	float hudScrim; // HUD text backdrop opacity
 	float toast;    // toast face opacity
+	float textSelection; // accent opacity behind regular and composed glyphs
 };
 
 // --- Theme -----------------------------------------------------------------
@@ -193,33 +204,51 @@ struct Theme
 	Overlay overlay;
 };
 
+/// Authored slot composition at a 36-unit cell. Scaled together by the resolver.
+struct SlotArt
+{
+	static constexpr float icon = 26.f;
+	static constexpr float focusInset = 3.f;
+	static constexpr float rail = 7.f;
+	static constexpr float compactRail = 4.f;
+	static constexpr float countHeight = 13.f;
+	static constexpr float countWidth = 20.f;
+	static constexpr float progressHeight = 2.f;
+	static constexpr float detailThreshold = 16.f;
+};
+
 /// The single baseline theme. Authored at 100%; the player UI scale is applied
 /// by the callers (see PlayerUiScale.hpp) so tokens stay resolution-free.
 inline const Theme &baseline()
 {
 	static const Theme theme = [] {
 		Theme t{};
-		// Cool dark slate base; the mint accent is the only saturated color.
-		t.palette.ink = {0.941f, 0.969f, 1.f, 1.f};
-		t.palette.inkMuted = {0.702f, 0.769f, 0.812f, 1.f};
-		t.palette.inkDisabled = {0.408f, 0.451f, 0.478f, 1.f};
-		t.palette.inkOnAccent = {0.031f, 0.055f, 0.071f, 1.f};
-		t.palette.canvas = {0.027f, 0.039f, 0.050f, 1.f};
-		t.palette.surface = {0.052f, 0.083f, 0.103f, 1.f};
-		t.palette.surfaceRaised = {0.192f, 0.341f, 0.369f, 1.f};
-		t.palette.surfaceSunken = {0.033f, 0.055f, 0.070f, 1.f};
-		t.palette.border = {0.157f, 0.226f, 0.259f, 1.f};
-		t.palette.borderStrong = {0.310f, 0.878f, 0.760f, 1.f};
-		t.palette.accent = {0.310f, 0.878f, 0.760f, 1.f};
-		t.palette.accentPressed = {0.226f, 0.702f, 0.612f, 1.f};
-		t.palette.focus = {0.941f, 0.969f, 1.f, 1.f};
-		t.palette.scrim = {0.016f, 0.024f, 0.031f, 0.680f};
-		t.palette.hudScrim = {0.020f, 0.031f, 0.047f, 0.620f};
-		t.palette.ok = {0.478f, 0.847f, 0.541f, 1.f};
-		t.palette.warning = {0.961f, 0.769f, 0.353f, 1.f};
-		t.palette.error = {0.929f, 0.443f, 0.396f, 1.f};
-		t.palette.info = {0.522f, 0.757f, 0.949f, 1.f};
-		t.palette.pending = {0.694f, 0.639f, 0.910f, 1.f};
+		const auto srgb = [](uint32_t hex, float alpha = 1.f) -> glm::vec4 {
+			return {float((hex >> 16) & 255) / 255.f, float((hex >> 8) & 255) / 255.f,
+				float(hex & 255) / 255.f, alpha};
+		};
+		t.palette.ink = srgb(0xF4F6EF);
+		t.palette.inkMuted = srgb(0xB7C7BD);
+		t.palette.inkDisabled = srgb(0x96A69C);
+		t.palette.inkOnAccent = srgb(0x151B19);
+		t.palette.canvas = srgb(0x141A18);
+		t.palette.surface = srgb(0x202625);
+		t.palette.surfaceRaised = srgb(0x2D3531);
+		t.palette.control = srgb(0x303A35);
+		t.palette.divider = srgb(0x46594F);
+		t.palette.surfaceSunken = srgb(0x151B19);
+		t.palette.border = srgb(0x70887D);
+		t.palette.borderStrong = srgb(0xABE5C8);
+		t.palette.accent = srgb(0xABE5C8);
+		t.palette.accentPressed = srgb(0x85BAA0);
+		t.palette.focus = srgb(0xFFFBEF);
+		t.palette.scrim = srgb(0x0C1310, 0.78f);
+		t.palette.hudScrim = t.palette.surfaceSunken;
+		t.palette.ok = srgb(0xA4DAA8);
+		t.palette.warning = srgb(0xF3CE82);
+		t.palette.error = srgb(0xFFAD9C);
+		t.palette.info = srgb(0xA4CDEA);
+		t.palette.pending = srgb(0xC9BAED);
 
 		t.space = {2.f, 4.f, 6.f, 8.f, 12.f, 16.f};
 		t.size = {
@@ -229,16 +258,17 @@ inline const Theme &baseline()
 			.sectionHeader = 22.f,
 			.slot = 36.f,
 			.slotGap = 4.f,
-			.hotbarBottom = 10.f,
+			.hotbarBottom = 14.f,
 			.crosshair = 5.f,
 			.borderWidth = 1.f,
 			.borderStrongWidth = 2.f,
 			.focusRing = 2.f,
-			.radiusSmall = 2.f,
-			.radiusMedium = 4.f,
-			.radiusLarge = 6.f,
+			.radiusSmall = 0.f,
+			.radiusMedium = 0.f,
+			.radiusLarge = 0.f,
 		};
-		t.overlay = {.card = 0.960f, .raised = 1.f, .scrim = 0.680f, .hudScrim = 0.620f, .toast = 0.940f};
+		t.overlay = {.card = 1.f, .raised = 1.f, .scrim = t.palette.scrim.a,
+			.hudScrim = t.palette.hudScrim.a, .toast = 1.f, .textSelection = 0.12f};
 		return t;
 	}();
 	return theme;
@@ -259,6 +289,7 @@ enum class State : uint8_t
 	Disabled = 1u << 4,
 	Pending = 1u << 5,
 	Error = 1u << 6,
+	Unavailable = 1u << 7, // semantic status still visible, no interaction cues
 };
 
 inline constexpr State operator|(State a, State b)
@@ -287,7 +318,7 @@ inline constexpr bool disabled(State state)
 /// the player what is selected (issue #302 F15).
 inline constexpr State settleState(State state)
 {
-	if (!disabled(state))
+	if (!disabled(state) && !has(state, State::Unavailable))
 		return state;
 	const auto interaction = static_cast<uint8_t>(State::Focused | State::Hovered | State::Pressed);
 	const auto flags = static_cast<uint8_t>(state) & static_cast<uint8_t>(~interaction);
@@ -312,17 +343,9 @@ inline constexpr State interactiveState(bool enabled, bool hovered, bool pressed
 	return settleState(state);
 }
 
-/// A slot arrives with its own combination (selected, disabled, pending, error,
-/// focused). One precedence: disabled clears focus, validation outranks
-/// selection for the border, selection outranks focus.
-inline constexpr State slotState(State state)
-{
-	return settleState(state);
-}
-
 // --- Resolved component tokens --------------------------------------------
 
-enum class ButtonVariant : uint8_t { Primary = 0, Secondary, Quiet, Danger };
+enum class ButtonVariant : uint8_t { Primary = 0, Secondary, Quiet, Danger, DangerOutline };
 
 struct ControlTokens
 {
@@ -345,6 +368,9 @@ inline ControlTokens buttonTokens(const Theme &theme, ButtonVariant variant, Sta
 	ControlTokens out{};
 	if (disabled(state))
 		return {p.surfaceSunken, p.inkDisabled, p.border};
+	if (variant == ButtonVariant::DangerOutline)
+		return {has(state, State::Pressed) ? p.surfaceRaised :
+			has(state, State::Hovered) ? p.control : p.surfaceSunken, p.error, p.error};
 	if (variant == ButtonVariant::Primary || danger)
 	{
 		out.face = has(state, State::Pressed) ? accentPressed : accent;
@@ -360,7 +386,7 @@ inline ControlTokens buttonTokens(const Theme &theme, ButtonVariant variant, Sta
 		out.border = glm::vec4(0.f);
 		return out;
 	}
-	out.face = has(state, State::Pressed) ? p.accentPressed : (has(state, State::Hovered) ? p.surfaceRaised : p.surface);
+	out.face = has(state, State::Pressed) ? p.accentPressed : (has(state, State::Hovered) ? p.surfaceRaised : p.control);
 	out.text = has(state, State::Pressed) ? p.inkOnAccent : p.ink;
 	out.border = has(state, State::Hovered) || has(state, State::Pressed) ? p.borderStrong : p.border;
 	return out;
@@ -444,50 +470,41 @@ inline ControlTokens fieldTokens(const Theme &theme, State state, Validation val
 	return out;
 }
 
-/// Resolved slot presentation (issue #302 R06). One precedence for combined
-/// Selected / Disabled / Focused / Error / Pending states:
-///
-///   1. disabled clears the interaction flags (see settleState) and dims the
-///      content; it keeps the selection marker because selection is a fact, not
-///      an affordance;
-///   2. validation (Error > Pending) owns the border COLOR, so focus can never
-///      hide a rejected or in-flight value;
-///   3. focus owns the border WIDTH (the ring), which stays visible on top of a
-///      validation color;
-///   4. selection owns the resting border strength.
+/// Semantic edge, selection, focus and interaction cues occupy separate lanes.
+enum class SlotMark : uint8_t { None, Pending, Rejected };
+enum class SlotInteraction : uint8_t { None, Hover, Pressed, Disabled };
+
 struct SlotTokens
 {
 	glm::vec4 face;
 	glm::vec4 border;
 	float borderWidth;
-	glm::vec4 tint;      // icon tint
-	glm::vec4 indicator; // badge / foreground ink
+	glm::vec4 tint;
+	glm::vec4 indicator;
+	SlotMark mark;
+	SlotInteraction interaction;
+	bool selected;
+	bool focused;
 };
 
 inline SlotTokens slotTokens(const Theme &theme, State requested)
 {
 	const auto &p = theme.palette;
-	const auto state = settleState(requested);
-	SlotTokens tokens{p.surfaceSunken, p.border, theme.size.borderWidth, glm::vec4(1.f), p.ink};
+	const State state = settleState(requested);
 	const bool selected = has(state, State::Selected);
-	tokens.border = selected ? p.borderStrong : p.border;
-	tokens.borderWidth = selected ? theme.size.borderStrongWidth : theme.size.borderWidth;
-	if (has(state, State::Error))
-		tokens.border = p.error;
-	else if (has(state, State::Pending))
-		tokens.border = p.pending;
-	if (has(state, State::Focused))
-	{
-		if (!has(state, State::Error) && !has(state, State::Pending))
-			tokens.border = p.focus;
-		tokens.borderWidth = theme.size.focusRing;
-	}
-	if (disabled(state))
-	{
-		tokens.tint = {1.f, 1.f, 1.f, 0.45f};
-		tokens.indicator = p.inkDisabled;
-	}
-	return tokens;
+	const bool hovered = has(state, State::Hovered);
+	const bool pressed = has(state, State::Pressed);
+	const bool inactive = disabled(state);
+	const auto mark = has(state, State::Error) ? SlotMark::Rejected
+		: has(state, State::Pending) ? SlotMark::Pending : SlotMark::None;
+	const auto interaction = inactive ? SlotInteraction::Disabled : pressed ? SlotInteraction::Pressed
+		: hovered ? SlotInteraction::Hover : SlotInteraction::None;
+	const auto edge = mark == SlotMark::Rejected ? p.error : mark == SlotMark::Pending ? p.pending
+		: selected ? p.borderStrong : p.border;
+	return {hovered || pressed ? p.control : p.surfaceSunken, edge,
+		mark != SlotMark::None || selected ? theme.size.borderStrongWidth : theme.size.borderWidth,
+		glm::vec4(1.f, 1.f, 1.f, inactive ? 0.65f : 1.f), inactive ? p.inkDisabled : p.ink,
+		mark, interaction, selected, has(state, State::Focused)};
 }
 
 inline glm::vec4 validationColor(const Theme &theme, Validation validation)
@@ -533,8 +550,8 @@ struct SceneBackdrop
 };
 
 inline constexpr SceneBackdrop kSceneBackdrop{
-	.bright = {0.863f, 0.902f, 0.949f},
-	.dark = {0.031f, 0.047f, 0.067f},
+	.bright = {1.f, 1.f, 1.f},
+	.dark = {0.f, 0.f, 0.f},
 };
 
 /// Legible text color over the live scene: the HUD paints its text on the

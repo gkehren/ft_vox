@@ -128,6 +128,13 @@ struct Glyph
 struct FontView
 {
 	std::span<const Glyph> glyphs;
+	std::span<const Glyph> semibold{};
+
+	FontView forRole(style::TextRole role) const
+	{
+		return style::typeToken(role).semibold && !semibold.empty() ? FontView{semibold} : *this;
+	}
+
 	float measure(std::string_view text, float scale) const;
 	/// `bounds` is the component rectangle the text belongs to: every glyph quad is
 	/// geometrically clipped to it, with its UVs remapped, so text can never paint

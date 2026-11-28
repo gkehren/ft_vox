@@ -32,10 +32,11 @@ int runSessionMenuProof(Engine &engine, const std::filesystem::path &output);
 int runGameUiScreenshot(Engine &engine, const std::filesystem::path &output);
 int runGameUiPresentProof(Engine &engine, const std::filesystem::path &output);
 int runGameUiShowcaseProof(Engine &engine);
+int runGameUiTypography(Engine &engine, const std::filesystem::path &output);
 int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output);
 int runGameUiPerformance(Engine &engine);
 int runPlayerHudProof(Engine &engine, const std::filesystem::path &output);
-int runPlayerInventoryProof(Engine &engine);
+int runPlayerInventoryProof(Engine &engine, const std::filesystem::path &output);
 int runPlayerSettingsProof(Engine &engine, const std::filesystem::path &output);
 int runPlayerSettingsRestartProof(Engine &engine, const std::filesystem::path &output);
 int runEngineHostedClosure(Engine &engine, const std::filesystem::path &server,
@@ -106,6 +107,8 @@ int main(int argc, char **argv)
 			return runGameUiScreenshot(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-present-proof")
 			return runGameUiPresentProof(*engine, argv[2]);
+		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-typography")
+			return runGameUiTypography(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--game-ui-design-system")
 			return runGameUiDesignSystem(*engine, argv[2]);
 		if (showcase && (argc == 2 || inlineIme))
@@ -118,8 +121,8 @@ int main(int argc, char **argv)
 			return runGameUiPerformance(*engine);
 		if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--player-hud-proof")
 			return runPlayerHudProof(*engine, argc == 3 ? std::filesystem::path{argv[2]} : std::filesystem::path{});
-		if (argc == 2 && std::string_view(argv[1]) == "--player-inventory-proof")
-			return runPlayerInventoryProof(*engine);
+		if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--player-inventory-proof")
+			return runPlayerInventoryProof(*engine, argc == 3 ? std::filesystem::path{argv[2]} : std::filesystem::path{});
 		if (argc == 3 && std::string_view(argv[1]) == "--player-settings-proof")
 			return runPlayerSettingsProof(*engine, argv[2]);
 		if (argc == 3 && std::string_view(argv[1]) == "--player-settings-restart-proof")

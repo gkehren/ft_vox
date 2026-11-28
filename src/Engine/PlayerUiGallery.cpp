@@ -20,7 +20,7 @@ std::span<const GallerySection> gallerySections()
 		{"Confirmation", 216.f},
 		{"Inventory slots", 120.f},
 		{"Player UI scale", 104.f},
-		{"Crafting component preview", 264.f},
+		{"Crafting component preview", 232.f},
 	};
 	static_assert(sections[kCraftingGallerySection].title == "Crafting component preview");
 	return sections;
@@ -83,19 +83,32 @@ Clip gallerySectionRect(const GalleryLayout &layout, const style::Theme &, size_
 CraftingGalleryLayout craftingGalleryLayout(Clip section, const style::Theme &theme, float scale)
 {
 	section.rect.y += galleryHeaderHeight(theme, scale);
-	const auto modal = confirmationLayout(section, size(section), false, theme, scale);
 	const float gap = theme.size.slotGap * scale;
-	const float gridSide = (3.f * theme.size.slot + 2.f * theme.size.slotGap) * scale;
-	const Clip gridArea{{modal.body.rect.x, modal.body.rect.y,
-		std::min(modal.body.rect.x + gridSide, modal.body.rect.z),
-		std::min(modal.body.rect.y + gridSide, modal.body.rect.w)}};
-	const auto inputs = slotGrid(gridArea, 3, 3, gap);
-	const float outputX = inputs.bounds.rect.z + theme.space.lg * scale;
+	const float cell = theme.size.slot * scale;
+	const float gridSide = 3.f * cell + 2.f * gap;
+	const float padding = theme.space.xl * scale;
+	const float groupGap = 2.f * theme.space.lg * scale;
+	const float outputWidth = std::max(cell, 58.f * scale);
+	const float caption = style::lineHeight(style::TextRole::Caption) * scale;
+	const float desiredWidth = 2.f * padding + gridSide + groupGap + outputWidth;
+	const float desiredHeight = 2.f * padding + style::lineHeight(style::TextRole::Heading) * scale +
+		theme.space.md * scale + caption + gap + gridSide;
+	auto modal = confirmationLayout(section, {desiredWidth, desiredHeight}, false, theme, scale);
+	// The preview has no actions, so the specimen can use the dialog's footer space.
+	modal.body.rect.w = modal.panel.rect.w - padding;
+	modal.cancel = modal.confirm = {};
+	const auto &body = modal.body.rect;
+	const float inputRight = std::min(body.x + gridSide, body.z - groupGap - outputWidth);
+	const auto area = Clip{{body.x, body.y + caption + gap, inputRight,
+		std::min(body.w, body.y + caption + gap + gridSide)}};
+	const auto inputs = slotGrid(area, 3, 3, gap);
+	const float outputX = inputRight + groupGap;
 	const float outputY = slotCell(inputs, 0, 1).rect.y;
-	const auto outputGrid = slotGrid({{outputX, outputY, modal.body.rect.z, outputY + inputs.cell}}, 1, 1, gap);
-	const auto output = slotCell(outputGrid, 0, 0);
-	return {modal, inputs, output,
-		{{output.rect.z + gap, output.rect.y, modal.body.rect.z, output.rect.w}}};
+	const auto cut = rectangle({inputRight + groupGap * 0.5f, body.y},
+		{theme.size.borderWidth * scale, area.rect.w - body.y});
+	return {modal, inputs, {{body.x, body.y, inputRight, body.y + caption}}, cut,
+		rectangle({outputX, outputY}, glm::vec2(inputs.cell)),
+		{{outputX, body.y, body.z, body.y + caption}}};
 }
 
 HudMockLayout hudMockLayout(Clip view, const style::Theme &theme, float scale, int hotbarSlots)

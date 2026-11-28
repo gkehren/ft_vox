@@ -60,20 +60,20 @@ binary distributions that ship only the compiled SPIR-V remain compliant.
 Dear ImGui (v1.91.x) by Omar Cornut — MIT License. The upstream license text
 ships in `src/imgui/LICENSE.txt`.
 
-The native Game UI bakes the ProggyClean face already embedded in the pinned
-Dear ImGui 1.91.9 WIP source. ProggyClean.ttf is copyright (c) 2004, 2005
+The pinned Dear ImGui 1.91.9 WIP source embeds ProggyClean.ttf, copyright (c) 2004, 2005
 Tristan Grimmer and uses the MIT terms in `src/imgui/LICENSE.txt`. The font
 attribution accompanies the compressed source in `src/imgui/imgui_draw.cpp`.
+The player UI uses ProggyClean as a diagnosed emergency startup fallback.
 The HUD, inventory and crafting component preview use the resource-pack
 atlas described above.
 
-## Source Sans 3 (visual-direction mockups)
+## Source Sans 3 (player UI and visual-direction mockups)
 
-The Phase A concept PNGs use Source Sans 3 Regular and Semibold, release
-3.052R. Copyright 2010–2022 Adobe, with Reserved Font Name “Source”.
+The player UI and Phase A concept PNGs use Source Sans 3 Regular and
+Semibold, release 3.052R. Copyright 2010–2022 Adobe, with Reserved Font Name “Source”.
 The font is available under the SIL Open Font License 1.1. The mockups
-contain rasterized text. To regenerate them, use the pinned upstream
-font files. [Source, hashes and license](docs/game-ui-visual-direction.md#asset-provenance-and-reproduction)
+contain rasterized text. The game distributes the unmodified TTFs and
+[license](ressources/fonts/source-sans-3/OFL.txt) with its resources. [Source, hashes and license](docs/game-ui-visual-direction.md#asset-provenance-and-reproduction)
 
 ## stb_image (vendored under `src/stb_image/stb_image.h`)
 

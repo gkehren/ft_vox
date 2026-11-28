@@ -63,7 +63,7 @@ struct CraftingGalleryLayout
 {
 	ConfirmationLayout modal;
 	SlotGrid inputs;
-	Clip output, outputLabel;
+	Clip inputLabel, separator, output, outputLabel;
 };
 
 CraftingGalleryLayout craftingGalleryLayout(Clip section, const style::Theme &theme, float scale);

@@ -17,7 +17,7 @@ Escape opens the native game menu and widget showcase in the opt-in mode. [Game 
 - The profiler separates `GameUIBuild`, `GameUIDraw`, `DevUIBuild`, and `DevUIDraw` on CPU and Game UI, Game UI encode, and Dev UI on GPU. The Performance panel exposes draws, vertices, dropped quads, descriptor sets, and memory from the last recorded frame and displays its frame number. Game UI draw cost includes the final encode when active.
 - The sample checks SDL event coordinates against the most recently drawn ImGui windows and their dockspace passthrough. Gameplay capture, ImGui dialogs and pointer occlusion cancel an armed press. Game UI still consumes that press's release, so the release cannot reach another interface.
 
-The graphical target reuses the repo-pinned SDL3, Vulkan/VMA and embedded ProggyClean face. The coverage data is baked into a dedicated Game UI atlas. Font and icon attribution are in [third-party notices](../THIRD_PARTY_NOTICES.md). The MoltenVK path uses the same Vulkan 1.2 dynamic-rendering extension, sampled images and graphics pipelines. The UNORM path checks RGBA16F color attachment, blend and sampling features.
+The graphical target reuses the repo-pinned SDL3, Vulkan/VMA and the existing vendored font rasterizer. Source Sans 3 Regular and Semibold share one dedicated Game UI coverage atlas. Font and icon attribution are in [third-party notices](../THIRD_PARTY_NOTICES.md). The MoltenVK path uses the same Vulkan 1.2 dynamic-rendering extension, sampled images and graphics pipelines. The UNORM path checks RGBA16F color attachment, blend and sampling features.
 
 ## Reproduce the checks
 

@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Host for the native player HUD and screen stack, including the design
 // gallery and standalone rendering proof.
@@ -119,7 +120,7 @@ private:
 	uint32_t nextToastId() { return ++m_toastSerial; }
 	bool windowInteractive() const;
 	void activate(const char *source);
-	gameui::FontView font() const { return {m_face.glyphs}; }
+	gameui::FontView font() const { return {m_face.glyphs, m_face.semibold}; }
 	gameui::Surface surface(gameui::Clip clip);
 	void buildScreen(gameui::Clip scene, float scale);
 	void buildGallery(gameui::Clip scene, float scale);
@@ -234,6 +235,12 @@ private:
 	/// Last meaningful interaction device on the inventory screen (F05): the
 	/// held stack follows it; reset by every gesture cancellation.
 	gameui::InventoryModality m_inventoryModality{gameui::InventoryModality::Pointer};
+	std::string m_inventoryFeedbackText;
+	std::vector<size_t> m_inventoryFeedbackOffsets;
+	size_t m_inventoryFeedbackNext{};
+	gameui::ControlId m_inventoryFeedbackFocus{};
+	bool m_inventoryFeedbackAvailable{};
+	void resetInventoryFeedback();
 	inventoryui::Interaction m_inventoryInteraction;
 	struct InventoryPress { gameui::ControlId control{}; Uint8 button{}; };
 	std::optional<InventoryPress> m_inventoryPress;

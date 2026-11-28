@@ -599,7 +599,7 @@ void selectionAndSliderClipping()
 	const FontView font{glyphs};
 	const auto &theme = style::baseline();
 	const auto &p = theme.palette;
-	const glm::vec4 selection{p.accent.r, p.accent.g, p.accent.b, 0.32f};
+	const glm::vec4 selection{p.accent.r, p.accent.g, p.accent.b, style::baseline().overlay.textSelection};
 	const auto insideClip = [](glm::vec4 rect, Clip clip) {
 		return rect.x >= clip.rect.x - 0.01f && rect.y >= clip.rect.y - 0.01f &&
 			rect.z <= clip.rect.z + 0.01f && rect.w <= clip.rect.w + 0.01f;
