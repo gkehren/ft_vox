@@ -9,14 +9,20 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <windows.h>
+#endif
+#include <Engine/PlayerUiPreferencesWin32.hpp>
+#else
+#include <unistd.h>
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <latch>
 #include <limits>
 #include <string>
 #include <thread>
@@ -28,6 +34,40 @@ using namespace gameui;
 
 namespace
 {
+#if defined(_WIN32)
+void windowsRetryPolicy()
+{
+	using namespace gameui::settings_io;
+	const auto check = [](DWORD initial, size_t initialCount, DWORD finalError, size_t expectedAttempts) {
+		size_t calls = 0, waits = 0;
+		const auto result = retryWindowsFile([&] {
+			return FileAttempt{calls++ < initialCount ? initial : finalError, FilePhase::Open};
+		}, [&] { ++waits; });
+		CHECK(result.error == finalError && result.phase == FilePhase::Open &&
+			calls == expectedAttempts && waits == expectedAttempts - 1,
+			"Windows retry sequence " << initial << " to " << finalError << " takes " << expectedAttempts << " attempts");
+		return result.error == ERROR_SUCCESS ? LoadStatus::Ok : loadFailure(result);
+	};
+	check(ERROR_SUCCESS, 0, ERROR_SUCCESS, 1);
+	check(ERROR_SHARING_VIOLATION, 1, ERROR_SUCCESS, 2);
+	check(ERROR_LOCK_VIOLATION, 1, ERROR_SUCCESS, 2);
+	check(ERROR_ACCESS_DENIED, 1, ERROR_SUCCESS, 2);
+	check(ERROR_SHARING_VIOLATION, 39, ERROR_SUCCESS, 40);
+	for (const DWORD error : {ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_DELETE_PENDING})
+		CHECK(check(error, 40, error, 40) == LoadStatus::Busy, "exhausted Win32 conflict is busy");
+	CHECK(check(ERROR_ACCESS_DENIED, 40, ERROR_ACCESS_DENIED, 40) == LoadStatus::Unavailable,
+		"exhausted access denied leaves the record unavailable");
+	CHECK(check(ERROR_GEN_FAILURE, 0, ERROR_GEN_FAILURE, 1) == LoadStatus::Unavailable,
+		"a permanent I/O failure stops immediately");
+	CHECK(check(ERROR_SHARING_VIOLATION, 1, ERROR_GEN_FAILURE, 2) == LoadStatus::Unavailable,
+		"a permanent I/O failure after a retry propagates the final error");
+	CHECK(loadFailure({ERROR_FILE_NOT_FOUND, FilePhase::Open}) == LoadStatus::Missing &&
+		loadFailure({ERROR_PATH_NOT_FOUND, FilePhase::Open}) == LoadStatus::Missing &&
+		loadFailure({ERROR_FILE_NOT_FOUND, FilePhase::Read}) == LoadStatus::Unavailable,
+		"only open failures indicating absence count as missing");
+}
+#endif
+
 const auto &theme()
 {
 	return style::baseline();
@@ -338,9 +378,19 @@ void scaling()
 
 void preferences()
 {
-	const auto &dir = std::filesystem::temp_directory_path() / "ftvox-ui-302-prefs";
+	const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+#if defined(_WIN32)
+	const auto pid = GetCurrentProcessId();
+#else
+	const auto pid = getpid();
+#endif
+	const auto dir = std::filesystem::temp_directory_path() /
+		("ftvox-ui-prefs-" + std::to_string(pid) + "-" + std::to_string(stamp));
 	std::error_code ec;
-	std::filesystem::remove_all(dir, ec);
+	const bool created = std::filesystem::create_directory(dir, ec);
+	CHECK(created, "create an isolated settings fixture directory: " << ec.message());
+	if (!created)
+		return;
 	const auto path = dir / "player-ui.txt";
 
 	PlayerUiSettings settings;
@@ -447,6 +497,17 @@ void preferences()
 	untouched.scale = {ScaleMode::Fixed, 1.25f};
 	CHECK(untouched.load(path) == LoadStatus::Corrupt && untouched.scale.value == 1.25f,
 		"a corrupt record is reported and never mutates the running session");
+	{
+		std::ofstream oversized(path, std::ios::binary | std::ios::trunc);
+		oversized << std::string(kMaxPlayerUiSettingsBytes + 1, ' ');
+	}
+	CHECK(untouched.load(path) == LoadStatus::Corrupt && untouched.scale.value == 1.25f,
+		"an oversized record is corrupt and leaves the previous values intact");
+	CHECK(untouched.load(dir) == LoadStatus::Unavailable && untouched.scale.value == 1.25f,
+		"a directory in place of a record is unavailable and leaves the previous values intact");
+	auto unavailableLegacyScale = untouched.scale;
+	CHECK(loadLegacyPlayerScale(dir, unavailableLegacyScale) == LoadStatus::Unavailable && unavailableLegacyScale == untouched.scale,
+		"the legacy loader also distinguishes unavailable data");
 
 	// R09: a corrupted record is repaired only by an explicit write of the
 	// defaults; a missing record stays a fresh-install case.
@@ -505,37 +566,90 @@ void preferences()
 	// R03: readers can never observe a half-replaced record, because the read
 	// opens the file before sizing it and reads from that same handle.
 	{
+		std::clog << "[fixture] reader/writer race begins" << std::endl;
+		const PlayerUiSettings autoRecord;
+		const PlayerUiSettings fixedRecord{{ScaleMode::Fixed, 1.5f}, {960, 540}, false, false, 250, true};
+		CHECK(autoRecord.save(path), "seed the reader/writer race with a complete record");
 		std::atomic<bool> stop{false};
-		std::atomic<int> falseCorrupt{0};
+		std::atomic<bool> firstWriteComplete{false};
+		std::atomic<int> failedReads{0};
 		std::atomic<int> badValues{0};
+		std::latch started{2};
+		std::latch readDuringWrites{2};
+		const auto read = [&] {
+			PlayerUiSettings seen;
+			if (seen.load(path) != LoadStatus::Ok)
+				++failedReads;
+			else if (seen != autoRecord && seen != fixedRecord)
+				++badValues;
+		};
 		std::vector<std::thread> readers;
 		for (int i = 0; i < 2; ++i)
-			readers.emplace_back([&path, &stop, &falseCorrupt, &badValues] {
+			readers.emplace_back([&] {
+				read();
+				started.count_down();
+				bool participated = false;
 				while (!stop.load())
 				{
-					PlayerUiSettings seen;
-					const auto status = seen.load(path);
-					if (status != LoadStatus::Ok && status != LoadStatus::Missing)
-						++falseCorrupt;
-					else if (status == LoadStatus::Ok && seen.scale.mode == ScaleMode::Fixed &&
-							 !isUserScale(seen.scale.value))
-						++badValues;
+					const bool writing = firstWriteComplete.load();
+					read();
+					if (writing && !participated)
+					{
+						participated = true;
+						readDuringWrites.count_down();
+					}
 				}
 			});
-		PlayerUiSettings autoRecord, fixedRecord;
-		autoRecord.scale = {ScaleMode::Auto, 1.f};
-		fixedRecord.scale = {ScaleMode::Fixed, 1.5f};
+		started.wait();
 		for (int i = 0; i < 40; ++i)
+		{
 			CHECK((i % 2 ? fixedRecord : autoRecord).save(path),
 				"a writer alternating records succeeds while readers load");
+			if (i == 0)
+			{
+				firstWriteComplete = true;
+				readDuringWrites.wait();
+			}
+		}
 		stop = true;
 		for (auto &reader : readers)
 			reader.join();
-		CHECK(falseCorrupt.load() == 0 && badValues.load() == 0,
-			"concurrent readers never report a false corrupt record or a partial value");
+		CHECK(failedReads.load() == 0 && badValues.load() == 0,
+			"concurrent readers always load one complete record (failed loads=" << failedReads.load() <<
+			", unexpected records=" << badValues.load() << ')');
+		std::clog << "[fixture] reader/writer race ends" << std::endl;
 	}
 
 #if defined(_WIN32)
+	{
+		using namespace gameui::settings_io;
+		const HANDLE exclusive = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(exclusive != INVALID_HANDLE_VALUE, "hold the record for a real retry sequence");
+		if (exclusive != INVALID_HANDLE_VALUE)
+		{
+			size_t calls = 0, waits = 0;
+			HANDLE reader = INVALID_HANDLE_VALUE;
+			DWORD firstError = ERROR_SUCCESS;
+			const auto result = retryWindowsFile([&] {
+				reader = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+					nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+				const DWORD error = reader == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+				if (++calls == 1)
+					firstError = error;
+				return FileAttempt{error, FilePhase::Open};
+			}, [&] {
+				if (++waits == 1)
+					CloseHandle(exclusive);
+			});
+			if (!waits)
+				CloseHandle(exclusive);
+			if (reader != INVALID_HANDLE_VALUE)
+				CloseHandle(reader);
+			CHECK(firstError == ERROR_SHARING_VIOLATION && result.error == ERROR_SUCCESS && calls == 2 && waits == 1,
+				"releasing an actual exclusive handle after the first failure lets the same sequence recover");
+		}
+	}
 	// An open handle with DELETE access models the sharing requirements of
 	// a replacement. A concurrent reader must share that access.
 	{
@@ -545,6 +659,17 @@ void preferences()
 		const HANDLE holder = CreateFileW(path.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		CHECK(holder != INVALID_HANDLE_VALUE, "another instance can hold a delete-enabled handle");
+		{
+			// Reproduce the sharing conflict from the CRT open used before #318.
+			const HANDLE noDeleteShare = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+				nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+			const auto openError = noDeleteShare == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+			CHECK(openError == ERROR_SHARING_VIOLATION, "an open without delete sharing conflicts with DELETE access");
+			if (noDeleteShare != INVALID_HANDLE_VALUE)
+				CloseHandle(noDeleteShare);
+			const std::ifstream crtOpen(path, std::ios::binary);
+			CHECK(!crtOpen.is_open(), "the previous CRT stream open fails under the same DELETE access");
+		}
 		PlayerUiSettings loaded;
 		CHECK(loaded.load(path) == LoadStatus::Ok && loaded == kept,
 			"the preferences reader shares delete access with an in-progress replacement");
@@ -567,6 +692,9 @@ void preferences()
 		PlayerUiSettings replacement;
 		replacement.scale = {ScaleMode::Fixed, 2.f};
 		CHECK(!replacement.save(path), "a replace against a held destination is reported as failed");
+		const auto beforeLoad = replacement;
+		CHECK(replacement.load(path) == LoadStatus::Busy && replacement == beforeLoad,
+			"an exclusive open exhausts read retries as Busy and preserves the current values");
 		if (holder != INVALID_HANDLE_VALUE)
 			CloseHandle(holder);
 		PlayerUiSettings after;
@@ -576,6 +704,56 @@ void preferences()
 		for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
 			stagingLeft = stagingLeft || entry.path().filename().string().find(".tmp.") != std::string::npos;
 		CHECK(!stagingLeft, "a failed replacement against the destination leaves no staging file");
+	}
+	{
+		const HANDLE holder = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(holder != INVALID_HANDLE_VALUE, "open a shared handle for a byte lock");
+		if (holder != INVALID_HANDLE_VALUE)
+		{
+			OVERLAPPED region{};
+			const bool locked = LockFileEx(holder, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+				0, 1, 0, &region) != 0;
+			CHECK(locked, "lock the first byte without blocking other opens");
+			if (locked)
+			{
+				PlayerUiSettings loaded;
+				CHECK(loaded.load(path) == LoadStatus::Busy && loaded == PlayerUiSettings{},
+					"a byte lock exhausts ReadFile retries as Busy and preserves the current values");
+				CHECK(UnlockFileEx(holder, 0, 1, 0, &region) != 0, "release the byte lock");
+				CHECK(loaded.load(path) == LoadStatus::Ok && loaded.scale.value == 1.25f,
+					"the original record loads once the lock is released");
+			}
+			CloseHandle(holder);
+		}
+	}
+	{
+		const auto pending = dir / "delete-pending.txt";
+		CHECK(custom.save(pending), "seed a delete-pending fixture");
+		const HANDLE holder = CreateFileW(pending.c_str(), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		CHECK(holder != INVALID_HANDLE_VALUE, "retain a handle to the delete-pending fixture");
+		if (holder != INVALID_HANDLE_VALUE)
+		{
+			if (DeleteFileW(pending.c_str()))
+			{
+				const HANDLE probe = CreateFileW(pending.c_str(), GENERIC_READ,
+					FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+					FILE_ATTRIBUTE_NORMAL, nullptr);
+				if (probe == INVALID_HANDLE_VALUE)
+				{
+					const auto rawError = GetLastError();
+					auto seen = custom;
+					CHECK(seen.load(pending) == settings_io::loadFailure({rawError, settings_io::FilePhase::Open}) &&
+						seen == custom, "delete-pending open failure " << rawError << " keeps the existing settings");
+				}
+				else
+					CloseHandle(probe);
+			}
+			CloseHandle(holder);
+		}
 	}
 #endif
 
@@ -624,6 +802,9 @@ void preferences()
 
 int main()
 {
+#if defined(_WIN32)
+	windowsRetryPolicy();
+#endif
 	paletteContrast();
 	typography();
 	states();

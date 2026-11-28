@@ -1,8 +1,9 @@
 #include <Engine/PlayerUiPreferences.hpp>
 
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <charconv>
-#include <thread>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -10,9 +11,11 @@
 #include <system_error>
 
 #if defined(_WIN32)
-#include <windows.h>
+#include <Engine/PlayerUiPreferencesWin32.hpp>
 
+#include <iostream>
 #include <process.h>
+#include <syncstream>
 #else
 #include <unistd.h>
 #endif
@@ -101,6 +104,47 @@ std::filesystem::path stagingPath(const std::filesystem::path &path)
 	return staging;
 }
 
+#if defined(_WIN32)
+using namespace settings_io;
+
+FileAttempt retryFileOperation(const char *name, auto operation)
+{
+	using Clock = std::chrono::steady_clock;
+	static const bool trace = [] {
+		wchar_t enabled[2]{};
+		return GetEnvironmentVariableW(L"FT_VOX_PLAYER_SETTINGS_TRACE", enabled, 2) == 1 && enabled[0] == L'1';
+	}();
+	struct Failure
+	{
+		FileAttempt result;
+		std::chrono::microseconds elapsed;
+	};
+	std::array<Failure, kAttempts> failures;
+	const auto started = trace ? Clock::now() : Clock::time_point{};
+	size_t failed = 0;
+	const auto final = retryWindowsFile([&] {
+		const auto result = operation();
+		if (trace && result.error != ERROR_SUCCESS)
+			failures[failed++] = {result, std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started)};
+		return result;
+	}, [] { Sleep(1); });
+	// Emit after the sequence so logging does not delay its retries. Keep all
+	// attempts together and omit paths and preference contents.
+	if (trace && failed != 0)
+	{
+		std::osyncstream log(std::clog);
+		constexpr std::array phaseNames{"open", "read", "rename"};
+		log << "[player-settings] " << name << " final_error=" << final.error
+			<< " attempts=" << failed + (final.error == ERROR_SUCCESS ? 1 : 0) << '\n';
+		for (size_t i = 0; i < failed; ++i)
+			log << "  attempt=" << i + 1 << " phase=" << phaseNames[static_cast<size_t>(failures[i].result.phase)]
+				<< " error=" << failures[i].result.error
+				<< " elapsed_us=" << failures[i].elapsed.count() << '\n';
+	}
+	return final;
+}
+#endif
+
 /// Atomically replace `to` with `from`. On POSIX rename(2) replaces atomically;
 /// Windows needs MOVEFILE_REPLACE_EXISTING, and NEVER an explicit delete of the
 /// previous record (that would leave a window with no preferences at all).
@@ -110,18 +154,10 @@ bool replaceFile(const std::filesystem::path &from, const std::filesystem::path 
 	// Two game instances can replace the same record at the same time. Windows
 	// reports a sharing/lock violation instead of arbitrating, so a bounded
 	// retry loop turns that race into a normal last-writer-wins outcome.
-	for (int attempt = 0; attempt < 40; ++attempt)
-	{
-		if (MoveFileExW(from.c_str(), to.c_str(),
-				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
-			return true;
-		const auto error = GetLastError();
-		if (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION &&
-			error != ERROR_LOCK_VIOLATION)
-			return false;
-		Sleep(1);
-	}
-	return false;
+	return retryFileOperation("replace", [&] {
+		return FileAttempt{MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+			? ERROR_SUCCESS : GetLastError(), FilePhase::Rename};
+	}).error == ERROR_SUCCESS;
 #else
 	std::error_code ec;
 	std::filesystem::rename(from, to, ec);
@@ -246,65 +282,35 @@ LoadStatus readRecord(const std::filesystem::path &path, auto decode)
 #if defined(_WIN32)
 	// A reader stays on one complete record while MoveFileEx replaces the
 	// path. The CRT stream does not share DELETE access with the replacer.
-	for (int attempt = 0; attempt < 40; ++attempt)
-	{
+	char record[kMaxPlayerUiSettingsBytes + 1];
+	DWORD bytesRead = 0;
+	const auto result = retryFileOperation("load", [&] {
 		const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
 			FILE_ATTRIBUTE_NORMAL, nullptr);
-		if (file != INVALID_HANDLE_VALUE)
-		{
-			char record[kMaxPlayerUiSettingsBytes + 1];
-			DWORD bytesRead = 0;
-			const bool read = ReadFile(file, record, static_cast<DWORD>(sizeof(record)), &bytesRead, nullptr) != 0;
-			CloseHandle(file);
-			return read && decode(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
-		}
-		const auto error = GetLastError();
-		if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-			return LoadStatus::Missing;
-		if (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION &&
-			error != ERROR_LOCK_VIOLATION && error != ERROR_DELETE_PENDING)
-			break;
-		Sleep(1);
-	}
-	return LoadStatus::Corrupt;
+		if (file == INVALID_HANDLE_VALUE)
+			return FileAttempt{GetLastError(), FilePhase::Open};
+		const DWORD readError = ReadFile(file, record, static_cast<DWORD>(sizeof(record)), &bytesRead, nullptr)
+			? ERROR_SUCCESS : GetLastError();
+		CloseHandle(file);
+		return FileAttempt{readError, FilePhase::Read};
+	});
+	if (result.error == ERROR_SUCCESS)
+		return decode(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
+	return loadFailure(result);
 #else
-	// Open first, then read bounded chunks from that same handle (issue #302
-	// R03). Asking for the size separately would describe one record while the
-	// handle pointed at another once a concurrent writer replaces the file.
-	std::ifstream in;
-	for (int attempt = 0; attempt < 5 && !in.is_open(); ++attempt)
-	{
-		in.open(path, std::ios::binary);
-		if (!in.is_open())
-		{
-			// A concurrent writer holds the record for a moment while it renames;
-			// that transient sharing violation is not corruption.
-			in.clear();
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-	}
-	if (!in.is_open())
-	{
-		// A record that simply is not there (including a not-yet-created parent
-		// directory) is a fresh install, not corruption.
-		std::error_code ec;
-		const bool present = std::filesystem::exists(path, ec);
-		return (!present && !ec) ? LoadStatus::Missing : LoadStatus::Corrupt;
-	}
-	std::string record;
-	char chunk[512];
-	while (record.size() <= kMaxPlayerUiSettingsBytes)
-	{
-		in.read(chunk, static_cast<std::streamsize>(sizeof(chunk)));
-		const auto got = static_cast<size_t>(in.gcount());
-		record.append(chunk, got);
-		if (got < sizeof(chunk))
-			break;
-	}
-	if (in.bad() || record.size() > kMaxPlayerUiSettingsBytes)
-		return LoadStatus::Corrupt;
-	return decode(record) ? LoadStatus::Ok : LoadStatus::Corrupt;
+	// Use the open error from this operation. A second path lookup could see
+	// a different record after a concurrent rename.
+	auto *file = std::fopen(path.c_str(), "rb");
+	if (!file)
+		return errno == ENOENT ? LoadStatus::Missing : LoadStatus::Unavailable;
+	char record[kMaxPlayerUiSettingsBytes + 1];
+	const auto bytesRead = std::fread(record, 1, sizeof(record), file);
+	const bool readFailed = std::ferror(file) != 0;
+	const bool closeFailed = std::fclose(file) != 0;
+	if (readFailed || closeFailed)
+		return LoadStatus::Unavailable;
+	return decode(std::string_view(record, bytesRead)) ? LoadStatus::Ok : LoadStatus::Corrupt;
 #endif
 }
 } // namespace

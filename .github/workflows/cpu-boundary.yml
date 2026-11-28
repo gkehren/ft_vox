@@ -91,7 +91,21 @@ jobs:
         run: cmake --build build-cpu --config Release --parallel
 
       - name: Test (CPU-only suite + clean-configure gate)
+        env:
+          FT_VOX_PLAYER_SETTINGS_TRACE: '1'
         run: ctest --test-dir build-cpu -C Release --output-on-failure --timeout 600
+
+      - name: Stress player settings on Windows (optional)
+        if: ${{ vars.FT_VOX_GAME_UI_STYLE_REPEAT != '' }}
+        env:
+          FT_VOX_GAME_UI_STYLE_REPEAT: ${{ vars.FT_VOX_GAME_UI_STYLE_REPEAT }}
+          FT_VOX_PLAYER_SETTINGS_TRACE: '1'
+        run: |
+          $runs = 0
+          if (-not [int]::TryParse($env:FT_VOX_GAME_UI_STYLE_REPEAT, [ref]$runs) -or $runs -lt 1 -or $runs -gt 100) {
+            throw 'FT_VOX_GAME_UI_STYLE_REPEAT must be an integer from 1 to 100'
+          }
+          ctest --test-dir build-cpu -C Release -R '^GameUiStyle$' --repeat "until-fail:$runs" --verbose --timeout 60
 
   cpu-sanitizers:
     runs-on: ubuntu-latest
