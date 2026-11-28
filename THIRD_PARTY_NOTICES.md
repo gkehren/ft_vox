@@ -67,6 +67,14 @@ attribution accompanies the compressed source in `src/imgui/imgui_draw.cpp`.
 The HUD, inventory and crafting component preview use the resource-pack
 atlas described above.
 
+## Source Sans 3 (visual-direction mockups)
+
+The Phase A concept PNGs use Source Sans 3 Regular and Semibold, release
+3.052R. Copyright 2010–2022 Adobe, with Reserved Font Name “Source”.
+The font is available under the SIL Open Font License 1.1. The mockups
+contain rasterized text. To regenerate them, use the pinned upstream
+font files. [Source, hashes and license](docs/game-ui-visual-direction.md#asset-provenance-and-reproduction)
+
 ## stb_image (vendored under `src/stb_image/stb_image.h`)
 
 stb_image v2.28 by Sean Barrett — dual-licensed to the public domain or under
