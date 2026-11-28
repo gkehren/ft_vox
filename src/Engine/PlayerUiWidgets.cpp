@@ -567,7 +567,7 @@ void WidgetSet::paint(DrawList &out, FontView font, float scale, ControlId focus
 				if (fillRect.empty())
 					return;
 				glm::vec4 selection = p.accent;
-				selection.a = 0.32f;
+				selection.a = theme.overlay.textSelection;
 				surface.fill(fillRect, selection, 0.f);
 			};
 			if (preedit.empty())

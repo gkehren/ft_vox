@@ -76,41 +76,34 @@ const auto &theme()
 void paletteContrast()
 {
 	const auto &p = theme().palette;
-	CHECK(style::contrastRatio(style::rgb(p.ink), style::rgb(p.surface)) >= style::kMinBodyContrast,
-		"body ink is AA-legible on the card surface");
-	CHECK(style::contrastRatio(style::rgb(p.inkMuted), style::rgb(p.surface)) >=
-			style::kMinBodyContrast,
-		"secondary ink is AA-legible on the card surface");
-	CHECK(style::contrastRatio(style::rgb(p.ink), style::rgb(p.surfaceRaised)) >=
-			style::kMinBodyContrast,
-		"body ink stays AA-legible on a hovered/selected row");
-	CHECK(style::contrastRatio(style::rgb(p.inkMuted), style::rgb(p.surfaceRaised)) >=
-			style::kMinSecondaryContrast,
-		"secondary ink keeps the large-text floor on raised rows");
-	CHECK(style::contrastRatio(style::rgb(p.inkOnAccent), style::rgb(p.accent)) >=
-			style::kMinBodyContrast,
-		"labels on an accent-filled primary button are AA-legible");
-	CHECK(style::contrastRatio(style::rgb(p.error), style::rgb(p.surface)) >= style::kMinSecondaryContrast &&
-			style::contrastRatio(style::rgb(p.pending), style::rgb(p.surface)) >=
-				style::kMinSecondaryContrast,
-		"error and pending markers are distinguishable on the card surface");
-	const float disabled = style::contrastRatio(style::rgb(p.inkDisabled), style::rgb(p.surfaceSunken));
-	CHECK(disabled >= style::kMinDisabledContrast && disabled < style::kMinBodyContrast,
-		"disabled content is perceivable but visibly below the interactive floor");
-
-	// The HUD paints text on the hudScrim token, never directly on the scene.
+	const auto ratio = [](glm::vec4 ink, glm::vec4 background) {
+		return style::contrastRatio(style::rgb(ink), style::rgb(background));
+	};
+	for (const auto face : {p.surface, p.control, p.surfaceRaised, p.surfaceSunken})
+	{
+		for (const auto ink : {p.ink, p.inkMuted, p.inkDisabled})
+			CHECK(ratio(ink, face) >= style::kMinBodyContrast, "Slate text reaches 4.5:1 on its surfaces");
+		for (const auto cue : {p.border, p.focus, p.accent, p.error, p.pending})
+			CHECK(ratio(cue, face) >= style::kMinIndicatorContrast, "Slate control and status cues reach 3:1");
+	}
+	CHECK(ratio(p.border, p.canvas) >= style::kMinIndicatorContrast &&
+		ratio(p.focus, p.border) >= style::kMinIndicatorContrast, "focus and button edges remain operative");
+	for (const auto filled : {p.accent, p.accentPressed, p.error})
+		CHECK(ratio(p.inkOnAccent, filled) >= style::kMinBodyContrast &&
+			ratio(p.surfaceSunken, filled) >= style::kMinIndicatorContrast,
+			"filled action ink and focus keyline stay legible");
 	for (const bool bright : {true, false})
 	{
-		const char *scene = bright ? "bright" : "dark";
-		CHECK(style::hudContrast(theme(), p.ink, bright) >= style::kMinBodyContrast,
-			"HUD body text is AA-legible over a " << scene << " scene (ratio="
-				<< style::hudContrast(theme(), p.ink, bright) << ')');
-		CHECK(style::hudContrast(theme(), p.inkMuted, bright) >= style::kMinSecondaryContrast,
-			"HUD secondary text keeps the large-text floor on a " << scene << " scene (ratio="
-				<< style::hudContrast(theme(), p.inkMuted, bright) << ')');
+		CHECK(style::hudContrast(theme(), p.ink, bright) >= style::kMinBodyContrast &&
+			style::hudContrast(theme(), p.inkMuted, bright) >= style::kMinBodyContrast,
+			"opaque HUD plates are legible over white and black scenes");
+		auto translucent = theme();
+		translucent.palette.hudScrim.a = 0.94f;
+		CHECK(style::hudContrast(translucent, p.inkMuted, bright) >= style::kMinBodyContrast,
+			"the documented 94% minimum backing remains legible");
 	}
-	CHECK(std::abs(style::composite({1.f, 1.f, 1.f}, {0.f, 0.f, 0.f}, 0.5f).r - 0.5f) < 0.0001f,
-		"composite blends with the authored linear alpha");
+	CHECK(std::abs(style::composite({1.f, 1.f, 1.f}, {0.f, 0.f, 0.f}, 0.5f).r - 0.7353569f) < 0.0001f,
+		"half-white is composited in linear light");
 	CHECK(style::contrastRatio({1.f, 1.f, 1.f}, {0.f, 0.f, 0.f}) > 20.f &&
 			style::contrastRatio({0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}) == 1.f,
 		"contrast ratio is 21:1 for black on white and 1:1 for a pair with itself");
@@ -125,7 +118,7 @@ void typography()
 	for (size_t i = 1; i < 4; ++i)
 		CHECK(sizes[i] > sizes[i - 1], "text roles are strictly ordered by size");
 	for (const auto role : {style::TextRole::Caption, style::TextRole::Body, style::TextRole::Heading,
-			 style::TextRole::Title})
+			 style::TextRole::Title, style::TextRole::Count, style::TextRole::Action})
 		CHECK(style::lineHeight(role) >= style::typeToken(role).pixels,
 			"a role's line height never clips its own glyphs");
 	CHECK(std::abs(style::typeScale(style::TextRole::Body) - 1.f) < 0.0001f,
@@ -143,9 +136,8 @@ void typography()
 		"focus rings are at least as visible as a resting border");
 	CHECK(sizing.slot > sizing.slotGap && sizing.buttonHeight >= sizing.rowHeight,
 		"slot and control metrics leave room for their own gaps");
-	CHECK(theme().overlay.scrim > theme().overlay.hudScrim &&
-			theme().overlay.card > theme().overlay.hudScrim,
-		"a modal scrim is darker than the HUD backdrop and cards stay readable");
+	CHECK(theme().overlay.scrim == 0.78f && theme().overlay.hudScrim == 1.f &&
+			theme().overlay.card == 1.f, "the modal scrim and opaque reading surfaces match Slate");
 }
 
 void states()
@@ -214,12 +206,6 @@ void states()
 	CHECK(has(settled, State::Selected) && has(settled, State::Pending) &&
 			has(settled, State::Disabled) && !has(settled, State::Focused),
 		"settleState keeps validation and selection, drops focus when disabled");
-	CHECK(slotState(State::Selected | State::Focused) == (State::Selected | State::Focused) &&
-			slotState(State::Error | State::Focused) == (State::Error | State::Focused),
-		"an enabled slot keeps its focus, selection and validation flags");
-	CHECK(has(slotState(State::Selected | State::Focused | State::Disabled), State::Selected) &&
-			!has(slotState(State::Selected | State::Focused | State::Disabled), State::Focused),
-		"a disabled slot keeps the selection marker without a focus ring");
 	CHECK(toggleFace(theme(), State::Rest, true) == p.accent &&
 			toggleFace(theme(), State::Disabled, true) != p.accent,
 		"a disabled toggle never paints the on-state accent");
@@ -245,16 +231,21 @@ void states()
 	CHECK(selectedSlot.border == p.borderStrong &&
 			selectedSlot.borderWidth == theme().size.borderStrongWidth,
 		"a selected slot is stronger than a resting one");
-	CHECK(slotRejected.border == p.error && slotRejected.borderWidth == theme().size.focusRing,
-		"focus widens the ring but never hides a rejected value");
-	CHECK(slotPending.border == p.pending && slotPending.borderWidth == theme().size.focusRing,
-		"focus widens the ring but never hides a pending value");
-	CHECK(disabledSlot.border == p.borderStrong &&
-			disabledSlot.borderWidth == theme().size.borderStrongWidth &&
+	CHECK(slotRejected.border == p.error && slotRejected.focused && slotRejected.mark == SlotMark::Rejected,
+		"rejected edge and marker coexist with an independent focus ring");
+	CHECK(slotPending.border == p.pending && slotPending.focused && slotPending.mark == SlotMark::Pending,
+		"pending edge and dots coexist with an independent focus ring");
+	CHECK(disabledSlot.border == p.borderStrong && disabledSlot.selected && !disabledSlot.focused &&
+			disabledSlot.interaction == SlotInteraction::Disabled &&
 			disabledSlot.indicator == p.inkDisabled && disabledSlot.tint.a < 1.f,
-		"a disabled slot keeps its selection marker, drops the focus ring and dims its content");
-	CHECK(slotTokens(theme(), State::Disabled | State::Error).border == p.error,
-		"validation still colours a disabled slot's border");
+		"a disabled slot keeps its selection, suppresses focus and dims the item");
+	const auto compound = slotTokens(theme(), State::Selected | State::Pending | State::Focused);
+	CHECK(compound.selected && compound.focused && compound.mark == SlotMark::Pending,
+		"selection survives a pending edge and focus ring");
+	const auto disabledRejected = slotTokens(theme(), State::Disabled | State::Pending | State::Error | State::Pressed);
+	CHECK(disabledRejected.border == p.error && disabledRejected.mark == SlotMark::Rejected &&
+			disabledRejected.interaction == SlotInteraction::Disabled,
+		"rejection wins over pending while a disabled slot suppresses press");
 }
 
 void scaling()

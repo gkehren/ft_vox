@@ -2,7 +2,7 @@
 
 // Player UI text service seam — issue #302, Epic #298 Phase D.
 //
-// One audited face, one glyph table, one documented fallback: the text roles
+// One audited family, two weights, one documented fallback: the text roles
 // of PlayerUiStyle.hpp are measured and painted through this header, and every
 // component fits its labels through `fitText` so variable-length strings never
 // silently overflow their control (the 16:9 / 21:9 / 100–200% evidence in
@@ -108,7 +108,7 @@ inline TextMetrics measureRole(FontView font, std::string_view text, style::Text
 							   float fontScale = 1.f)
 {
 	const auto style = textStyle(role, scale, fontScale);
-	return {font.measure(text, style.glyphScale()), style.lineHeight()};
+	return {font.forRole(role).measure(text, style.glyphScale()), style.lineHeight()};
 }
 
 /// Clip one glyph quad to `bounds`, remapping its UV rectangle so a partially
@@ -157,6 +157,7 @@ struct FittedText
 inline FittedText fitText(FontView font, std::string_view text, style::TextRole role, float scale,
 						  float maxWidth)
 {
+	font = font.forRole(role);
 	const float roleScale = style::typeScale(role) * (scale > 0.f ? scale : 1.f);
 	if (maxWidth <= 0.f)
 		return {};
@@ -205,6 +206,7 @@ inline int wrapText(FontView font, std::string_view text, style::TextRole role, 
 {
 	if (lines.empty() || text.empty() || maxWidth <= 0.f)
 		return 0;
+	font = font.forRole(role);
 	const float glyphs = style::typeScale(role) * (scale > 0.f ? scale : 1.f);
 	size_t start = 0;
 	while (start < text.size() && text[start] == ' ')

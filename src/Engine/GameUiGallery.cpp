@@ -441,8 +441,9 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 		for (size_t i = 0; i < slots.size(); ++i)
 			slots[i] = sampleSlot(kSampleStacks[i], m_draws.atlasGeneration(),
 				i == size_t(m_gallerySlot) ? style::State::Selected : style::State::Rest);
-		slots[3].state |= style::State::Disabled;
-		slots[4].state |= style::State::Pending;
+		slots[3].state |= style::State::Selected | style::State::Disabled;
+		slots[4].state |= style::State::Selected | style::State::Pending | style::State::Focused;
+		slots[5].state |= style::State::Pending | style::State::Error | style::State::Focused;
 		slots[4].progress = 0.45f;
 		slots[1].durability = 0.18f;
 		paint.slotGrid(slotGrid(strip, 9, 1, theme.size.slotGap * s), slots, -1);
@@ -478,6 +479,8 @@ void GameUiSample::paintDesignSystem(glm::vec2 pointer)
 		inputs[4] = sampleSlot(kSampleStacks[2], m_draws.atlasGeneration(), style::State::Rest);
 		inputs[0].label = "Cobblestone";
 		inputs[4].label = "Dirt";
+		paint.fittedLabel(layout.inputLabel, "Input", style::TextRole::Caption, theme.palette.inkMuted, 0.f);
+		paint.fill(layout.separator, theme.palette.divider, 0.f);
 		paint.slotGrid(layout.inputs, inputs);
 		if (!layout.output.empty())
 		{

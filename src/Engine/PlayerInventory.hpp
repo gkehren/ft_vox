@@ -63,9 +63,10 @@ struct InventoryView
 
 struct InventoryLayout
 {
-	Clip panel, title, instructions, status, hotbarLabel, close, drop, detail;
+	Clip panel, title, instructions, status, recovery, hotbarLabel, close, drop, detail;
 	SlotGrid main, hotbar;
 	float scale{};
+	bool compact{};
 
 	Clip slot(inventoryui::SlotId id) const;
 	inventoryui::SlotId hitSlot(glm::vec2 point) const;

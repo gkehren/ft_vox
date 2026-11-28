@@ -1376,6 +1376,11 @@ add_executable(test_engine_reload
 )
 
 add_dependencies(test_engine_reload ft_vox_shaders ft_vox_build_info)
+add_custom_command(TARGET test_engine_reload POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/ressources/fonts/source-sans-3
+        $<TARGET_FILE_DIR:test_engine_reload>/ressources/fonts/source-sans-3
+)
 
 target_include_directories(test_engine_reload PRIVATE
     ${CMAKE_SOURCE_DIR}/src

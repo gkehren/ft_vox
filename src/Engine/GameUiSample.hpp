@@ -119,7 +119,7 @@ private:
 	uint32_t nextToastId() { return ++m_toastSerial; }
 	bool windowInteractive() const;
 	void activate(const char *source);
-	gameui::FontView font() const { return {m_face.glyphs}; }
+	gameui::FontView font() const { return {m_face.glyphs, m_face.semibold}; }
 	gameui::Surface surface(gameui::Clip clip);
 	void buildScreen(gameui::Clip scene, float scale);
 	void buildGallery(gameui::Clip scene, float scale);

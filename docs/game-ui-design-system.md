@@ -1,6 +1,6 @@
 # Player design system (Game UI)
 
-Issue #302, Epic #298 Phase D. This document is the visual and behavioral
+Issues #302 and #327. This document is the visual and behavioral
 specification of the player-facing design system: the one baseline theme, the
 audited face, the scale policy, the reusable components, the inventory-slot
 contract and the evidence that backs them.
@@ -21,81 +21,73 @@ Engine/PlayerUiFonts.*       -> the audited face bake (graphics-scoped TU)
 
 ## 1. One baseline theme
 
-`gameui::style::baseline()` is the only theme. There is no second palette: the
-epic asks for one coherent baseline, and every component reads these tokens.
+`gameui::style::baseline()` uses the approved Slate palette from the
+[visual direction](game-ui-visual-direction.md). Tokens are sRGB colors
+with linear alpha. The [Slate verification](game-ui-slate-verification.md)
+records paired native captures, runtime checks and performance.
 
-| Token | Value (sRGB) | Used for |
+| Token | Value | Application |
 | --- | --- | --- |
-| `ink` | 0.941, 0.969, 1.000 | primary text on player surfaces |
-| `inkMuted` | 0.702, 0.769, 0.812 | captions, secondary values, trailing text |
-| `inkDisabled` | 0.408, 0.451, 0.478 | disabled labels and glyphs |
-| `inkOnAccent` | 0.031, 0.055, 0.071 | text on an accent-filled control |
-| `canvas` | 0.027, 0.039, 0.050 | opaque backdrop behind a screen |
-| `surface` | 0.052, 0.083, 0.103 | card face |
-| `surfaceRaised` | 0.192, 0.341, 0.369 | headers, hovered/selected rows |
-| `surfaceSunken` | 0.033, 0.055, 0.070 | wells, slots, list bodies |
-| `border` | 0.157, 0.226, 0.259 | resting outline |
-| `borderStrong` / `accent` | 0.310, 0.878, 0.760 | selection, primary action, progress |
-| `focus` | 0.941, 0.969, 1.000 | keyboard focus ring |
-| `scrim` | 0.016, 0.024, 0.031 @ 0.68 | modal scrim |
-| `hudScrim` | 0.020, 0.031, 0.047 @ 0.62 | HUD text backdrop over the scene |
-| `ok` / `warning` / `error` / `info` / `pending` | 0.478,0.847,0.541 / 0.961,0.769,0.353 / 0.929,0.443,0.396 / 0.522,0.757,0.949 / 0.694,0.639,0.910 | status semantics |
+| `ink`, `inkMuted`, `inkDisabled`, `inkOnAccent` | `#F4F6EF`, `#B7C7BD`, `#96A69C`, `#151B19` | Primary, secondary, disabled and filled-action text |
+| `canvas`, `surface`, `surfaceRaised`, `control`, `surfaceSunken` | `#141A18`, `#202625`, `#2D3531`, `#303A35`, `#151B19` | Backdrop, card, raised group, secondary control or hover, and well |
+| `border`, `divider` | `#70887D`, `#46594F` | Operative edge and decorative rule |
+| `accent`, `accentPressed`, `focus` | `#ABE5C8`, `#85BAA0`, `#FFFBEF` | Selection, primary fill, pressed fill and focus |
+| `scrim`, `hudScrim` | `#0C1310` at 78%, opaque `#151B19` | Modal dimming and HUD label plates |
+| `ok`, `warning`, `error`, `info`, `pending` | `#A4DAA8`, `#F3CE82`, `#FFAD9C`, `#A4CDEA`, `#C9BAED` | Feedback and semantic edges |
 
-Typography (measured from the baked face, `kFontPixels = 13`):
-
-| Role | Pixels | Line height | Where |
+| Role | Size / line at 100% | Weight | Use |
 | --- | --- | --- | --- |
-| `Caption` | 11 | 14 | slot counts, section captions, tooltips, validation messages |
-| `Body` | 13 | 17 | labels, buttons, list rows, HUD text |
-| `Heading` | 18 | 23 | section headers, dialog titles |
-| `Title` | 26 | 32 | gallery specimen and future screen titles |
+| Caption | 13 / 16 | Regular | Tooltips, secondary labels and feedback |
+| Body | 15 / 20 | Regular | Labels, editor, list rows and HUD |
+| Heading | 18 / 23 | Semibold | Section headings and dialog titles |
+| Title | 24 / 30 | Semibold | Inventory and gallery screen titles |
+| Count | 14 / 17 | Semibold | Right-aligned stack count |
+| Action | 15 / 20 | Semibold | Text on filled actions |
 
-Spacing (`xxs` 2, `xs` 4, `sm` 6, `md` 8, `lg` 12, `xl` 16), sizing (control 28,
-row 24, slot 36, slot gap 4, hotbar bottom margin 10, crosshair 5, border 1,
-strong border 2, focus ring 2) and radii (2 / 4 / 6) are the only literals a
-component may use, scaled by the resolved player scale.
+Spacing is 2, 4, 6, 8, 12 and 16 logical units. Square slots are 36 units
+with a 4-unit gap. Operative borders use 1 unit at rest, semantic borders
+use 2 units and the HUD hotbar uses a 14-unit bottom inset where space
+allows. Use zero corner radius for Slate frames.
 
-### State precedence
+### State precedence and contrast
 
-`style::State` is a flag set; `style::interactiveState(enabled, hovered,
-pressed, focused, selected)` is the single producer. Resolution:
+`style::interactiveState` supplies the shared flags. Disabled clears hover,
+press and interactive focus while preserving selection and semantic status.
+Buttons may draw a dark keyline between a filled action and the light
+focus ring. Form validation retains its border during focus. List
+selection keeps its separate leading mark.
 
-| Component | Order |
-| --- | --- |
-| Button | disabled → pressed → primary/danger accent → hover → rest. Focus never changes a fill; it replaces the border with `focus` at ring width. |
-| List row | disabled → selected (ink text + accent marker) → hovered (raised face, muted text) |
-| Form field | validation (`error`, `pending`) → focused (`focus` border) → rest (`border`). Disabled keeps muted text and its validation border. |
-| Slot | `style::slotTokens` resolves the whole appearance, one rule each: disabled clears focus/hover/press and dims the icon; validation (`error` > `pending`) owns the border colour; focus owns the border width (ring); selection owns the resting border strength. Focus therefore widens an error/pending border without hiding it. |
+`style::slotTokens` selects the outer edge by rejected, pending, selected
+and rest. The selection tab, three-dot pending mark or rejection mark,
+interaction slash or tick, and complete inner focus ring occupy separate
+regions. Item and count have independent backings; optional progress
+and durability use a separate lower band. The same `Surface::slot` paints
+HUD, inventory and gallery slots. Rejection without a known slot identity
+uses the screen's status region.
 
-### Readability contract
-
-Contrast is asserted, not eyeballed (`tests/test_game_ui_style.cpp`):
-
-- `ink` and `inkMuted` on `surface` / `surfaceRaised` reach WCAG AA (4.5:1 body,
-  3:1 large/secondary).
-- HUD text is measured over `hudScrim` composited on the two extreme scene
-  tokens (`kSceneBackdrop.bright` = sunlit sky/snow, `.dark` = night/cave):
-  `ink` ≥ 6.2:1 and `inkMuted` ≥ 3.7:1 on **both**, which is why HUD text is
-  always painted on the scrim and never directly on the world.
-- `inkOnAccent` on `accent` ≈ 11.8:1 (primary button labels).
-- `inkDisabled` stays perceivable but below the interactive floor (2:1 ≤ r <
-  4.5:1) so a disabled control reads as disabled without vanishing.
+`GameUiStyle` asserts 4.5:1 for ordinary, secondary and disabled text and
+3:1 for operative cues. It verifies the filled-action keyline and linear
+compositing over white and black. The
+[contrast matrix](game-ui-visual-direction.md#color-and-contrast) records
+the adjacent surfaces. HUD labels use opaque plates sized to their
+contents. Decorative rules and optional disabled outlines need no
+operative-edge contrast.
 
 ## 2. The audited face and icons
 
-| Asset | Source | License | Notice |
-| --- | --- | --- | --- |
-| ProggyClean bitmap face | `src/imgui/imgui_draw.cpp` (Dear ImGui 1.91.9 WIP embedded face) | MIT | `src/imgui/LICENSE.txt` |
+Source Sans 3 Regular and Semibold are the unmodified Adobe 3.052R TTFs
+distributed under the SIL Open Font License 1.1. See
+[asset provenance and hashes](game-ui-visual-direction.md#asset-provenance-and-reproduction)
+and [the distributed license](../ressources/fonts/source-sans-3/OFL.txt).
 
-`PlayerUiFonts.cpp` bakes one independent copy of that face into the player UI's
-own alpha atlas at `kFontPixels × framebufferScale` (`bakeFace`), so:
-
-- no new asset, download, package or license obligation is introduced;
-- glyphs are rasterized at device resolution and mapped back to logical units
-  through `fontScale = 1 / framebufferScale` (the same trick ImGuiLayer uses
-  with `io.FontGlobalScale`);
-- the coverage bitmap, extents and glyph table are owned by the player UI, not
-  by ImGui's atlas.
+`PlayerUiFonts.cpp` uses the existing vendored ImGui rasterizer in an
+independent bake. A single R8 coverage image contains both weights and
+their printable ASCII tables. The bake uses 15 pixels per em at 1×,
+clamps raster density to 0.75–4×, and limits the image to 512×1024. Measure,
+fit, paint and wrap use the same weight and metrics for each role. The
+editor retains the Regular metrics for glyphs, caret, selection, hit-testing
+and IME. Density replacement publishes both tables after the new GPU
+image succeeds, preserving the working image on failure.
 
 Missing-glyph policy: the baked table covers printable ASCII. Any scalar without
 a glyph renders as the documented `?` fallback, **once per Unicode scalar** (a
@@ -493,8 +485,8 @@ showcase**. Set **Player UI scale** in **Settings** before opening the showcase.
 
 - Rounded corners are a stepped octagon; a rounded/SDF UI primitive is a
   renderer follow-up, not a design-system one.
-- One bitmap face means the display roles (`Heading`/`Title`) soften when scaled;
-  a rasterized TTF face remains a future, separately reviewed dependency.
+- The coverage atlas bakes both weights at a shared base size. Display roles
+  scale those masks using the same text metric as layout.
 - The #303 live HUD uses the same slot components. #304 wires inventory slot
   interaction, and #307 brings the scale selector and preferences to Settings.
   [Live HUD controls and evidence](game-ui-migration.md#live-player-hud-303)

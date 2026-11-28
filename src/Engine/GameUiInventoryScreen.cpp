@@ -33,6 +33,27 @@ std::string_view describeSlot(const SlotView &slot, char (&buffer)[96])
 	std::snprintf(buffer, sizeof(buffer), "%.*s x%u", int(slot.label.size()), slot.label.data(), unsigned(slot.count));
 	return buffer;
 }
+std::string_view dropLabel(const Surface &paint, Clip button, const SlotView &selected, bool known,
+	bool pendingDrop, bool enabled, char (&buffer)[192])
+{
+	if (pendingDrop)
+		return "Drop pending";
+	if (selected.empty())
+		return known ? "Nothing to drop" : "Drop unavailable";
+	constexpr std::string_view verb = "Drop ";
+	char quantity[16];
+	std::snprintf(quantity, sizeof(quantity), " x%u", unsigned(selected.count));
+	const auto role = enabled ? style::TextRole::Action : style::TextRole::Body;
+	const auto font = paint.font().forRole(role);
+	const float glyphs = paint.glyphScale(role);
+	const float padding = std::min(paint.px(paint.theme().space.md), size(button).x * 0.25f);
+	const auto name = fitText(font, selected.label, role, paint.scale() * paint.fontScale(),
+		size(button).x - 2.f * padding - font.measure(verb, glyphs) - font.measure(quantity, glyphs));
+	std::snprintf(buffer, sizeof(buffer), "%s%.*s%s%s", verb.data(), int(name.bytes), selected.label.data(),
+		name.elided ? "..." : "", quantity);
+	return buffer;
+}
+
 } // namespace
 
 void GameUiSample::setInventoryView(InventoryView view)
@@ -240,13 +261,14 @@ void GameUiSample::paintInventory(Clip scene, glm::vec2 pointer, std::optional<u
 
 	const Surface paint(m_draws, font(), theme, layout.scale, scene, m_atlasLayers, m_fontScale);
 	paint.backdrop(scene, theme.palette.scrim);
-	paint.card(layout.panel, true);
-	paint.sectionHeader(layout.title, "Inventory");
-	paint.wrappedLabel(layout.instructions,
-		"Click or Enter to move. Right-click or Shift+Enter for half. "
-		"Arrows / Tab focus. 1-9 / wheel select. Q drops one.",
-		style::TextRole::Caption, theme.palette.inkMuted, 2);
-	paint.label(layout.hotbarLabel, "Hotbar", style::TextRole::Body, theme.palette.inkMuted);
+	paint.card(layout.panel);
+	paint.fittedLabel(layout.title, "Inventory", style::TextRole::Title, theme.palette.ink, 0.f);
+	if (view.feedback.empty() && !layout.instructions.empty())
+		paint.wrappedLabel(layout.instructions,
+			"Click or Enter to move. Right-click or Shift+Enter for half. "
+			"Arrows / Tab focus. 1-9 / wheel select. Q drops one.",
+			style::TextRole::Caption, theme.palette.inkMuted, 2);
+	paint.label(layout.hotbarLabel, "Hotbar", style::TextRole::Caption, theme.palette.inkMuted);
 
 	const auto hover = inventoryControlAt(pointer);
 	const auto controlState = [&](ControlId id, bool active) {
@@ -260,8 +282,14 @@ void GameUiSample::paintInventory(Clip scene, glm::vec2 pointer, std::optional<u
 		return state;
 	};
 	paint.button(layout.close, "Close", style::ButtonVariant::Quiet, controlState(kClose, true));
-	paint.button(layout.drop, "Drop selected stack", style::ButtonVariant::Secondary,
-		controlState(kDrop, canDropStack(view)));
+	const bool validSelection = snapshot && snapshot->selected.valid();
+	const auto selected = validSelection
+		? makeItemSlot(snapshot->slots[size_t(snapshot->selected.index)], atlasGeneration) : SlotView{};
+	const bool pendingDrop = view.actionPending && view.pendingSlots && view.pendingSlots->command == Command::DropStack;
+	const bool dropEnabled = canDropStack(view);
+	char drop[192];
+	paint.button(layout.drop, dropLabel(paint, layout.drop, selected, bool(snapshot), pendingDrop, dropEnabled, drop),
+		style::ButtonVariant::Danger, controlState(kDrop, dropEnabled));
 
 	const auto &drag = m_inventoryInteraction.drag();
 	std::array<SlotView, kSlotCount> slots{};
@@ -287,20 +315,36 @@ void GameUiSample::paintInventory(Clip scene, glm::vec2 pointer, std::optional<u
 
 	if (!view.feedback.empty())
 	{
-		const auto line = rectangle(glm::vec2(layout.status.rect), {size(layout.status).x, 20.f * layout.scale});
-		paint.statusIndicator(line, view.feedbackKind, view.feedback);
-		const auto next = rectangle({line.rect.x, line.rect.w}, {size(line).x, size(line).y});
-		paint.fittedLabel(next, view.recovery, style::TextRole::Caption, theme.palette.inkMuted, 0.f);
+		const float marker = paint.px(theme.space.xs);
+		const float gap = paint.px(theme.space.sm);
+		const glm::vec2 start(layout.status.rect);
+		paint.fill(rectangle(start + glm::vec2(0.f, gap), {marker, marker}),
+			style::statusColor(theme, view.feedbackKind), 0.f);
+		const Clip message{{start.x + marker + gap, start.y, layout.status.rect.z, layout.status.rect.w}};
+		paint.wrappedLabel(message, view.feedback, style::TextRole::Caption, theme.palette.ink, 2);
+		paint.fittedLabel(layout.recovery, view.recovery, style::TextRole::Caption, theme.palette.inkMuted,
+			layout.compact ? 1.f : 0.f);
+	}
+	const auto focused = controlSlot(focus);
+	if (snapshot && focused.valid() && (!layout.compact || view.feedback.empty()))
+	{
+		char description[96];
+		const auto item = describeSlot(makeItemSlot(snapshot->slots[size_t(focused.index)], atlasGeneration), description);
+		char label[112];
+		std::snprintf(label, sizeof(label), "Focused: %.*s", int(item.size()), item.data());
+		paint.fittedLabel(layout.detail, label, style::TextRole::Caption, theme.palette.ink, 0.f);
+	}
+	if (hit(layout.status, pointer) && !view.feedback.empty())
+		paint.tooltip(scene, pointer, view.feedback);
+	else if ((hover == kDrop || focus == kDrop) && !selected.empty() && !pendingDrop)
+	{
+		char label[96];
+		const auto detail = describeSlot(selected, label);
+		const auto at = hover == kDrop ? pointer : glm::vec2(layout.drop.rect);
+		paint.tooltip(scene, at, detail);
 	}
 	if (!snapshot)
 		return;
-	const auto focused = controlSlot(focus);
-	if (focused.valid())
-	{
-		char label[96];
-		paint.fittedLabel(layout.detail, describeSlot(makeItemSlot(snapshot->slots[size_t(focused.index)],
-			atlasGeneration), label), style::TextRole::Caption, theme.palette.ink, 0.f);
-	}
 	if (drag.active())
 	{
 		// F03/F05 (#316): the held stack follows the active input modality —

@@ -52,6 +52,25 @@ void inventoryScreen()
 		CHECK(!layout.hitSlot({first.rect.z + layout.main.gap * 0.5f, first.rect.y}).valid(),
 			"the gutter hits no slot");
 	}
+	for (const auto extent : {glm::vec2(960, 540), glm::vec2(1280, 720),
+			glm::vec2(1920, 1080), glm::vec2(2560, 1080)})
+		for (const float scale : {1.f, 1.5f, 2.f})
+		{
+			const auto bounds = rectangle({}, extent);
+			const auto layout = inventoryLayout(bounds, theme(), scale);
+			CHECK(layout.scale == scale && layout.compact == (extent.x == 960.f && scale == 2.f) &&
+				layout.panel.intersect(bounds) == layout.panel && layout.close.intersect(layout.title).empty() &&
+				layout.drop.intersect(layout.status).empty() && layout.drop.intersect(layout.detail).empty() &&
+				layout.status.intersect(layout.recovery).empty(),
+				"all twelve layouts preserve scale, square grids and independent controls");
+			for (int i = 0; i < kSlotCount; ++i)
+			{
+				const auto slot = layout.slot({i});
+				CHECK(std::abs(size(slot).x - size(slot).y) < 0.001f &&
+					layout.hitSlot(glm::vec2(slot.rect) + size(slot) * 0.5f) == SlotId{i},
+					"every cell remains square and resolves its logical slot");
+			}
+		}
 	const auto noAtlas = makeItemSlot(items::makeStack(items::ItemId::Stone, 4), std::nullopt);
 	CHECK(noAtlas.count == 4 && noAtlas.label == "Stone" && !noAtlas.icon,
 		"missing atlas keeps the item count and tooltip data");
@@ -815,6 +834,29 @@ void slotPaintingAndFallbacks()
 			countColor(pending, theme().palette.pending) > 0,
 		"an optional progress indicator and the pending border come from tokens");
 
+	valid.reset({200.f, 200.f}, 9);
+	paint({.icon = AtlasIcon{9, 3}, .count = 42,
+		.state = style::State::Pending | style::State::Selected | style::State::Focused}, valid);
+	const auto &palette = theme().palette;
+	CHECK(countColor(valid, palette.focus) == 4 && countColor(valid, palette.accent) == 1 &&
+		countColor(valid, palette.pending) == 7,
+		"pending keeps a separate continuous four-edge focus ring and selection tab");
+	for (const auto &edge : valid.quads())
+		if (edge.color == palette.focus)
+			for (const auto &ink : valid.quads())
+				if (ink.layer == -2 || ink.layer == 3 || ink.color == palette.accent)
+					CHECK(Clip{edge.rect}.intersect({ink.rect}).empty(),
+						"focus never overlaps the item, quantity or tab");
+	valid.reset({200.f, 200.f}, 9);
+	paint({.icon = AtlasIcon{9, 3}, .count = 42,
+		.state = style::State::Pressed | style::State::Error | style::State::Pending,
+		.progress = 0.5f}, valid);
+	CHECK(countColor(valid, palette.pending) == 0 && countColor(valid, palette.error) == 6,
+		"rejection owns the edge and marker when pending is also set");
+	for (const auto &ink : valid.quads())
+		if (ink.layer == -2)
+			CHECK(ink.rect.x >= 12.f, "the raised quantity stays clear of the pressed marker");
+
 	const auto grid = slotGrid({{0.f, 0.f, 400.f, 80.f}}, 9, 1, 4.f);
 	DrawList gridDraws;
 	gridDraws.reset({400.f, 80.f}, 9);
@@ -1279,7 +1321,9 @@ void gallery()
 				inside(layout.output, layout.modal.body) && inside(layout.outputLabel, gallery.body),
 				"the scrolled crafting preview fits compact, standard and high-scale layouts");
 			CHECK(!layout.output.empty() && !layout.outputLabel.empty() &&
-				layout.inputs.bounds.rect.z < layout.output.rect.x && layout.output.rect.z < layout.outputLabel.rect.x &&
+				layout.inputs.bounds.rect.z < layout.separator.rect.x && layout.separator.rect.z < layout.output.rect.x &&
+				layout.outputLabel.rect.w <= layout.output.rect.y &&
+				layout.inputLabel.rect.w <= layout.inputs.bounds.rect.y &&
 				layout.output.rect.y == slotCell(layout.inputs, 0, 1).rect.y &&
 				size(layout.output) == glm::vec2(layout.inputs.cell),
 				"the disabled output aligns to the middle row and has a separate label");

@@ -2157,6 +2157,10 @@ struct GameUiBackendProbe
 		const auto rtssBefore = device.rtssValidationErrorCount();
 		auto &world = *engine.worldRenderer;
 		auto &sample = *engine.m_playerUi;
+		const auto regular = sample.font().glyphs['A'];
+		const auto strong = sample.font().forRole(gameui::style::TextRole::Title).glyphs['A'];
+		CHECK(regular.visible && strong.visible && regular.uv != strong.uv,
+			"regular and semibold glyphs sample distinct regions of one uploaded atlas");
 		struct Case
 		{
 			const char *name;
@@ -3303,13 +3307,17 @@ struct GameUiBackendProbe
 		CHECK(capped >= 0 && over >= 0 && capped != over,
 			"the partial-merge fixture holds a clashing 64/40 cobblestone pair");
 		const auto scene = [&] { return sample.m_draws.bounds(); };
-		const auto heldInset = std::min(gameui::style::baseline().space.xs * sample.m_inventoryLayout.scale,
-			sample.m_inventoryLayout.main.cell * 0.5f);
 		const auto holdsHeldIcon = [&](gameui::Clip placement) {
-			const auto icon = gameui::inset(placement, heldInset);
-			return std::ranges::any_of(sample.m_draws.quads(), [&](const gameui::Quad &quad) {
-				return quad.layer == static_cast<int32_t>(TextureType::COBBLESTONE) && quad.rect == icon.rect;
-			});
+			gameui::DrawList expected;
+			expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+			const gameui::Surface paint(expected, sample.font(), gameui::style::baseline(),
+				sample.m_inventoryLayout.scale, scene(), sample.m_atlasLayers, sample.m_fontScale);
+			paint.slot(placement, {.icon = gameui::AtlasIcon{engine.m_atlasVersion, COBBLESTONE}, .count = 1});
+			const auto icon = std::ranges::find(expected.quads(), int32_t(COBBLESTONE), &gameui::Quad::layer);
+			return icon != expected.quads().end() &&
+				std::ranges::any_of(sample.m_draws.quads(), [&](const gameui::Quad &quad) {
+					return quad.layer == icon->layer && quad.rect == icon->rect;
+				});
 		};
 		const auto heldRect = [&](glm::vec2 point) {
 			return gameui::heldStackPlacement(point, sample.m_inventoryLayout.main.cell,
@@ -3615,6 +3623,33 @@ struct GameUiBackendProbe
 		present();
 		CHECK(!engine.inventoryPanelOpen() && !held() && engine.playerHudView().hotbar.slots[0].empty(),
 			"world reload drops the previous inventory and cursor presentation");
+		// Append the matrix after the capture markers to preserve baseline frame numbers.
+		sample.setFaceDensityOverride(std::nullopt);
+		tap(SDLK_E);
+		present();
+		const auto &theme = gameui::style::baseline();
+		for (const auto extent : {glm::ivec2(960, 540), glm::ivec2(1280, 720),
+				glm::ivec2(1920, 1080), glm::ivec2(2560, 1080)})
+		{
+			resize(extent.x, extent.y);
+			for (const float scale : {1.f, 1.5f, 2.f})
+			{
+				sample.setScalePolicy({gameui::ScaleMode::Fixed, scale});
+				frames(2);
+				const auto &layout = sample.m_inventoryLayout;
+				bool allCells = true;
+				for (int index = 0; index < inventoryui::kSlotCount; ++index)
+					allCells &= layout.hitSlot(cell(index)) == inventoryui::SlotId{index};
+				CHECK(engine.inventoryPanelOpen() && layout.scale == scale && allCells &&
+					layout.compact == (extent.x == 960 && scale == 2.f) &&
+					layout.panel.intersect(sample.m_draws.bounds()) == layout.panel &&
+					layout.main.cell == theme.size.slot * scale &&
+					sample.lastRecordedStats() && sample.lastRecordedStats()->metrics.dropped == 0,
+					"live inventory preserves square, hittable cells at " << extent.x << 'x' << extent.y
+						<< " at " << scale * 100.f << '%');
+			}
+		}
+
 		context.waitIdle();
 		const auto errors = context.validationErrorCount() - errorsBefore;
 		const auto rtss = context.rtssValidationErrorCount() - rtssBefore;

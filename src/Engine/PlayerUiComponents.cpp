@@ -295,9 +295,10 @@ float Surface::fittedWidth(std::string_view text, style::TextRole role, float av
 {
 	const float roleScale = glyphScale(role);
 	fitted = fitText(m_font, text, role, m_scale * m_fontScale, available);
-	float width = m_font.measure(text.substr(0, fitted.bytes), roleScale);
+	const auto font = m_font.forRole(role);
+	float width = font.measure(text.substr(0, fitted.bytes), roleScale);
 	if (fitted.elided)
-		width += m_font.measure("...", roleScale);
+		width += font.measure("...", roleScale);
 	return width;
 }
 
@@ -322,16 +323,17 @@ void Surface::fittedLabel(Clip rect, std::string_view text, style::TextRole role
 	FittedText fitted{};
 	const float width = fittedWidth(text, role, size(rect).x, fitted);
 	const float roleScale = glyphScale(role);
+	const auto font = m_font.forRole(role);
 	const float x = rect.rect.x + (size(rect).x - width) * std::clamp(alignX, 0.f, 1.f);
 	// S01: the component rect is passed as the glyph clipping bound, so a label in
 	// a short or narrow rect is clipped geometrically instead of relying on the
 	// surface scissor alone.
-	m_font.paint(m_out, {x, centeredLineTop(rect, role, m_scale)}, text.substr(0, fitted.bytes), color,
+	font.paint(m_out, {x, centeredLineTop(rect, role, m_scale)}, text.substr(0, fitted.bytes), color,
 		roleScale, m_clip, rect);
 	if (fitted.elided)
 	{
-		const float advance = m_font.measure(text.substr(0, fitted.bytes), roleScale);
-		m_font.paint(m_out, {x + advance, centeredLineTop(rect, role, m_scale)}, "...", color, roleScale,
+		const float advance = font.measure(text.substr(0, fitted.bytes), roleScale);
+		font.paint(m_out, {x + advance, centeredLineTop(rect, role, m_scale)}, "...", color, roleScale,
 			m_clip, rect);
 	}
 }
@@ -345,15 +347,16 @@ int Surface::wrappedLabel(Clip rect, std::string_view text, style::TextRole role
 						  int maxLines) const
 {
 	const float line = style::lineHeight(role) * m_scale;
+	const float pitch = wrappedLineHeight(role);
 	const int capacity = std::min({maxLines, int(kMaxWrappedLines),
-		int(std::floor(size(rect).y / std::max(line, 0.001f)))});
+		1 + int(std::floor((size(rect).y - line) / pitch))});
 	if (text.empty() || capacity <= 0 || size(rect).x <= 0.f)
 		return 0;
 	std::array<WrappedLine, kMaxWrappedLines> lines{};
 	const auto span = std::span<WrappedLine>(lines.data(), size_t(capacity));
 	const int count = wrapText(m_font, text, role, m_scale * m_fontScale, size(rect).x, span);
 	const float roleScale = glyphScale(role);
-	const float pitch = wrappedLineHeight(role);
+	const auto font = m_font.forRole(role);
 	// Each line is clipped to its own band: the glyph painter never needs a
 	// second pass to keep a long word inside the block.
 	for (int index = 0; index < count; ++index)
@@ -362,10 +365,10 @@ int Surface::wrappedLabel(Clip rect, std::string_view text, style::TextRole role
 		const Clip band = {{rect.rect.x, rect.rect.y + float(index) * pitch, rect.rect.z,
 			std::min(rect.rect.w, rect.rect.y + float(index) * pitch + line)}};
 		const glm::vec2 origin{band.rect.x, centeredLineTop(band, role, m_scale)};
-		m_font.paint(m_out, origin, text.substr(wrapped.begin, wrapped.end - wrapped.begin), color,
+		font.paint(m_out, origin, text.substr(wrapped.begin, wrapped.end - wrapped.begin), color,
 			roleScale, m_clip, band);
 		if (wrapped.elided)
-			m_font.paint(m_out, {origin.x + m_font.measure(text.substr(wrapped.begin,
+			font.paint(m_out, {origin.x + font.measure(text.substr(wrapped.begin,
 				wrapped.end - wrapped.begin), roleScale), origin.y}, "...", color, roleScale, m_clip, band);
 	}
 	return count;
@@ -399,7 +402,7 @@ void Surface::sectionHeader(Clip rect, std::string_view title) const
 	const float ruleWidth = px(m_theme.size.borderWidth);
 	const float rule = std::min(rect.rect.w - ruleWidth, line.rect.w + px(m_theme.space.xs));
 	if (rule >= rect.rect.y)
-		fill({{rect.rect.x, rule, rect.rect.z, rule + ruleWidth}}, m_theme.palette.border, 0.f);
+		fill({{rect.rect.x, rule, rect.rect.z, rule + ruleWidth}}, m_theme.palette.divider, 0.f);
 }
 
 void Surface::divider(Clip rect) const
@@ -408,7 +411,7 @@ void Surface::divider(Clip rect) const
 	if (size(rect).y < thickness)
 		return;
 	const float y = std::min(rect.rect.y + size(rect).y * 0.5f, rect.rect.w - thickness);
-	fill({{rect.rect.x, y, rect.rect.z, y + thickness}}, m_theme.palette.border, 0.f);
+	fill({{rect.rect.x, y, rect.rect.z, y + thickness}}, m_theme.palette.divider, 0.f);
 }
 
 void Surface::button(Clip rect, std::string_view text, style::ButtonVariant variant,
@@ -418,18 +421,24 @@ void Surface::button(Clip rect, std::string_view text, style::ButtonVariant vari
 	const float radius = px(m_theme.size.radiusMedium);
 	if (tokens.face.a > 0.f)
 		fill(rect, tokens.face, radius);
-	glm::vec4 border = tokens.border;
-	float borderWidth = px(m_theme.size.borderWidth);
-	if (style::has(state, style::State::Focused) && !style::disabled(state))
+	const auto &palette = m_theme.palette;
+	const bool focused = style::has(state, style::State::Focused) && !style::disabled(state);
+	const bool filled = tokens.text == palette.inkOnAccent;
+	if (tokens.border.a > 0.f)
+		ring(rect, tokens.border, px(m_theme.size.borderWidth), radius);
+	if (focused)
 	{
-		border = m_theme.palette.focus;
-		borderWidth = px(m_theme.size.focusRing);
+		Clip focus = inset(rect, px(m_theme.size.borderWidth));
+		if (filled)
+		{
+			ring(focus, palette.surfaceSunken, px(m_theme.size.borderStrongWidth + m_theme.size.focusRing), radius);
+			focus = inset(focus, px(m_theme.size.borderWidth));
+		}
+		ring(focus, palette.focus, px(m_theme.size.focusRing), radius);
 	}
-	if (border.a > 0.f)
-		ring(rect, border, borderWidth, radius);
-	const float pad = std::min(px(m_theme.space.sm), size(rect).x * 0.25f);
-	fittedLabel({{rect.rect.x + pad, rect.rect.y, std::max(rect.rect.x + pad, rect.rect.z - pad),
-			rect.rect.w}}, text, style::TextRole::Body, tokens.text, 0.5f);
+	const float pad = std::min(px(m_theme.space.md), size(rect).x * 0.25f);
+	fittedLabel({{rect.rect.x + pad, rect.rect.y, rect.rect.z - pad, rect.rect.w}}, text,
+		filled ? style::TextRole::Action : style::TextRole::Body, tokens.text, 0.5f);
 }
 
 void Surface::listRow(Clip rect, std::string_view title, std::string_view trailing,
@@ -445,7 +454,7 @@ void Surface::listRow(Clip rect, std::string_view title, std::string_view traili
 	Clip text = {{rect.rect.x + leader, rect.rect.y, rect.rect.z - px(m_theme.space.sm), rect.rect.w}};
 	if (!trailing.empty())
 	{
-		const float width = m_font.measure(trailing, glyphScale(style::TextRole::Caption));
+		const float width = m_font.forRole(style::TextRole::Caption).measure(trailing, glyphScale(style::TextRole::Caption));
 		Clip value = {{std::max(text.rect.x, text.rect.z - width), text.rect.y, text.rect.z, text.rect.w}};
 		text.rect.z = std::max(text.rect.x, value.rect.x - px(m_theme.space.sm));
 		fittedLabel(value, trailing, style::TextRole::Caption, tokens.trailing, 1.f);
@@ -484,6 +493,10 @@ void Surface::formField(Clip rect, std::string_view label, std::string_view valu
 	const float borderWidth = validation == style::Validation::None ? px(m_theme.size.borderWidth)
 																   : px(m_theme.size.borderStrongWidth);
 	ring(well, tokens.border, borderWidth, px(m_theme.size.radiusSmall));
+	if (!style::disabled(state) && style::has(state, style::State::Focused) &&
+		validation != style::Validation::None)
+		ring(inset(well, borderWidth + px(m_theme.size.borderWidth)), m_theme.palette.focus,
+			px(m_theme.size.focusRing), 0.f);
 	Clip inner = inset(well, px(m_theme.space.sm));
 	fittedLabel(inner, value, style::TextRole::Body, tokens.text, 0.f);
 	if (showMessage && messageLine.rect.y < messageLine.rect.w)
@@ -582,74 +595,90 @@ void Surface::confirmation(const ConfirmationLayout &layout, std::string_view ti
 
 void Surface::slot(Clip rect, const SlotView &entry) const
 {
-	if (rect.empty())
+	const float unit = std::min(size(rect).x, size(rect).y) / m_theme.size.slot;
+	if (!(unit > 0.f))
 		return;
 	const auto &p = m_theme.palette;
-	// One resolver for combined states (R06): disabled never paints a focus ring,
-	// validation always wins the border color, focus keeps its width.
 	const auto tokens = style::slotTokens(m_theme, entry.state);
-	frame(rect, tokens.face, tokens.border, px(tokens.borderWidth), px(m_theme.size.radiusSmall));
-	const Clip iconRect = inset(rect, std::min(px(m_theme.space.xs),
-		std::min(size(rect).x, size(rect).y) * 0.5f));
-	const uint32_t layers = m_atlasLayers ? m_atlasLayers : UINT32_MAX;
-	// Occupancy is `count != 0`; an icon is an optional, generation-tagged
-	// handle (F08). Layer 0 is a real texture, a stale handle is not sampled and
-	// an occupied slot without a drawable icon keeps its count and its frame.
-	const bool occupied = !entry.empty();
-	const auto status = entry.icon ? iconStatus(*entry.icon, m_out.atlasGeneration(), layers)
-								   : IconStatus::MissingLayer;
-	if (occupied && entry.icon && drawable(status))
-	{
-		if (!iconRect.empty())
-			m_out.icon(iconRect.rect, *entry.icon, tokens.tint, m_clip);
-	}
-	else if (occupied && !iconRect.empty())
-	{
-		// Missing/stale icon fallback: keep the slot, mark it, never drop it.
-		fill(iconRect, p.surfaceRaised, px(m_theme.size.radiusSmall));
-		labelAligned(iconRect, std::string_view(&kFallbackGlyph, 1), style::TextRole::Body,
-			tokens.indicator, 0.5f);
-	}
+	frame(rect, tokens.face, tokens.border, tokens.borderWidth * unit, 0.f);
 
-	// Durability/progress owns a reserved band at the bottom; the quantity badge
-	// sits above it and always paints a contrast backing (F14).
-	// S02: the progress/durability band and its badge are clamped to the slot, so
-	// an undersized slot paints no bar at all instead of a bar outside its frame.
-	const float barInset = px(m_theme.space.xxs);
-	const float barHeight = std::max(px(2.f), px(m_theme.size.borderWidth) * 2.f);
-	const float barSpan = std::min(size(rect).y * 0.5f, barHeight);
-	const Clip track = {{rect.rect.x + barInset, rect.rect.w - barInset - barSpan,
-		rect.rect.z - barInset, rect.rect.w - barInset}};
+	// Work in the authored 36-unit cell. All content lies inside the
+	// focus perimeter and uses independent left-rail and right-content lanes.
+	const auto region = [&](float x, float y, float width, float height) {
+		return rectangle(glm::vec2(rect.rect) + glm::vec2(x, y) * unit,
+			glm::vec2(width, height) * unit);
+	};
 	const auto bar = entry.progress ? entry.progress : entry.durability;
-	const float bandBottom = (bar && !track.empty() ? track.rect.y : rect.rect.w) - barInset;
+	const float lifted = bar ? 4.f : 0.f;
+	const float iconSize = bar ? 11.f : 15.f;
+	const Clip icon = region(31.f - iconSize, 5.f, iconSize, iconSize);
+	const uint32_t layers = m_atlasLayers ? m_atlasLayers : UINT32_MAX;
+	if (!entry.empty())
+	{
+		const auto status = entry.icon ? iconStatus(*entry.icon, m_out.atlasGeneration(), layers)
+			: IconStatus::MissingLayer;
+		if (entry.icon && drawable(status))
+			m_out.icon(icon.rect, *entry.icon, tokens.tint, m_clip);
+		else
+		{
+			fill(icon, p.surfaceRaised, 0.f);
+			const float role = style::typeScale(style::TextRole::Count) * unit * m_fontScale;
+			const auto font = m_font.forRole(style::TextRole::Count);
+			const std::string_view fallback(&kFallbackGlyph, 1);
+			const glm::vec2 origin{icon.rect.x + (size(icon).x - font.measure(fallback, role)) * 0.5f,
+				icon.rect.y - unit};
+			font.paint(m_out, origin, fallback, tokens.indicator, role, m_clip, icon);
+		}
+	}
 	char badge[8]{};
 	const auto count = formatCount(entry.count, badge);
 	if (!count.empty())
 	{
-		const float roleScale = glyphScale(style::TextRole::Caption);
-		const float lineHeight = textStyle(style::TextRole::Caption, m_scale, m_fontScale).lineHeight();
-		const float width = std::min(size(rect).x, m_font.measure(count, roleScale) +
-			2.f * px(m_theme.space.xxs));
-		const float top = std::max({rect.rect.y, iconRect.rect.y, bandBottom - lineHeight});
-		const Clip badgeRect = {{std::max(rect.rect.x, rect.rect.z - width - barInset), top,
-			rect.rect.z - barInset, std::min(rect.rect.w, std::max(top, bandBottom))}};
-		if (badgeRect.rect.y < badgeRect.rect.w)
-		{
-			glm::vec4 backing = p.surface;
-			backing.a = m_theme.overlay.card;
-			fill(badgeRect, backing, px(m_theme.size.radiusSmall));
-			fittedLabel(inset(badgeRect, px(m_theme.space.xxs)), count, style::TextRole::Caption,
-				tokens.indicator, 1.f);
-		}
+		const float countLeft = bar ? 12.f : 10.f;
+		const auto box = region(countLeft, 20.f - lifted, 31.f - countLeft, 12.f);
+		fill(box, p.surfaceSunken, 0.f);
+		const auto font = m_font.forRole(style::TextRole::Count);
+		const float authored = style::typeScale(style::TextRole::Count) * unit * m_fontScale;
+		const float width = font.measure(count, authored);
+		const float factor = width > 0.f ? std::min(1.f, size(box).x / width) : 1.f;
+		const float line = style::lineHeight(style::TextRole::Count) * unit * factor;
+		font.paint(m_out, {box.rect.z - width * factor, box.rect.y + (size(box).y - line) * 0.5f},
+			count, tokens.indicator, authored * factor, m_clip, box);
 	}
-	if (bar && !track.empty())
+	if (bar)
 	{
+		const auto track = region(10.f, 30.f, 21.f, 2.f);
 		const float value = progressFraction(*bar);
 		const glm::vec4 color = entry.progress ? p.accent
 			: (value > 0.5f ? p.ok : (value > 0.2f ? p.warning : p.error));
-		fill(track, p.surface, 0.f);
+		fill(track, p.control, 0.f);
 		fill(progressFill(track, value), color, 0.f);
 	}
+
+	if (tokens.mark == style::SlotMark::Rejected)
+	{
+		fill(region(8.f, 5.f, 2.f, 5.f), p.error, 0.f);
+		fill(region(8.f, 11.f, 2.f, 2.f), p.error, 0.f);
+	}
+	else if (tokens.mark == style::SlotMark::Pending)
+	{
+		for (const float x : {5.f, 9.f, 13.f})
+			fill(region(x, 8.f, 2.f, 2.f), p.pending, 0.f);
+	}
+	if (tokens.interaction == style::SlotInteraction::Disabled)
+	{
+		for (int step = 0; step < 4; ++step)
+			fill(region(6.f + float(step), 18.f - float(step), 2.f, 1.f), p.inkDisabled, 0.f);
+	}
+	else if (tokens.interaction != style::SlotInteraction::None)
+	{
+		const float length = tokens.interaction == style::SlotInteraction::Pressed ? 6.f : 3.f;
+		fill(region(5.f, 17.f, length, 2.f), p.ink, 0.f);
+	}
+	if (tokens.selected)
+		fill(region(5.f, 23.f, 3.f, 8.f), p.accent, 0.f);
+	if (tokens.focused)
+		ring(inset(rect, 3.f * unit), p.focus, unit, 0.f);
 }
 
 void Surface::slotGrid(const SlotGrid &grid, std::span<const SlotView> entries, int focused) const
