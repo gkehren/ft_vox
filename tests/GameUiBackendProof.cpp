@@ -2149,6 +2149,90 @@ struct GameUiBackendProbe
 	// captured from the production composition path at representative
 	// resolutions and player UI scales. Every capture is also checked for a
 	// bounded draw/quad budget and a clean validation counter.
+	void typographyComparison(const std::filesystem::path &out)
+	{
+		using namespace gameui;
+		init();
+		resize(960, 540);
+		frames(2);
+		std::filesystem::create_directories(out);
+		auto &sample = *engine.m_playerUi;
+		auto &device = *engine.vkContext;
+		auto &renderer = sample.renderer();
+		const auto format = engine.swapchain->getImageFormat();
+		const auto extent = this->extent();
+		const auto allocator = device.getAllocator();
+		Readback target{device};
+		target.output = createImage2D(allocator, device.getDevice(), extent.width, extent.height, format,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+		target.buffer = createBuffer(allocator, VkDeviceSize(extent.width) * extent.height * 4,
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+			VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+		const auto generation = engine.m_atlasVersion;
+		const auto &theme = style::baseline();
+		device.waitIdle();
+		std::string error;
+		for (const float raster : {15.f, kSlateRasterPixels})
+		{
+			BakedFace face;
+			checked(bakeFace(1.f, face, error, playerFontDirectory(), raster), "bake typography comparison atlas");
+			checked(renderer.setFont(*sample.m_immediate, {face.width, face.height}, face.coverage),
+				"upload typography comparison atlas");
+			std::cout << "Typography raster=" << raster << " extent=" << face.width << 'x' << face.height
+				<< " allocation=" << renderer.stats(0).fontBytes << '\n';
+			for (float scale : {1.f, 1.5f, 2.f})
+			{
+				sample.m_draws.reset({float(extent.width), float(extent.height)}, generation);
+				const Surface paint(sample.m_draws, {face.glyphs, face.semibold}, theme, scale,
+					sample.m_draws.bounds(), 0, face.fontScale);
+				const auto field = rectangle({24.f, 24.f}, {760.f, 370.f});
+				paint.backdrop(sample.m_draws.bounds(), theme.palette.canvas);
+				paint.card(field);
+				using enum style::TextRole;
+				const std::pair<std::string_view, style::TextRole> lines[] = {
+					{"Inventory", Title}, {"Crafting table", Heading},
+					{"Cobblestone, Sand and Stone", Body}, {"Shift+Enter to split a stack.", Caption},
+					{"12   48   64   99+", Count}, {"Drop Cobblestone x40", Action}
+				};
+				float y = 40.f;
+				for (const auto &[text, role] : lines)
+				{
+					const float height = style::lineHeight(role) * scale;
+					paint.label(rectangle({40.f, y}, {720.f, height}), text, role, theme.palette.ink);
+					y += height + theme.space.xs * scale;
+				}
+				paint.listRow(rectangle({40.f, y}, {720.f, 26.f * scale}), "Selected row", "12", style::State::Selected);
+				renderer.prepare(0, extent, sample.m_draws, engine.worldRenderer->getTextureManager(), generation);
+				const auto name = "typography-" + std::to_string(int(raster)) + "-" + std::to_string(int(scale * 100.f)) + ".png";
+				checked(visual::writePng((out / name).string(), capture(target, &renderer)), "write lossless typography proof");
+			}
+		}
+		checked(renderer.setFont(*sample.m_immediate, {sample.m_face.width, sample.m_face.height}, sample.m_face.coverage),
+			"restore the game's atlas after the typography probe");
+
+		const auto bad = out / "font-probes";
+		const auto missing = bad / "missing";
+		const auto invalid = bad / "invalid";
+		std::filesystem::create_directories(invalid);
+		const auto file = invalid / "SourceSans3-Semibold.ttf";
+		std::filesystem::copy_file(playerFontDirectory() / "SourceSans3-Regular.ttf",
+			invalid / "SourceSans3-Regular.ttf", std::filesystem::copy_options::overwrite_existing);
+		BakedFace recovered;
+		CHECK(!bakeFace(1.f, recovered, error, missing) && error.find("Regular.ttf") != std::string::npos &&
+			error.find("missing") != std::string::npos, "a missing asset reports its path and weight");
+		std::ofstream(file, std::ios::binary).put('x');
+		CHECK(!bakeFace(1.f, recovered, error, invalid) && error.find("Semibold.ttf") != std::string::npos &&
+			error.find("invalid font size") != std::string::npos, "truncation reports the failing semibold path");
+		const std::string damage(425904, 'x');
+		std::ofstream(file, std::ios::binary).write(damage.data(), std::streamsize(damage.size()));
+		CHECK(!bakeFace(1.f, recovered, error, invalid) && error.find("Semibold.ttf") != std::string::npos &&
+			error.find("invalid font data") != std::string::npos, "same-size corruption stays out of the rasterizer");
+		CHECK(bakeEmergencyFace(1.f, recovered, error) && recovered.glyphs['?'].visible &&
+			recovered.glyphs['A'].uv == recovered.semibold['A'].uv, "the embedded startup fallback fills both role tables");
+		CHECK(bakeFace(4.f, recovered, error) && recovered.width <= 512 && recovered.height <= 1024,
+			"the dense fixed raster remains within the existing atlas bounds");
+	}
+
 	void designSystem(const std::filesystem::path &out)
 	{
 		init();
@@ -3168,7 +3252,7 @@ struct GameUiBackendProbe
 			"startup recovery has no unexpected Vulkan validation diagnostics");
 	}
 
-	void playerInventoryProof()
+	void playerInventoryProof(const std::filesystem::path &output)
 	{
 		using enum items::ItemId;
 		init();
@@ -3189,6 +3273,25 @@ struct GameUiBackendProbe
 		const auto held = [&] { return sample.m_inventoryInteraction.drag().active(); };
 		const auto capture = [&](std::string_view scene) {
 			std::cout << "INVENTORY capture=" << scene << " frame=" << engine.frameNumber - 1 << '\n';
+			if (output.empty() || (scene != "16x9" && scene != "21x9" &&
+				scene != "compact-2x" && scene != "compact-feedback"))
+				return;
+			std::filesystem::create_directories(output);
+			context.waitIdle();
+			const auto extent = engine.swapchain->getExtent();
+			const auto allocator = context.getAllocator();
+			Readback target{*engine.vkContext};
+			target.output = createImage2D(allocator, context.getDevice(), extent.width, extent.height,
+				engine.swapchain->getImageFormat(),
+				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+			target.buffer = createBuffer(allocator, VkDeviceSize(extent.width) * extent.height * 4,
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+				VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+			sample.renderer().prepare(0, extent, sample.m_draws, engine.worldRenderer->getTextureManager(),
+				engine.m_atlasVersion);
+			const auto filename = output / (std::string(scene) + ".png");
+			checked(visual::writePng(filename.string(), this->capture(target, &sample.renderer())),
+				"write inventory proof capture");
 		};
 
 		resize(1920, 1080);
@@ -3649,6 +3752,107 @@ struct GameUiBackendProbe
 						<< " at " << scale * 100.f << '%');
 			}
 		}
+
+		// Exercise the renderer/input seam with bounded strings much longer than
+		// the localized rejection messages the host happens to emit today.
+		resize(960, 540);
+		frames(2);
+		using gameui::Clip;
+		const auto sceneBounds = sample.m_draws.bounds();
+		const auto redraw = [&](glm::vec2 pointer) {
+			sample.m_draws.reset(sample.m_draws.size(), engine.m_atlasVersion);
+			sample.paintInventory(sceneBounds, pointer, engine.m_atlasVersion);
+		};
+		auto synthetic = engine.playerInventoryView();
+		synthetic.snapshot->selected = {0};
+		synthetic.snapshot->slots[0] = items::makeStack(Stone, 20);
+		synthetic.snapshot->slots[9] = items::makeStack(Sand, 18);
+		synthetic.canDrop = true;
+		sample.setInventoryView(synthetic);
+		redraw({});
+		const auto &layout = sample.m_inventoryLayout;
+		const auto sand = cell(9);
+		const auto drop = middle(layout.drop);
+		sample.m_screens.focus(sample.inventoryControlAt(drop));
+		sample.m_inventoryModality = gameui::InventoryModality::Keyboard;
+		redraw(sand);
+		const auto drewTip = [&](glm::vec2 point, std::string_view text) {
+			gameui::DrawList expected;
+			expected.reset(sample.m_draws.size(), engine.m_atlasVersion);
+			const gameui::Surface surface(expected, sample.font(), theme, layout.scale, sceneBounds,
+				sample.m_atlasLayers, sample.m_fontScale);
+			surface.tooltip(sceneBounds, point, text);
+			return !std::ranges::search(sample.m_draws.quads(), expected.quads(),
+				[](const gameui::Quad &a, const gameui::Quad &b) {
+					return a.rect == b.rect && a.uv == b.uv && a.color == b.color && a.layer == b.layer;
+				}).empty();
+		};
+		CHECK(drewTip(glm::vec2(layout.drop.rect), "Stone x20") && !drewTip(sand, "Sand x18"),
+			"the keyboard Drop tooltip wins over a conflicting passive slot hover");
+
+		const auto clickNative = [&](glm::vec2 point) {
+			SDL_Event event{};
+			event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+			event.button.button = SDL_BUTTON_LEFT;
+			event.button.x = point.x;
+			event.button.y = point.y;
+			sample.handleInventoryEvent(event);
+			event.type = SDL_EVENT_MOUSE_BUTTON_UP;
+			return sample.handleInventoryEvent(event);
+		};
+		const auto keyNative = [&](SDL_Keycode key) {
+			SDL_Event event{};
+			event.type = SDL_EVENT_KEY_DOWN;
+			event.key.key = key;
+			return sample.handleInventoryEvent(event);
+		};
+		clickNative(sand);
+		redraw(sand);
+		CHECK(held() && !drewTip(sand, "Sand x18") && !drewTip(drop, "Stone x20"),
+			"an armed preview suppresses ordinary inventory tooltips");
+		clickNative({4.f, 4.f});
+
+		const std::string rejection = "Could not move stack.\n" + std::string(640, 'Z') + " End of rejection.";
+		const std::string recovery = "Reconnect and check your inventory. " + std::string(210, 'A');
+		synthetic.feedback = rejection;
+		synthetic.recovery = recovery;
+		synthetic.feedbackKind = gameui::style::Status::Error;
+		sample.setInventoryView(synthetic);
+		redraw({});
+		CHECK(layout.compact && sample.m_inventoryFeedbackAvailable &&
+			layout.reader.intersect(layout.close).empty() && layout.reader.intersect(layout.drop).empty(),
+			"compact summary detects elision and provides a separate reader");
+		const auto show = middle(layout.feedback);
+		const auto showId = sample.inventoryControlAt(show);
+		sample.m_screens.focus(sample.inventoryControlAt(middle(layout.close)));
+		CHECK(keyNative(SDLK_TAB).command == inventoryui::Command::None && sample.m_screens.focus() == showId,
+			"Tab reaches the feedback affordance from Close");
+		CHECK(keyNative(SDLK_RETURN).command == inventoryui::Command::None &&
+			sample.m_inventoryFeedbackText.starts_with(recovery) && sample.m_inventoryFeedbackText.ends_with(rejection),
+			"keyboard opens the complete feedback with recovery first");
+		redraw(show);
+		capture("compact-feedback");
+		CHECK(clickNative(sand).command == inventoryui::Command::None && !held(),
+			"the feedback view suppresses the covered inventory controls");
+		CHECK(sample.m_inventoryFeedbackNext != 0, "long unbroken feedback spans multiple compact pages");
+		while (sample.m_inventoryFeedbackNext)
+		{
+			const auto prior = sample.m_inventoryFeedbackOffsets.back();
+			keyNative(SDLK_PAGEDOWN);
+			redraw(show);
+			checked(sample.m_inventoryFeedbackOffsets.back() > prior, "keyboard paging makes progress");
+		}
+		CHECK(sample.m_inventoryFeedbackOffsets.size() > 1, "keyboard reaches the end of the message");
+		const auto dropAction = clickNative(drop);
+		CHECK(dropAction.command == inventoryui::Command::DropStack && dropAction.from == inventoryui::SlotId{0},
+			"the compact reader leaves the selected hotbar Drop action reachable");
+		clickNative(middle(layout.previousPage));
+		redraw(show);
+		CHECK(sample.m_inventoryFeedbackNext != 0, "pointer page controls reach the same message");
+		clickNative(show);
+		redraw(show);
+		CHECK(sample.m_inventoryFeedbackText.empty() && sample.inventoryControlAt(sand) > 0,
+			"return to items restores the unchanged grid hit geometry");
 
 		context.waitIdle();
 		const auto errors = context.validationErrorCount() - errorsBefore;
@@ -4452,6 +4656,14 @@ int runGameUiShowcaseProof(Engine &engine)
 	return testmain::exitCode();
 }
 
+int runGameUiTypography(Engine &engine, const std::filesystem::path &output)
+{
+	GameUiBackendProbe(engine).typographyComparison(output);
+	if (testmain::fails == 0)
+		std::cout << "PASS: Game UI typography proof (" << testmain::checks << " checks)\n";
+	return testmain::exitCode();
+}
+
 int runGameUiDesignSystem(Engine &engine, const std::filesystem::path &output)
 {
 	GameUiBackendProbe(engine).designSystem(output);
@@ -4474,9 +4686,9 @@ int runPlayerHudProof(Engine &engine, const std::filesystem::path &output)
 	return testmain::exitCode();
 }
 
-int runPlayerInventoryProof(Engine &engine)
+int runPlayerInventoryProof(Engine &engine, const std::filesystem::path &output)
 {
-	GameUiBackendProbe(engine).playerInventoryProof();
+	GameUiBackendProbe(engine).playerInventoryProof(output);
 	if (testmain::fails == 0)
 		std::cout << "PASS: native player inventory (" << testmain::checks << " checks)\n";
 	return testmain::exitCode();

@@ -1,4 +1,5 @@
 #include <Engine/GameUiSample.hpp>
+#include <iostream>
 #include <Renderer/TextureManager.hpp>
 #include <utils.hpp>
 
@@ -98,10 +99,17 @@ bool GameUiSample::refreshFaceForDensity(float pixels)
 		return true; // same density: nothing to rebuild
 	// Bake and upload into locals; nothing is published until the GPU accepted it.
 	gameui::BakedFace next;
-	if (!gameui::bakeFace(pixels, next) ||
-		(m_immediate &&
-			!m_renderer.setFont(*m_immediate, {next.width, next.height}, next.coverage)))
+	std::string error;
+	if (!gameui::bakeFace(pixels, next, error))
+	{
+		std::cerr << "[ui] Font density replacement kept the previous atlas. " << error << '\n';
 		return false;
+	}
+	if (m_immediate && !m_renderer.setFont(*m_immediate, {next.width, next.height}, next.coverage))
+	{
+		std::cerr << "[ui] Font density replacement could not upload the atlas. Keeping the previous atlas.\n";
+		return false;
+	}
 	m_face = std::move(next);
 	m_facePixels = pixels;
 	m_fontScale = m_face.fontScale;
@@ -134,8 +142,13 @@ void GameUiSample::init(SDL_Window *window, VkContext &context, ImmediateCommand
 	m_standalone = standalone;
 	// One audited face (PlayerUiFonts.hpp), baked once at device resolution.
 	const float pixels = framebufferScaleFor(window).value_or(1.f);
-	if (!gameui::bakeFace(pixels, m_face))
-		throw std::runtime_error("Game UI font atlas bake failed");
+	std::string error;
+	if (!gameui::bakeFace(pixels, m_face, error))
+	{
+		std::cerr << "[ui] " << error << "\n[ui] Using embedded ProggyClean for this launch.\n";
+		if (!gameui::bakeEmergencyFace(pixels, m_face, error))
+			throw std::runtime_error("Game UI emergency font atlas bake failed. " + error);
+	}
 	m_fontScale = m_face.fontScale;
 	m_facePixels = pixels;
 	m_immediate = &immediate;

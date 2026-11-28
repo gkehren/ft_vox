@@ -33,14 +33,23 @@ InventoryLayout inventoryLayout(Clip bounds, const style::Theme &theme, float sc
 	};
 	const float closeWidth = 58.f, dropWidth = 156.f;
 	const float titleTop = compact ? 4.f : 12.f;
-	out.title = row(titleTop, style::lineHeight(style::TextRole::Title), 0.f, gridWidth - closeWidth - gap);
+	const float feedbackWidth = 100.f;
+	out.title = row(titleTop, style::lineHeight(style::TextRole::Title), 0.f,
+		gridWidth - closeWidth - feedbackWidth - 2.f * gap);
 	out.close = row(titleTop, theme.size.buttonHeight, gridWidth - closeWidth, closeWidth);
+	out.feedback = row(titleTop, theme.size.buttonHeight, gridWidth - closeWidth - feedbackWidth - gap,
+		feedbackWidth);
 	const float mainTop = compact ? 34.f : 60.f;
 	out.main = {row(mainTop, mainHeight, 0.f, gridWidth), kColumns, kMainRows, cell * s, gap * s};
 	const float caption = style::lineHeight(style::TextRole::Caption);
 	const float hotbarTop = mainTop + mainHeight + caption + (compact ? 2.f : 12.f);
 	out.hotbarLabel = row(hotbarTop - caption, caption, 0.f, 66.f);
 	out.hotbar = {row(hotbarTop, cell, 0.f, gridWidth), kColumns, 1, cell * s, gap * s};
+	const float pageTop = hotbarTop + cell - theme.size.buttonHeight;
+	const float pageWidth = 88.f;
+	out.reader = row(mainTop, pageTop - mainTop - gap, 0.f, gridWidth);
+	out.previousPage = row(pageTop, theme.size.buttonHeight, 0.f, pageWidth);
+	out.nextPage = row(pageTop, theme.size.buttonHeight, gridWidth - pageWidth, pageWidth);
 	const float actions = hotbarTop + cell + (compact ? gap : theme.space.md);
 	out.detail = row(actions, theme.size.buttonHeight, 0.f, gridWidth - dropWidth - theme.space.md);
 	out.drop = row(actions, theme.size.buttonHeight, gridWidth - dropWidth, dropWidth);
@@ -56,6 +65,16 @@ InventoryLayout inventoryLayout(Clip bounds, const style::Theme &theme, float sc
 		out.recovery = row(footerTop + 2.f * caption + theme.space.xxs, caption, 0.f, gridWidth);
 	}
 	return out;
+}
+
+style::State inventorySlotState(const InventoryView &view, SlotId id, bool hovered, bool pressed, bool focused)
+{
+	const bool selected = view.snapshot && view.snapshot->selected == id;
+	if (view.snapshot && view.availability == InventoryAvailability::Ready &&
+		view.actionPending && view.pendingSlots && view.pendingSlots->affects(id))
+		return style::State::Pending | style::State::Unavailable |
+			(selected ? style::State::Selected : style::State::Rest);
+	return style::interactiveState(view.enabled(), hovered, pressed, focused, selected);
 }
 
 Clip InventoryLayout::slot(SlotId id) const

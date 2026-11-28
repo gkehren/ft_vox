@@ -1380,6 +1380,7 @@ add_custom_command(TARGET test_engine_reload POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/ressources/fonts/source-sans-3
         $<TARGET_FILE_DIR:test_engine_reload>/ressources/fonts/source-sans-3
+    VERBATIM
 )
 
 target_include_directories(test_engine_reload PRIVATE

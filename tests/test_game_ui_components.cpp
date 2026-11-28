@@ -82,6 +82,29 @@ void inventoryScreen()
 	view.snapshot = Snapshot{};
 	view.snapshot->revision = 1;
 	view.snapshot->slots[0] = items::makeStack(items::ItemId::Stone, 5);
+	using enum style::State;
+	view.snapshot->selected = {0};
+	const auto presentation = [&](int slot) { return inventorySlotState(view, {slot}, true, true, true); };
+	CHECK(presentation(0) == (Selected | Focused | Hovered | Pressed), "ready uses actual available cues");
+	view.actionPending = true;
+	view.pendingSlots = Action{Command::Move, {0}, {9}};
+	CHECK(presentation(0) == (Selected | Pending | Unavailable) &&
+		presentation(9) == (Pending | Unavailable) && presentation(1) == Disabled,
+		"an active pending action keeps affected semantics and makes all slots inert");
+	view.availability = InventoryAvailability::Disconnected;
+	CHECK(presentation(0) == (Disabled | Selected), "disconnect can retain known selection without pending or input");
+	view.availability = InventoryAvailability::Resyncing;
+	CHECK(presentation(9) == Disabled, "resync suppresses stale action and hover");
+	view.availability = InventoryAvailability::Ready;
+	view.actionPending = false;
+	CHECK(presentation(0) == (Selected | Focused | Hovered | Pressed),
+		"authoritative acceptance restores the previous focus and interaction");
+	view.feedbackKind = style::Status::Error;
+	CHECK(presentation(0) == (Selected | Focused | Hovered | Pressed),
+		"unscoped rejection remains screen feedback and returns the slot to ready");
+	view.pendingSlots.reset();
+	view.feedbackKind = style::Status::Info;
+
 	Interaction input;
 	const auto observe = [&] { input.observe(view.snapshot ? &*view.snapshot : nullptr, view.epoch, view.enabled()); };
 	observe();
@@ -798,6 +821,91 @@ void degenerateGeometry()
 		"section separators and dividers stay inside their bounds");
 }
 
+void fractionalValueAndPagedText()
+{
+	auto glyphs = kGlyphs;
+	glyphs['1'].advance = glyphs['2'].advance = 5.21f;
+	const FontView font{glyphs};
+	using enum style::TextRole;
+	const float width = font.measure("12", style::typeScale(Caption));
+	const float right = 700.f;
+	const float reconstructed = right - (right - width);
+	CHECK(reconstructed < width && width - reconstructed < 0.001f &&
+		fitText(font, "12", Caption, 1.f, reconstructed).bytes == 2,
+		"a measured width reconstituted at a distant origin does not elide due to roundoff");
+	CHECK(fitText(font, "12", Caption, 1.f, reconstructed - 0.1f).bytes != 2,
+		"a genuinely oversized run still elides");
+	DrawList draws;
+	for (const auto origin : {0.f, 700.f, 1920.f})
+		for (const auto scale : {1.f, 1.5f, 2.f})
+		{
+			draws.reset({2300.f, 200.f}, 9);
+			const auto area = rectangle({origin, 10.f}, {140.f, 30.f * scale});
+			Surface surface(draws, font, theme(), scale, draws.bounds());
+			surface.listRow(area, "", "12", style::State::Rest);
+			CHECK(countLayer(draws, -2) == 2, "trailing 12 fits at scale and coordinate origin");
+			for (const auto &quad : draws.quads())
+				CHECK(Clip{quad.rect}.intersect(area) == Clip{quad.rect}, "trailing glyphs remain inside the row");
+		}
+
+	const auto word = std::string(63, 'A');
+	const auto text = std::string("Recovery instruction\r\n\n") + word + "\nEnd.";
+	std::array<WrappedLine, 2> lines{};
+	std::string seen;
+	size_t offset = 0;
+	while (offset < text.size())
+	{
+		const auto remaining = std::string_view(text).substr(offset);
+		const auto page = paginateText(font, remaining, Body, 1.f, 60.f, lines, false);
+		CHECK(page.next > 0 && page.count > 0, "a bounded page advances even through newlines or an unbroken word");
+		if (!page.next)
+			break;
+		for (int i = 0; i < page.count; ++i)
+		{
+			const auto &line = lines[size_t(i)];
+			const auto piece = remaining.substr(line.begin, line.end - line.begin);
+			CHECK(!line.elided && textWidthFits(font.measure(piece, 1.f), 60.f),
+				"a detail page never elides and fits its allocated width");
+			seen += piece;
+		}
+		offset += page.next;
+	}
+	CHECK(offset == text.size() && seen.find(word) != std::string::npos && seen.ends_with("End."),
+		"paging exposes the complete unbroken word and final message");
+}
+
+void sharedSlotGeometry()
+{
+	using namespace style;
+	const SlotView plain{.icon = {}, .count = 2, .durability = {}, .progress = {}};
+	const auto box = rectangle({3.5f, 18.25f}, glm::vec2(36.f));
+	CHECK(size(resolveSlotGeometry(box, theme(), plain).icon).x == 26.f,
+		"ordinary occupied slots use the full 26-unit item well");
+	auto selected = plain;
+	selected.state = State::Selected | State::Focused;
+	CHECK(size(resolveSlotGeometry(box, theme(), selected).icon).x >= 22.f,
+		"a selected slot leaves room for a prominent icon even while focused");
+	const SlotView layered{.icon = {}, .count = 64,
+		.state = State::Pending | State::Focused | State::Selected | State::Pressed,
+		.durability = {}, .progress = 0.5f};
+	for (const auto extent : {glm::vec2(36.f), glm::vec2(50.5f), glm::vec2(22.f, 36.5f),
+			glm::vec2(12.5f), glm::vec2(0.3f), glm::vec2(0.f, 15.f), glm::vec2(-12.f)})
+	{
+		const auto bounds = rectangle({3.5f, 18.25f}, extent);
+		const auto art = resolveSlotGeometry(bounds, theme(), layered);
+		for (const auto lane : {art.icon, art.count, art.focus, art.selection, art.semantic, art.interaction, art.progress})
+			CHECK(lane.empty() || lane.intersect(bounds) == lane, "all art remains within fractional and small cells");
+		for (const auto lane : {art.selection, art.semantic, art.interaction, art.progress})
+		{
+			CHECK(lane.intersect(art.icon).empty() && lane.intersect(art.count).empty(),
+				"the indicator rails and track cannot cover the icon or quantity");
+			if (!lane.empty() && !art.focus.empty())
+				CHECK(lane.intersect(inset(art.focus, art.focusWidth)) == lane,
+					"the focus stroke stays outside the indicators");
+		}
+	}
+}
+
 void slotPaintingAndFallbacks()
 {
 	const auto paint = [](const SlotView &entry, DrawList &draws) {
@@ -855,7 +963,9 @@ void slotPaintingAndFallbacks()
 		"rejection owns the edge and marker when pending is also set");
 	for (const auto &ink : valid.quads())
 		if (ink.layer == -2)
-			CHECK(ink.rect.x >= 12.f, "the raised quantity stays clear of the pressed marker");
+			CHECK(ink.rect.x >= resolveSlotGeometry({{0.f, 0.f, 36.f, 36.f}}, theme(),
+				{.count = 42, .state = style::State::Pressed, .progress = 0.5f}).count.rect.x,
+				"the raised quantity stays clear of the pressed marker");
 
 	const auto grid = slotGrid({{0.f, 0.f, 400.f, 80.f}}, 9, 1, 4.f);
 	DrawList gridDraws;
@@ -1352,6 +1462,8 @@ int main()
 	textFitting();
 	formFields();
 	painting();
+	sharedSlotGeometry();
+	fractionalValueAndPagedText();
 	slotPaintingAndFallbacks();
 	hudMock();
 	liveHud();

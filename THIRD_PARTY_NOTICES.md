@@ -63,6 +63,7 @@ ships in `src/imgui/LICENSE.txt`.
 The pinned Dear ImGui 1.91.9 WIP source embeds ProggyClean.ttf, copyright (c) 2004, 2005
 Tristan Grimmer and uses the MIT terms in `src/imgui/LICENSE.txt`. The font
 attribution accompanies the compressed source in `src/imgui/imgui_draw.cpp`.
+The player UI uses ProggyClean as a diagnosed emergency startup fallback.
 The HUD, inventory and crafting component preview use the resource-pack
 atlas described above.
 

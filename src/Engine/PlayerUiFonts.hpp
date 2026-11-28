@@ -5,7 +5,9 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -42,12 +44,13 @@ struct BakedFace
 	uint32_t height{};
 	uint32_t sampleWidth{};
 	uint32_t sampleHeight{};
-	/// Glyph-pixel -> logical-unit factor (1 / framebufferScale), because the
-	/// face is rasterized at device resolution on high-DPI displays.
+	/// Glyph pixels back to the authored type size before the UI-role multiplier.
 	float fontScale{1.f};
 };
 
-/// Bake both weights in one bounded coverage atlas. Failed replacements keep
-/// the working atlas and both existing metric tables.
-bool bakeFace(float framebufferScale, BakedFace &out);
+inline constexpr float kSlateRasterPixels = 36.f;
+std::filesystem::path playerFontDirectory();
+bool bakeFace(float framebufferScale, BakedFace &out, std::string &error,
+	const std::filesystem::path &directory = playerFontDirectory(), float rasterPixels = kSlateRasterPixels);
+bool bakeEmergencyFace(float framebufferScale, BakedFace &out, std::string &error);
 } // namespace gameui

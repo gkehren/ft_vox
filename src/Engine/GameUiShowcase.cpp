@@ -60,6 +60,7 @@ void GameUiSample::invalidateLayout()
 void GameUiSample::resetScreens(Screen root)
 {
 	setInventoryView({});
+	resetInventoryFeedback();
 	cancelInventoryGesture();
 	m_screens.reset(root);
 	invalidateLayout();
@@ -111,6 +112,7 @@ void GameUiSample::back()
 	if (m_screens.top() == Screen::Inventory)
 	{
 		setInventoryView({});
+		resetInventoryFeedback();
 		cancelInventoryGesture();
 	}
 	if (m_screens.back())

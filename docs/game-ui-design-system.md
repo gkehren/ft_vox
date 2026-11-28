@@ -60,10 +60,17 @@ selection keeps its separate leading mark.
 `style::slotTokens` selects the outer edge by rejected, pending, selected
 and rest. The selection tab, three-dot pending mark or rejection mark,
 interaction slash or tick, and complete inner focus ring occupy separate
-regions. Item and count have independent backings; optional progress
-and durability use a separate lower band. The same `Surface::slot` paints
+regions. The geometry resolver reserves a rail only for visible cues.
+Ordinary icons use 26 units in a 36-unit slot. The opaque quantity badge
+can cover the lower-right corner of the item. Status, interaction and
+focus cannot cover either. Progress and durability use a separate lower
+band. Small cells omit secondary decorations before the border can crowd
+out the item. The same `Surface::slot` paints
 HUD, inventory and gallery slots. Rejection without a known slot identity
-uses the screen's status region.
+uses the screen's status region. A pending command suppresses inventory
+hover, press and interactive focus for every slot. Affected slots retain
+their semantic pending mark and known selection. The logical focus
+remains remembered until the player explicitly navigates or leaves.
 
 `GameUiStyle` asserts 4.5:1 for ordinary, secondary and disabled text and
 3:1 for operative cues. It verifies the filled-action keyline and linear
@@ -82,12 +89,16 @@ and [the distributed license](../ressources/fonts/source-sans-3/OFL.txt).
 
 `PlayerUiFonts.cpp` uses the existing vendored ImGui rasterizer in an
 independent bake. A single R8 coverage image contains both weights and
-their printable ASCII tables. The bake uses 15 pixels per em at 1×,
-clamps raster density to 0.75–4×, and limits the image to 512×1024. Measure,
+their printable ASCII tables. The fixed bake uses 36 pixels per em at 1×
+framebuffer density. Density adjustment caps the raster at 72 pixels per em
+and the image at 512×1024. UI zoom reuses the image. Measure,
 fit, paint and wrap use the same weight and metrics for each role. The
 editor retains the Regular metrics for glyphs, caret, selection, hit-testing
 and IME. Density replacement publishes both tables after the new GPU
-image succeeds, preserving the working image on failure.
+image succeeds, preserving the working image on failure. At startup,
+a missing, unreadable or damaged Source Sans asset identifies the file
+and failure before selecting the embedded MIT ProggyClean emergency
+face. Both weight tables then refer to that single working face.
 
 Missing-glyph policy: the baked table covers printable ASCII. Any scalar without
 a glyph renders as the documented `?` fallback, **once per Unicode scalar** (a

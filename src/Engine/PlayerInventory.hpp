@@ -64,6 +64,7 @@ struct InventoryView
 struct InventoryLayout
 {
 	Clip panel, title, instructions, status, recovery, hotbarLabel, close, drop, detail;
+	Clip feedback, reader, previousPage, nextPage;
 	SlotGrid main, hotbar;
 	float scale{};
 	bool compact{};
@@ -73,5 +74,7 @@ struct InventoryLayout
 };
 
 InventoryLayout inventoryLayout(Clip bounds, const style::Theme &theme, float scale);
+style::State inventorySlotState(const InventoryView &view, inventoryui::SlotId id,
+	bool hovered, bool pressed, bool focused);
 SlotView makeItemSlot(items::ItemStack stack, std::optional<uint64_t> atlasGeneration);
 } // namespace gameui

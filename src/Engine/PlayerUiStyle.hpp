@@ -204,6 +204,19 @@ struct Theme
 	Overlay overlay;
 };
 
+/// Authored slot composition at a 36-unit cell. Scaled together by the resolver.
+struct SlotArt
+{
+	static constexpr float icon = 26.f;
+	static constexpr float focusInset = 3.f;
+	static constexpr float rail = 7.f;
+	static constexpr float compactRail = 4.f;
+	static constexpr float countHeight = 13.f;
+	static constexpr float countWidth = 20.f;
+	static constexpr float progressHeight = 2.f;
+	static constexpr float detailThreshold = 16.f;
+};
+
 /// The single baseline theme. Authored at 100%; the player UI scale is applied
 /// by the callers (see PlayerUiScale.hpp) so tokens stay resolution-free.
 inline const Theme &baseline()
@@ -276,6 +289,7 @@ enum class State : uint8_t
 	Disabled = 1u << 4,
 	Pending = 1u << 5,
 	Error = 1u << 6,
+	Unavailable = 1u << 7, // semantic status still visible, no interaction cues
 };
 
 inline constexpr State operator|(State a, State b)
@@ -304,7 +318,7 @@ inline constexpr bool disabled(State state)
 /// the player what is selected (issue #302 F15).
 inline constexpr State settleState(State state)
 {
-	if (!disabled(state))
+	if (!disabled(state) && !has(state, State::Unavailable))
 		return state;
 	const auto interaction = static_cast<uint8_t>(State::Focused | State::Hovered | State::Pressed);
 	const auto flags = static_cast<uint8_t>(state) & static_cast<uint8_t>(~interaction);
@@ -331,7 +345,7 @@ inline constexpr State interactiveState(bool enabled, bool hovered, bool pressed
 
 // --- Resolved component tokens --------------------------------------------
 
-enum class ButtonVariant : uint8_t { Primary = 0, Secondary, Quiet, Danger };
+enum class ButtonVariant : uint8_t { Primary = 0, Secondary, Quiet, Danger, DangerOutline };
 
 struct ControlTokens
 {
@@ -354,6 +368,9 @@ inline ControlTokens buttonTokens(const Theme &theme, ButtonVariant variant, Sta
 	ControlTokens out{};
 	if (disabled(state))
 		return {p.surfaceSunken, p.inkDisabled, p.border};
+	if (variant == ButtonVariant::DangerOutline)
+		return {has(state, State::Pressed) ? p.surfaceRaised :
+			has(state, State::Hovered) ? p.control : p.surfaceSunken, p.error, p.error};
 	if (variant == ButtonVariant::Primary || danger)
 	{
 		out.face = has(state, State::Pressed) ? accentPressed : accent;

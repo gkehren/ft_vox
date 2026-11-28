@@ -55,6 +55,18 @@ struct SlotView
 	bool empty() const { return count == 0; }
 };
 
+struct SlotGeometry
+{
+	Clip frame{}, icon{}, count{}, focus{}, selection{}, semantic{}, interaction{}, progress{};
+	float unit{};
+	float borderWidth{};
+	float focusWidth{};
+};
+
+/// A count plate may cover the lower right of the item. All other regions are
+/// disjoint from the item, the count and the focus perimeter.
+SlotGeometry resolveSlotGeometry(Clip bounds, const style::Theme &theme, const SlotView &slot);
+
 /// Grid geometry for a hotbar strip or an inventory grid. Cell edges derive
 /// from the bounds so a screen can hand the whole area to the grid.
 struct SlotGrid
@@ -86,6 +98,12 @@ int centeredSlotIndexAt(Clip bounds, int count, float cell, float gap, glm::vec2
 
 /// "99+" style stack badge: no allocation, caller-owned buffer.
 std::string_view formatCount(uint32_t count, char (&buffer)[8]);
+
+struct TextBlock
+{
+	std::array<WrappedLine, kMaxWrappedLines> lines{};
+	TextPage page{};
+};
 
 // --- Tooltip ---------------------------------------------------------------
 
@@ -277,6 +295,10 @@ public:
 	/// own leading inside `rect`, with the last line elided when text remains.
 	/// Paints nothing that does not fit and returns the number of lines painted,
 	/// so session feedback never spills out of its band.
+	TextBlock layoutTextBlock(Clip rect, std::string_view text, style::TextRole role,
+		int maxLines, bool ellipsize) const;
+	void paintTextBlock(Clip rect, std::string_view text, style::TextRole role,
+		glm::vec4 color, const TextBlock &block) const;
 	int wrappedLabel(Clip rect, std::string_view text, style::TextRole role, glm::vec4 color,
 					 int maxLines) const;
 	/// One line advance for a wrapped run of `role` (measured in the same
